@@ -99,6 +99,7 @@ describe("tools and policy", () => {
     const root = await workspace();
     const registry = new ToolRegistry();
     await writeFile(join(root, "note.txt"), "Codex Agent Session", "utf8");
+    await writeFile(join(root, "package.json"), "{\"bin\":{\"cosia\":\"dist/src/cli.js\"}}", "utf8");
     await mkdir(join(root, "src"), { recursive: true });
     await writeFile(join(root, "src", "cli.ts"), "program.command(\"status\")", "utf8");
 
@@ -122,6 +123,14 @@ describe("tools and policy", () => {
     expect(pathSearch.ok).toBe(true);
     expect(pathSearch.content).toContain("Path matches:");
     expect(pathSearch.content).toContain("src/cli.ts");
+
+    const combinedPathSearch = await registry.execute("search_files", { query: "package.json README src/index src/cli bin" }, {
+      workspaceRoot: root,
+      allowedTools: ["search_files"]
+    });
+    expect(combinedPathSearch.ok).toBe(true);
+    expect(combinedPathSearch.content).toContain("package.json");
+    expect(combinedPathSearch.content).toContain("src/cli.ts");
   });
 });
 

@@ -138,7 +138,10 @@ async function findPathMatches(query: string, directory: string): Promise<string
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => toDisplayPath(line, directory))
-      .filter((path) => matchesPathQuery(path, query))
+      .map((path) => ({ path, score: scorePathQuery(path, query) }))
+      .filter((match) => match.score > 0)
+      .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+      .map((match) => match.path)
       .slice(0, 40);
   } catch {
     return [];
@@ -169,7 +172,7 @@ function toDisplayPath(path: string, directory: string): string {
   return display.replaceAll("\\", "/");
 }
 
-function matchesPathQuery(path: string, query: string): boolean {
+function scorePathQuery(path: string, query: string): number {
   const pathText = path.toLowerCase();
   const normalizedQuery = query
     .toLowerCase()
@@ -177,8 +180,24 @@ function matchesPathQuery(path: string, query: string): boolean {
     .replaceAll("\\", "/")
     .trim();
   if (normalizedQuery && pathText.includes(normalizedQuery)) {
-    return true;
+    return 1000 + normalizedQuery.length;
   }
-  const tokens = normalizedQuery.split(/[^a-z0-9_.-]+/i).filter((token) => token.length >= 2);
-  return tokens.length > 0 && tokens.every((token) => pathText.includes(token));
+  const tokens = pathQueryTokens(normalizedQuery);
+  return tokens.reduce((score, token) => {
+    if (!pathText.includes(token)) {
+      return score;
+    }
+    const structuralBonus = token.includes("/") || token.includes(".") ? 20 : 0;
+    const boundaryBonus = pathText.includes(`/${token}`) || pathText.includes(`${token}.`) ? 10 : 0;
+    return score + token.length + structuralBonus + boundaryBonus;
+  }, 0);
+}
+
+function pathQueryTokens(query: string): string[] {
+  const rawTokens = query.match(/[a-z0-9_./-]+/gi) ?? [];
+  const expanded = rawTokens.flatMap((token) => {
+    const parts = token.split(/[/-]+/).filter(Boolean);
+    return [token, ...parts];
+  });
+  return [...new Set(expanded.filter((token) => token.length >= 2))];
 }
