@@ -3,11 +3,14 @@ import { Command } from "commander";
 import { AgentManager } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { MemoryManager } from "./runtime/memory_manager.js";
+import { PolicyAuditLog } from "./runtime/policy_audit.js";
+import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
 import { memoryScopeSchema } from "./runtime/types.js";
 import { COSIA_VERSION } from "./runtime/version.js";
+import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
 
 const program = new Command();
 
@@ -42,7 +45,7 @@ program
       const created = await initProject(workspaceRoot);
       console.log(`Initialized runtime in ${workspaceRoot}`);
       console.log(created.map((item) => `- ${item}`).join("\n"));
-    });
+    }, { allowUninitialized: true });
   });
 
 const agent = program.command("agent").description("Manage agents.");
@@ -226,6 +229,66 @@ candidate
     });
   });
 
+const policy = program.command("policy").description("Inspect and maintain runtime policy.");
+
+policy
+  .command("show")
+  .description("Show the active policy summary.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const manager = new PolicyManager(workspaceRoot);
+      console.log(formatPolicySummary(await manager.loadPolicy()));
+    });
+  });
+
+policy
+  .command("check")
+  .description("Validate policy JSON and Markdown mirror.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const result = await new PolicyManager(workspaceRoot).checkPolicy(true);
+      if (result.created.length) {
+        console.log(`Created: ${result.created.join(", ")}`);
+      }
+      console.log(`POLICY.json: ${result.jsonExists && result.jsonValid ? "ok" : "failed"}`);
+      console.log(`POLICY.md: ${result.markdownExists && result.markdownMatches ? "ok" : "failed"}`);
+      if (result.errors.length) {
+        console.log(result.errors.map((error) => `- ${error}`).join("\n"));
+      }
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
+    });
+  });
+
+policy
+  .command("sync")
+  .description("Regenerate POLICY.md from POLICY.json.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      await new PolicyManager(workspaceRoot).syncMarkdown();
+      console.log("Synced codex/POLICY.md from codex/POLICY.json");
+    });
+  });
+
+policy
+  .command("audit")
+  .requiredOption("--session <session-id>", "Session id")
+  .option("--limit <limit>", "Result limit", "20")
+  .description("Show policy audit events for one session.")
+  .action(async (options: { session: string; limit: string }) => {
+    await main(async (workspaceRoot) => {
+      const events = await new PolicyAuditLog(workspaceRoot).list(options.session, Number.parseInt(options.limit, 10));
+      if (!events.length) {
+        console.log("No policy audit events.");
+        return;
+      }
+      for (const event of events) {
+        console.log(JSON.stringify(event));
+      }
+    });
+  });
+
 program
   .command("run")
   .requiredOption("--session <session-id>", "Session id")
@@ -255,9 +318,12 @@ program.parseAsync(process.argv).catch((error: unknown) => {
   process.exitCode = 1;
 });
 
-async function main(fn: (workspaceRoot: string) => Promise<void>): Promise<void> {
+async function main(fn: (workspaceRoot: string) => Promise<void>, options: { allowUninitialized?: boolean } = {}): Promise<void> {
   try {
-    await fn(process.cwd());
+    const workspaceRoot = options.allowUninitialized
+      ? await workspaceRootForInit(process.cwd())
+      : await requireWorkspaceRoot(process.cwd());
+    await fn(workspaceRoot);
   } catch (error) {
     console.error((error as Error).message);
     process.exitCode = 1;

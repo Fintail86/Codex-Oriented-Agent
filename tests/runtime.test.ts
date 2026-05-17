@@ -6,12 +6,15 @@ import { AgentManager } from "../src/runtime/agent_manager.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { MemoryManager } from "../src/runtime/memory_manager.js";
 import { parseModelOutput } from "../src/runtime/model/model_provider.js";
+import { PolicyAuditLog } from "../src/runtime/policy_audit.js";
+import { PolicyManager } from "../src/runtime/policy_manager.js";
 import { buildPrompt } from "../src/runtime/prompt_builder.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import type { ModelProvider } from "../src/runtime/types.js";
+import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspace.js";
 
 const tempRoots: string[] = [];
 
@@ -44,6 +47,8 @@ describe("runtime setup", () => {
     expect(manifest.allowedTools).toEqual(["read_file", "write_file", "search_files"]);
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.3.0\"");
+    expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
   });
 
   it("builds prompts in the required order", async () => {
@@ -56,6 +61,7 @@ describe("runtime setup", () => {
 
     const order = [
       "codex/SECURITY.md",
+      "codex/POLICY.md",
       "codex/RULES.md",
       "codex/SOUL.md",
       "codex/USER.md",
@@ -75,7 +81,7 @@ describe("runtime setup", () => {
 
 describe("tools and policy", () => {
   it("denies writes outside the workspace and denies overwrite without approval", async () => {
-    const root = await workspace();
+    const root = await initializedWorkspace();
     const registry = new ToolRegistry();
     await writeFile(join(root, "existing.txt"), "old", "utf8");
 
@@ -96,7 +102,7 @@ describe("tools and policy", () => {
   });
 
   it("reads and searches workspace files", async () => {
-    const root = await workspace();
+    const root = await initializedWorkspace();
     const registry = new ToolRegistry();
     await writeFile(join(root, "note.txt"), "Codex Agent Session", "utf8");
     await writeFile(join(root, "package.json"), "{\"bin\":{\"cosia\":\"dist/src/cli.js\"}}", "utf8");
@@ -131,6 +137,40 @@ describe("tools and policy", () => {
     expect(combinedPathSearch.ok).toBe(true);
     expect(combinedPathSearch.content).toContain("package.json");
     expect(combinedPathSearch.content).toContain("src/cli.ts");
+  });
+});
+
+describe("policy core", () => {
+  it("checks and syncs policy JSON and Markdown mirror", async () => {
+    const root = await initializedWorkspace();
+    const manager = new PolicyManager(root);
+
+    const initial = await manager.checkPolicy();
+    expect(initial.ok).toBe(true);
+
+    await writeFile(join(root, "codex", "POLICY.md"), "# stale\n", "utf8");
+    const stale = await manager.checkPolicy();
+    expect(stale.ok).toBe(false);
+    expect(stale.markdownMatches).toBe(false);
+
+    await manager.syncMarkdown();
+    const synced = await manager.checkPolicy();
+    expect(synced.ok).toBe(true);
+
+    await writeFile(join(root, "codex", "POLICY.json"), "{}", "utf8");
+    const invalid = await manager.checkPolicy();
+    expect(invalid.jsonValid).toBe(false);
+  });
+
+  it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
+    const root = await initializedWorkspace();
+    const nested = join(root, "tmp", "nested");
+    await mkdir(nested, { recursive: true });
+
+    expect(await findWorkspaceRoot(nested)).toBe(root);
+
+    const outside = await workspace();
+    await expect(requireWorkspaceRoot(outside)).rejects.toThrow("COSIA workspace not found");
   });
 });
 
@@ -247,6 +287,61 @@ describe("model parsing and run loop", () => {
     const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
     expect(context).toContain("Tools:");
     expect(context).toContain("search_files");
+
+    const audit = await new PolicyAuditLog(root).list(session.id, 10);
+    expect(audit.some((event) => event.eventType === "tool_decision" && event.allowed && event.tool === "search_files")).toBe(true);
+  });
+
+  it("records denied workspace access and overwrite approval requirements in policy audit", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const deniedSession = await sessions.createSession("architect-agent", "Audit denied access");
+    let deniedCalls = 0;
+    const deniedProvider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async () => {
+        deniedCalls += 1;
+        if (deniedCalls === 1) {
+          return parseModelOutput('{"type":"tool_call","tool":"read_file","args":{"path":"../outside.txt"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"done","memoryCandidates":[]}');
+      }
+    };
+
+    await runSession(root, {
+      sessionId: deniedSession.id,
+      prompt: "Try outside read",
+      provider: deniedProvider
+    });
+    const deniedAudit = await new PolicyAuditLog(root).list(deniedSession.id, 10);
+    expect(deniedAudit.some((event) => !event.allowed && event.ruleId === "workspace.inside_only")).toBe(true);
+
+    const overwriteSession = await sessions.createSession("architect-agent", "Audit overwrite approval");
+    let overwriteCalls = 0;
+    const overwriteProvider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async () => {
+        overwriteCalls += 1;
+        if (overwriteCalls === 1) {
+          return parseModelOutput('{"type":"tool_call","tool":"write_file","args":{"path":"codex/RULES.md","content":"secret token sk-testsecret123456"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"done","memoryCandidates":[]}');
+      }
+    };
+
+    await runSession(root, {
+      sessionId: overwriteSession.id,
+      prompt: "Try overwrite",
+      provider: overwriteProvider
+    });
+    const overwriteAudit = await new PolicyAuditLog(root).list(overwriteSession.id, 10);
+    expect(overwriteAudit.some((event) => event.eventType === "approval_required" && event.ruleId === "write.overwrite_approval_required")).toBe(true);
+    expect(JSON.stringify(overwriteAudit)).not.toContain("sk-testsecret");
+    expect(JSON.stringify(overwriteAudit)).toContain("[content:");
   });
 
   it("does not count write_file as satisfying requireTools", async () => {
@@ -335,6 +430,8 @@ describe("model parsing and run loop", () => {
     expect(calls).toBe(4);
     const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
     expect(context).toContain("search_files, read_file");
+    const audit = await new PolicyAuditLog(root).list(session.id, 10);
+    expect(audit.some((event) => event.eventType === "final_rejection" && event.ruleId === "runtime.file_inspection.read_file_required")).toBe(true);
   });
 });
 
@@ -342,7 +439,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.2.0");
+    expect(emptyReport.version).toBe("0.3.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

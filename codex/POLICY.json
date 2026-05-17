@@ -1,0 +1,68 @@
+{
+  "version": "0.3.0",
+  "tools": {
+    "read_file": {
+      "permission": "read_only",
+      "workspace": "inside_only",
+      "enabled": true
+    },
+    "write_file": {
+      "permission": "write_local",
+      "workspace": "inside_only",
+      "enabled": true
+    },
+    "search_files": {
+      "permission": "read_only",
+      "workspace": "inside_only",
+      "enabled": true
+    }
+  },
+  "disabledPermissions": [
+    "destructive",
+    "network",
+    "external_send",
+    "shell"
+  ],
+  "overwrite": {
+    "existingFileRequiresApproval": true
+  },
+  "requireTools": {
+    "observationTools": [
+      "read_file",
+      "search_files"
+    ],
+    "writeFileSatisfies": false
+  },
+  "fileInspection": {
+    "requiresReadFile": true,
+    "triggerPhrases": [
+      "파일을 보고",
+      "실제 파일",
+      "파일 기준",
+      "파일 내용",
+      "파일을 확인",
+      "read_file",
+      "actual file",
+      "actual files",
+      "inspect file",
+      "inspect files",
+      "read the file",
+      "read files",
+      "from the file",
+      "from files"
+    ]
+  },
+  "memory": {
+    "longTermWrite": "candidate_promote_only",
+    "candidateScopes": [
+      "global",
+      "user",
+      "codex",
+      "agent",
+      "project",
+      "session",
+      "task",
+      "tool"
+    ]
+  }
+}

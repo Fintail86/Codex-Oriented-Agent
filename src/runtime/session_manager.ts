@@ -26,6 +26,7 @@ export class SessionManager {
     await writeTextIfMissing(join(sessionDir, "CONTEXT_MEMORY.md"), "# CONTEXT MEMORY\n\n");
     await writeTextIfMissing(join(sessionDir, "REF_MEMORY.md"), "# REFERENCE MEMORY\n\nNo reference memory loaded yet.\n");
     await writeTextIfMissing(join(sessionDir, "NOTES.md"), "# NOTES\n\n");
+    await writeTextIfMissing(join(sessionDir, "POLICY_AUDIT.jsonl"), "");
     return metadata;
   }
 

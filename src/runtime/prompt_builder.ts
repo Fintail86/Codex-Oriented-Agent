@@ -16,7 +16,7 @@ type PromptInput = {
   forceFinal?: boolean;
 };
 
-const codexFiles = ["SECURITY.md", "RULES.md", "SOUL.md", "USER.md"] as const;
+const codexFiles = ["SECURITY.md", "POLICY.md", "RULES.md", "SOUL.md", "USER.md"] as const;
 
 export async function buildPrompt(input: PromptInput): Promise<string> {
   const blocks: Array<{ title: string; content: string }> = [];

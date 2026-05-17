@@ -3,6 +3,8 @@ import { approveOverwrite } from "./approval_gate.js";
 import { AgentManager } from "./agent_manager.js";
 import { MemoryManager } from "./memory_manager.js";
 import { createProvider } from "./model/provider_registry.js";
+import { PolicyAuditLog } from "./policy_audit.js";
+import { PolicyManager } from "./policy_manager.js";
 import { buildPrompt } from "./prompt_builder.js";
 import { SessionManager } from "./session_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
@@ -26,6 +28,9 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const tools = new ToolRegistry();
   const session = await sessions.loadSession(options.sessionId);
   const agent = await agents.loadAgent(session.agentId);
+  const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const audit = new PolicyAuditLog(workspaceRoot);
+  const recordPolicyEvent = audit.append.bind(audit, session);
   await memory.writeReferenceMemory(session, options.prompt);
 
   const provider = options.provider ?? createProvider(options.providerId ?? "codex-cli", workspaceRoot, options.providerTimeoutMs);
@@ -45,7 +50,9 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const maxToolCalls = 5;
   const maxModelAttempts = maxToolCalls + 2;
   let toolCallCount = 0;
-  const requiresFileRead = Boolean(options.requireTools && asksForActualFiles(options.prompt));
+  const requiresFileRead = Boolean(
+    options.requireTools && policy.fileInspection.requiresReadFile && asksForActualFiles(options.prompt, policy.fileInspection.triggerPhrases)
+  );
 
   for (let depth = 0; depth < maxModelAttempts; depth += 1) {
     const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
@@ -69,6 +76,12 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     if (output.step.type === "final") {
       if (options.requireTools && !hasObservationTool) {
         options.onEvent?.("final rejected because require-tools has not observed with read_file/search_files yet");
+        await recordPolicyEvent({
+          eventType: "final_rejection",
+          allowed: false,
+          ruleId: "runtime.require_tools.observation",
+          reason: "Final answer rejected because no observation tool has run."
+        });
         toolResults.push(
           "Runtime rejection: current mode is require-tools. You must call read_file or search_files at least once before returning final."
         );
@@ -76,6 +89,12 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       }
       if (requiresFileRead && !hasReadFile) {
         options.onEvent?.("final rejected because current request requires read_file before final");
+        await recordPolicyEvent({
+          eventType: "final_rejection",
+          allowed: false,
+          ruleId: "runtime.file_inspection.read_file_required",
+          reason: "Final answer rejected because explicit file inspection requires read_file."
+        });
         toolResults.push(
           "Runtime rejection: the current request asks to inspect actual files. search_files only finds candidate paths; call read_file on a relevant path before returning final."
         );
@@ -95,7 +114,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     const result = await tools.execute(output.step.tool, output.step.args, {
       workspaceRoot,
       allowedTools: agent.allowedTools,
-      approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false
+      approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false,
+      policyAudit: recordPolicyEvent
     });
     toolCallCount += 1;
     options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
@@ -136,8 +156,12 @@ ${finalContent}
 `;
 }
 
-function asksForActualFiles(prompt: string): boolean {
+function asksForActualFiles(prompt: string, triggerPhrases = defaultFileInspectionPhrases()): boolean {
   const normalized = prompt.toLowerCase();
+  return triggerPhrases.some((needle) => normalized.includes(needle.toLowerCase()));
+}
+
+function defaultFileInspectionPhrases(): string[] {
   return [
     "파일을 보고",
     "실제 파일",
@@ -153,5 +177,5 @@ function asksForActualFiles(prompt: string): boolean {
     "read files",
     "from the file",
     "from files"
-  ].some((needle) => normalized.includes(needle));
+  ];
 }

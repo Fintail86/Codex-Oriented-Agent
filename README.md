@@ -1,8 +1,8 @@
-# COSIA v0.2
+# COSIA v0.3
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scoped SQLite memory, policy-gated tools, memory candidate review, require-tools execution discipline, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scoped SQLite memory, executable policy core, policy-gated tools, memory candidate review, require-tools execution discipline, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -94,6 +94,10 @@ cosia memory candidate list
 cosia memory candidate show <candidate-id>
 cosia memory candidate promote <candidate-id>
 cosia memory candidate discard <candidate-id> --reason "<reason>"
+cosia policy show
+cosia policy check
+cosia policy sync
+cosia policy audit --session <session-id> --limit <n>
 cosia status
 cosia session list
 cosia session show <session-id>
@@ -104,12 +108,27 @@ cosia session show <session-id>
 - `read_file` and `search_files` are read-only workspace tools.
 - `write_file` can only write inside the workspace.
 - Existing file overwrite requires explicit approval.
-- Destructive, network, external-send, and shell tools are not registered in v0.2.
+- `codex/POLICY.json` is the runtime policy source of truth.
+- `codex/POLICY.md` mirrors the JSON policy for humans.
+- Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
+- Destructive, network, external-send, and shell tools are not registered in v0.3.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
 - `write_file` does not satisfy `--require-tools`; it is not an observation tool.
 - Codex provider calls have a default per-call timeout of 120000ms.
 - Memory candidates are written to `memory/memory_candidates.jsonl` and must be explicitly promoted.
+- CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
+
+## Policy
+
+```powershell
+cosia policy show
+cosia policy check
+cosia policy sync
+cosia policy audit --session <session-id> --limit 20
+```
+
+`policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source.
 
 ## Memory Candidate Review
 
@@ -132,3 +151,9 @@ cosia memory candidate promote d1ec6de4
 ```powershell
 npm test
 ```
+
+## Roadmap
+
+- v0.4: Memory intelligence, conflict review, archive/update flows.
+- v0.5: Skill candidate loop with manual promotion.
+- v0.6: Codex amendment gate for constitutional changes.

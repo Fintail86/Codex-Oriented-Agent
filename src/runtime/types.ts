@@ -121,6 +121,7 @@ export type ToolContext = {
   workspaceRoot: string;
   allowedTools: ToolName[];
   approveOverwrite?: (filePath: string) => Promise<boolean>;
+  policyAudit?: (event: PolicyAuditEventInput) => Promise<void>;
 };
 
 export type ToolResult = {
@@ -150,3 +151,21 @@ export type MemoryRecord = {
   updatedAt: string;
   lastAccessedAt: string | null;
 };
+
+export type PolicyAuditEventType = "tool_decision" | "final_rejection" | "approval_required";
+
+export type PolicyAuditEvent = {
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  agentId: string;
+  eventType: PolicyAuditEventType;
+  allowed: boolean;
+  ruleId: string;
+  reason: string;
+  tool?: ToolName;
+  permission?: ToolPermission;
+  argsSummary?: Record<string, unknown>;
+};
+
+export type PolicyAuditEventInput = Omit<PolicyAuditEvent, "id" | "timestamp" | "sessionId" | "agentId">;

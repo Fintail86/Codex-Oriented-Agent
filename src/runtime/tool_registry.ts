@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { stat } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { readText, resolveExistingInside, resolveInside, writeText } from "./fs_utils.js";
+import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
+import { PolicyManager } from "./policy_manager.js";
 import type { ToolContext, ToolDefinition, ToolName, ToolResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -25,7 +26,6 @@ const searchFilesArgs = z.object({
 
 export class ToolRegistry {
   private readonly tools = new Map<ToolName, ToolDefinition>();
-  private readonly policy = new PolicyEngine();
 
   constructor() {
     this.register({
@@ -43,12 +43,6 @@ export class ToolRegistry {
       execute: async (args, ctx) => {
         const parsed = writeFileArgs.parse(args);
         const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
-        if (await isExistingFile(resolved)) {
-          const approved = ctx.approveOverwrite ? await ctx.approveOverwrite(resolved) : false;
-          if (!approved) {
-            return { ok: false, content: `Overwrite denied: ${parsed.path}` };
-          }
-        }
         await writeText(resolved, parsed.content);
         return { ok: true, content: `Wrote ${parsed.path}` };
       }
@@ -83,30 +77,56 @@ export class ToolRegistry {
 
   async execute(name: ToolName, args: unknown, ctx: ToolContext): Promise<ToolResult> {
     try {
+      const tool = this.get(name);
+      const argsSummary = summarizePolicyArgs(args);
       if (!ctx.allowedTools.includes(name)) {
+        await ctx.policyAudit?.({
+          eventType: "tool_decision",
+          allowed: false,
+          ruleId: "agent.allowed_tools",
+          reason: `Tool is not allowed for this agent: ${name}`,
+          tool: name,
+          permission: tool.permission,
+          argsSummary
+        });
         return { ok: false, content: `Tool is not allowed for this agent: ${name}` };
       }
-      const tool = this.get(name);
-      const decision = this.policy.evaluate(tool, args, ctx.workspaceRoot);
+      const policy = await new PolicyManager(ctx.workspaceRoot).loadPolicy();
+      const engine = new PolicyEngine(policy);
+      const decision = engine.evaluate(tool, args, ctx.workspaceRoot);
+      await ctx.policyAudit?.({
+        eventType: "tool_decision",
+        allowed: decision.allowed,
+        ruleId: decision.ruleId,
+        reason: decision.reason,
+        tool: name,
+        permission: tool.permission,
+        argsSummary
+      });
       if (!decision.allowed) {
         return { ok: false, content: decision.reason };
+      }
+      if (name === "write_file" && await engine.requiresOverwriteApproval(args, ctx.workspaceRoot)) {
+        await ctx.policyAudit?.({
+          eventType: "approval_required",
+          allowed: false,
+          ruleId: "write.overwrite_approval_required",
+          reason: "Existing file overwrite requires approval.",
+          tool: name,
+          permission: tool.permission,
+          argsSummary
+        });
+        const parsed = writeFileArgs.parse(args);
+        const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
+        const approved = ctx.approveOverwrite ? await ctx.approveOverwrite(resolved) : false;
+        if (!approved) {
+          return { ok: false, content: `Overwrite denied: ${parsed.path}` };
+        }
       }
       return await tool.execute(args, ctx);
     } catch (error) {
       return { ok: false, content: (error as Error).message };
     }
-  }
-}
-
-async function isExistingFile(path: string): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    return info.isFile();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return false;
-    }
-    throw error;
   }
 }
 
