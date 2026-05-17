@@ -127,10 +127,11 @@ cosia policy check
 cosia policy sync
 cosia policy audit --session <session-id> --limit 20
 cosia policy audit --session <session-id> --latest-run
+cosia policy audit --session <session-id> --latest-run --json
 ```
 
 `policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source.
-Policy audit logs are append-only per session. Each new `run` writes a `runId`, so `--latest-run` or `--run-id <id>` can focus the output. Clear/archive commands are intentionally deferred to a later maintenance pass.
+Policy audit logs are append-only per session. Each new `run` writes a `runId`, so `--latest-run` or `--run-id <id>` can focus the output. The default audit output is a readable summary; use `--json` for raw events. Clear/archive commands are intentionally deferred to a later maintenance pass.
 
 ## Memory Candidate Review
 

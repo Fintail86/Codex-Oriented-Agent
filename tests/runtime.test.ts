@@ -6,7 +6,7 @@ import { AgentManager } from "../src/runtime/agent_manager.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { MemoryManager } from "../src/runtime/memory_manager.js";
 import { parseModelOutput } from "../src/runtime/model/model_provider.js";
-import { PolicyAuditLog } from "../src/runtime/policy_audit.js";
+import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { PolicyManager } from "../src/runtime/policy_manager.js";
 import { buildPrompt } from "../src/runtime/prompt_builder.js";
 import { runSession } from "../src/runtime/runner.js";
@@ -291,6 +291,10 @@ describe("model parsing and run loop", () => {
     const audit = await new PolicyAuditLog(root).list(session.id, 10);
     expect(audit.some((event) => event.eventType === "tool_decision" && event.allowed && event.tool === "search_files")).toBe(true);
     expect(audit.every((event) => event.runId)).toBe(true);
+    const formatted = formatPolicyAuditEvents(audit);
+    expect(formatted).toContain("Run:");
+    expect(formatted).toContain("ALLOW  tool_decision");
+    expect(formatted).not.toContain("\"eventType\"");
   });
 
   it("filters policy audit events by latest run and run id", async () => {

@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { AgentManager } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { MemoryManager } from "./runtime/memory_manager.js";
-import { PolicyAuditLog } from "./runtime/policy_audit.js";
+import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
@@ -277,8 +277,9 @@ policy
   .option("--limit <limit>", "Result limit", "20")
   .option("--run-id <run-id>", "Show only events from one run id")
   .option("--latest-run", "Show only events from the latest run id", false)
+  .option("--json", "Print raw JSON events.", false)
   .description("Show policy audit events for one session.")
-  .action(async (options: { session: string; limit: string; runId?: string; latestRun: boolean }) => {
+  .action(async (options: { session: string; limit: string; runId?: string; latestRun: boolean; json: boolean }) => {
     await main(async (workspaceRoot) => {
       const events = await new PolicyAuditLog(workspaceRoot).list(options.session, {
         limit: Number.parseInt(options.limit, 10),
@@ -289,9 +290,13 @@ policy
         console.log("No policy audit events.");
         return;
       }
-      for (const event of events) {
-        console.log(JSON.stringify(event));
+      if (options.json) {
+        for (const event of events) {
+          console.log(JSON.stringify(event));
+        }
+        return;
       }
+      console.log(formatPolicyAuditEvents(events));
     });
   });
 

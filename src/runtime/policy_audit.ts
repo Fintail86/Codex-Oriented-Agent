@@ -53,6 +53,73 @@ export class PolicyAuditLog {
   }
 }
 
+export function formatPolicyAuditEvents(events: PolicyAuditEvent[]): string {
+  const groups = groupEventsByRun(events);
+  const lines: string[] = [];
+
+  for (const [groupIndex, group] of groups.entries()) {
+    if (groupIndex > 0) {
+      lines.push("");
+    }
+    const runLabel = group.runId ?? "legacy/no-run-id";
+    lines.push(`Run: ${runLabel}`);
+    lines.push(`Session: ${group.events[0]?.sessionId ?? "unknown"}`);
+    lines.push(`Agent: ${group.events[0]?.agentId ?? "unknown"}`);
+    lines.push(`Events: ${group.events.length}`);
+    lines.push("");
+
+    for (const [index, event] of group.events.entries()) {
+      const result = event.allowed ? "ALLOW" : "DENY";
+      lines.push(`${index + 1}. ${event.timestamp}  ${result}  ${event.eventType}`);
+      lines.push(`   rule: ${event.ruleId}`);
+      if (event.tool) {
+        const permission = event.permission ? ` (${event.permission})` : "";
+        lines.push(`   tool: ${event.tool}${permission}`);
+      }
+      if (event.reason) {
+        lines.push(`   reason: ${event.reason}`);
+      }
+      const args = formatArgsSummary(event.argsSummary);
+      if (args) {
+        lines.push(`   args: ${args}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function groupEventsByRun(events: PolicyAuditEvent[]): Array<{ runId?: string; events: PolicyAuditEvent[] }> {
+  const groups: Array<{ runId?: string; events: PolicyAuditEvent[] }> = [];
+  for (const event of events) {
+    const last = groups.at(-1);
+    if (last && last.runId === event.runId) {
+      last.events.push(event);
+      continue;
+    }
+    groups.push({ runId: event.runId, events: [event] });
+  }
+  return groups;
+}
+
+function formatArgsSummary(argsSummary?: Record<string, unknown>): string {
+  if (!argsSummary || !Object.keys(argsSummary).length) {
+    return "";
+  }
+  return Object.entries(argsSummary)
+    .map(([key, value]) => `${key}=${formatArgValue(value)}`)
+    .join(", ");
+}
+
+function formatArgValue(value: unknown): string {
+  const raw = typeof value === "string" ? value : JSON.stringify(value);
+  if (raw === undefined) {
+    return "undefined";
+  }
+  const clipped = raw.length > 120 ? `${raw.slice(0, 117)}...` : raw;
+  return JSON.stringify(clipped);
+}
+
 function filterAuditEvents(events: PolicyAuditEvent[], options: PolicyAuditListOptions): PolicyAuditEvent[] {
   if (options.runId) {
     return events.filter((event) => event.runId === options.runId);
