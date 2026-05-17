@@ -10,6 +10,8 @@ type PromptInput = {
   toolResults?: string[];
   requireTools?: boolean;
   hasObservationTool?: boolean;
+  requiresFileRead?: boolean;
+  hasReadFile?: boolean;
   remainingToolCalls?: number;
   forceFinal?: boolean;
 };
@@ -47,6 +49,11 @@ export async function buildPrompt(input: PromptInput): Promise<string> {
           : ""
       }`
     : "";
+  const fileReadRequirementText = input.requiresFileRead
+    ? `\n\n# FILE-READ REQUIREMENT\n\nThe current request asks to inspect actual files. search_files is only for finding candidate paths. Before final, you must call read_file on at least one relevant file path.${
+        input.hasReadFile ? "\n\nThis requirement is already satisfied." : ""
+      }`
+    : "";
   const loopControlText = `\n\n# TOOL LOOP CONTROL\n\nRemaining executable tool calls: ${
     input.remainingToolCalls ?? 5
   }.${
@@ -75,6 +82,7 @@ For a final answer:
 Allowed tools for this agent: ${input.agent.allowedTools.join(", ")}
 Maximum tool loop depth: 5
 ${requireToolsText}
+${fileReadRequirementText}
 ${loopControlText}
 ${toolText}
 

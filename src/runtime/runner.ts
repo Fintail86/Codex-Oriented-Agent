@@ -39,11 +39,13 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const toolResults: string[] = [];
   const toolNames: string[] = [];
   let hasObservationTool = false;
+  let hasReadFile = false;
   let finalContent = "";
   let lastStep: AgentStep | undefined;
   const maxToolCalls = 5;
   const maxModelAttempts = maxToolCalls + 2;
   let toolCallCount = 0;
+  const requiresFileRead = Boolean(options.requireTools && asksForActualFiles(options.prompt));
 
   for (let depth = 0; depth < maxModelAttempts; depth += 1) {
     const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
@@ -57,6 +59,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       toolResults,
       requireTools: options.requireTools,
       hasObservationTool,
+      requiresFileRead,
+      hasReadFile,
       remainingToolCalls,
       forceFinal
     });
@@ -67,6 +71,13 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         options.onEvent?.("final rejected because require-tools has not observed with read_file/search_files yet");
         toolResults.push(
           "Runtime rejection: current mode is require-tools. You must call read_file or search_files at least once before returning final."
+        );
+        continue;
+      }
+      if (requiresFileRead && !hasReadFile) {
+        options.onEvent?.("final rejected because current request requires read_file before final");
+        toolResults.push(
+          "Runtime rejection: the current request asks to inspect actual files. search_files only finds candidate paths; call read_file on a relevant path before returning final."
         );
         continue;
       }
@@ -91,6 +102,9 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     toolNames.push(output.step.tool);
     if ((output.step.tool === "read_file" || output.step.tool === "search_files") && result.ok) {
       hasObservationTool = true;
+    }
+    if (output.step.tool === "read_file" && result.ok) {
+      hasReadFile = true;
     }
     toolResults.push(`Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`);
   }
@@ -120,4 +134,24 @@ ${toolNames.length ? toolNames.join(", ") : "none"}
 Final:
 ${finalContent}
 `;
+}
+
+function asksForActualFiles(prompt: string): boolean {
+  const normalized = prompt.toLowerCase();
+  return [
+    "파일을 보고",
+    "실제 파일",
+    "파일 기준",
+    "파일 내용",
+    "파일을 확인",
+    "read_file",
+    "actual file",
+    "actual files",
+    "inspect file",
+    "inspect files",
+    "read the file",
+    "read files",
+    "from the file",
+    "from files"
+  ].some((needle) => normalized.includes(needle));
 }

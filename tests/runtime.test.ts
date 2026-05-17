@@ -295,6 +295,44 @@ describe("model parsing and run loop", () => {
     expect(content).toBe("final after tools");
     expect(calls).toBe(6);
   });
+
+  it("requires read_file before final when the prompt asks to inspect actual files", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Inspect CLI files");
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return parseModelOutput('{"type":"tool_call","tool":"search_files","args":{"query":"package.json README src/cli bin"}}');
+        }
+        if (calls === 2) {
+          return parseModelOutput('{"type":"final","content":"final without reading","memoryCandidates":[]}');
+        }
+        if (calls === 3) {
+          return parseModelOutput('{"type":"tool_call","tool":"read_file","args":{"path":"codex/RULES.md"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"final after read_file","memoryCandidates":[]}');
+      }
+    };
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "현재 구현된 CLI 명령들을 실제 파일을 보고 요약해줘.",
+      provider,
+      requireTools: true
+    });
+
+    expect(content).toBe("final after read_file");
+    expect(calls).toBe(4);
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    expect(context).toContain("search_files, read_file");
+  });
 });
 
 describe("status and listing", () => {
