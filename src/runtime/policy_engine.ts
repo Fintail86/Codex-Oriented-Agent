@@ -11,7 +11,7 @@ export type PolicyDecision = {
 export class PolicyEngine {
   evaluate(tool: ToolDefinition, args: unknown, workspaceRoot: string): PolicyDecision {
     if (["destructive", "network", "external_send", "shell"].includes(tool.permission)) {
-      return { allowed: false, reason: `Permission is disabled in v0.1: ${tool.permission}` };
+      return { allowed: false, reason: `Permission is disabled in v0.2: ${tool.permission}` };
     }
     if (tool.permission === "read_only") {
       return this.evaluateReadOnly(tool.name, args, workspaceRoot);

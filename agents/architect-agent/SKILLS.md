@@ -1,3 +1,3 @@
 # SKILLS
 
-No skills are bundled in v0.1.
+No skills are bundled in v0.2.

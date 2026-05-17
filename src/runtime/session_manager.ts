@@ -35,6 +35,34 @@ export class SessionManager {
     return sessionMetadataSchema.parse(parsed);
   }
 
+  async listSessions(): Promise<SessionMetadata[]> {
+    if (!(await pathExists(this.sessionsDir()))) {
+      return [];
+    }
+    const entries = await readdir(this.sessionsDir(), { withFileTypes: true });
+    const sessions: SessionMetadata[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      try {
+        sessions.push(await this.loadSession(entry.name));
+      } catch {
+        // Ignore incomplete session folders in status/list output.
+      }
+    }
+    return sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async contextTail(sessionId: string, maxChars = 1200): Promise<string> {
+    const path = join(this.sessionDir(sessionId), "CONTEXT_MEMORY.md");
+    if (!(await pathExists(path))) {
+      return "";
+    }
+    const content = await readText(path);
+    return content.length > maxChars ? content.slice(content.length - maxChars) : content;
+  }
+
   async appendContext(sessionId: string, content: string): Promise<void> {
     const path = join(this.sessionDir(sessionId), "CONTEXT_MEMORY.md");
     const current = (await pathExists(path)) ? await readText(path) : "# CONTEXT MEMORY\n\n";

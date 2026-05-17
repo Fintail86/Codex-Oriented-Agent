@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureDir, pathExists, readText, writeTextIfMissing } from "./fs_utils.js";
 import { agentTemplates, architectManifest } from "./templates.js";
@@ -28,6 +28,26 @@ export class AgentManager {
     const manifestPath = join(this.agentDir(agentId), "manifest.json");
     const parsed = JSON.parse(await readText(manifestPath));
     return agentManifestSchema.parse(parsed);
+  }
+
+  async listAgents(): Promise<AgentManifest[]> {
+    const agentsDir = join(this.workspaceRoot, "agents");
+    if (!(await pathExists(agentsDir))) {
+      return [];
+    }
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    const agents: AgentManifest[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      try {
+        agents.push(await this.loadAgent(entry.name));
+      } catch {
+        // Ignore incomplete agent folders in status/list output.
+      }
+    }
+    return agents.sort((left, right) => left.id.localeCompare(right.id));
   }
 
   async ensureAgentsDir(): Promise<void> {

@@ -8,6 +8,7 @@ type PromptInput = {
   session: SessionMetadata;
   userPrompt: string;
   toolResults?: string[];
+  requireTools?: boolean;
 };
 
 const codexFiles = ["SECURITY.md", "RULES.md", "SOUL.md", "USER.md"] as const;
@@ -36,6 +37,9 @@ export async function buildPrompt(input: PromptInput): Promise<string> {
   const toolText = input.toolResults?.length
     ? `\n\n# TOOL RESULTS\n\n${input.toolResults.map((result, index) => `## Result ${index + 1}\n\n${result}`).join("\n\n")}`
     : "";
+  const requireToolsText = input.requireTools
+    ? `\n\n# REQUIRE-TOOLS MODE\n\nThis run is in require-tools mode. Before returning a final answer, you must call at least one observation tool: read_file or search_files. write_file does not satisfy this requirement.`
+    : "";
 
   return `${blocks.map((block) => `# BEGIN ${block.title}\n${block.content.trim()}\n# END ${block.title}`).join("\n\n")}
 
@@ -51,6 +55,7 @@ For a final answer:
 
 Allowed tools for this agent: ${input.agent.allowedTools.join(", ")}
 Maximum tool loop depth: 5
+${requireToolsText}
 ${toolText}
 
 # CURRENT USER REQUEST

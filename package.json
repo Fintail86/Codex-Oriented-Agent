@@ -1,6 +1,6 @@
 {
   "name": "cosia",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "COSIA: Codex-Oriented Self-Improving Agent Runtime CLI MVP with scoped memory, policy-gated tools, and Codex CLI provider.",
   "type": "module",
   "bin": {

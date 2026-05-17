@@ -9,6 +9,7 @@ import { parseModelOutput } from "../src/runtime/model/model_provider.js";
 import { buildPrompt } from "../src/runtime/prompt_builder.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
+import { getStatusReport } from "../src/runtime/status_report.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 
 const tempRoots: string[] = [];
@@ -20,7 +21,7 @@ afterEach(async () => {
 });
 
 async function workspace(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "agent-runtime-"));
+  const root = await mkdtemp(join(tmpdir(), "cosia-"));
   tempRoots.push(root);
   return root;
 }
@@ -134,6 +135,50 @@ describe("memory", () => {
     const ref = await readFile(join(root, "sessions", session.id, "REF_MEMORY.md"), "utf8");
     expect(ref).toContain("Codex / Agent / Session");
   });
+
+  it("appends, promotes, and discards memory candidates", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Review memory candidates");
+    const memory = new MemoryManager(root);
+
+    await memory.appendCandidates([
+      {
+        scope: "project",
+        kind: "decision",
+        content: "COSIA v0.2 reviews memory candidates before promotion.",
+        importance: 4,
+        confidence: 0.9
+      },
+      {
+        scope: "tool",
+        kind: "note",
+        content: "Discard this candidate in tests.",
+        importance: 2,
+        confidence: 0.5
+      }
+    ], session);
+
+    const pending = await memory.listCandidates();
+    expect(pending).toHaveLength(2);
+    expect(pending[0].record?.id).toBeTruthy();
+    expect(pending[0].record?.status).toBe("pending");
+    expect(pending[0].record?.sourceSessionId).toBe(session.id);
+    expect(pending[0].record?.sourceAgentId).toBe(session.agentId);
+
+    const promoted = await memory.promoteCandidate(pending[0].displayId);
+    expect(promoted.content).toContain("reviews memory candidates");
+    expect(memory.search("reviews memory candidates")).toHaveLength(1);
+
+    const discarded = await memory.discardCandidate(pending[1].displayId, "test discard");
+    expect(discarded.status).toBe("discarded");
+    expect(discarded.discardReason).toBe("test discard");
+
+    const all = await memory.listCandidates(true);
+    expect(all.map((item) => item.record?.status)).toEqual(["promoted", "discarded"]);
+  });
 });
 
 describe("model parsing and run loop", () => {
@@ -159,5 +204,75 @@ describe("model parsing and run loop", () => {
 
     const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
     expect(context).toContain("Summarize the goal");
+  });
+
+  it("requires an observation tool before final when requireTools is enabled", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Inspect implementation");
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "Inspect the current implementation",
+      providerId: "mock",
+      requireTools: true
+    });
+    expect(content).toContain(session.id);
+
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    expect(context).toContain("Tools:");
+    expect(context).toContain("search_files");
+  });
+
+  it("does not count write_file as satisfying requireTools", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Reject write-only observation");
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_WRITE_ONLY:tmp/write-only.txt]",
+      providerId: "mock",
+      requireTools: true
+    });
+    expect(content).toContain(session.id);
+
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    expect(context).toContain("write_file");
+    expect(context).toContain("search_files");
+  });
+});
+
+describe("status and listing", () => {
+  it("reports status for empty and initialized workspaces", async () => {
+    const empty = await workspace();
+    const emptyReport = await getStatusReport(empty, "mock");
+    expect(emptyReport.version).toBe("0.2.0");
+    expect(emptyReport.agentsCount).toBe(0);
+    expect(emptyReport.sessionsCount).toBe(0);
+    expect(emptyReport.providerOk).toBe(true);
+
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    await sessions.createSession("architect-agent", "List sessions");
+    const memory = new MemoryManager(root);
+    memory.addMemory({
+      scope: "project",
+      content: "COSIA status can count memories.",
+      kind: "note"
+    });
+
+    const report = await getStatusReport(root, "mock");
+    expect(report.agentsCount).toBe(1);
+    expect(report.sessionsCount).toBe(1);
+    expect(report.memoriesCount).toBe(1);
+    expect(await sessions.listSessions()).toHaveLength(1);
+    expect(memory.listMemories()).toHaveLength(1);
   });
 });

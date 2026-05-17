@@ -1,9 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { memoryCandidateSchema, memoryScopeSchema, type MemoryCandidate, type MemoryRecord, type MemoryScope, type SessionMetadata } from "./types.js";
+import {
+  memoryCandidateRecordSchema,
+  memoryCandidateSchema,
+  memoryScopeSchema,
+  type MemoryCandidate,
+  type MemoryCandidateRecord,
+  type MemoryRecord,
+  type MemoryScope,
+  type SessionMetadata
+} from "./types.js";
 
 type AddMemoryInput = {
   scope: MemoryScope;
@@ -32,6 +41,13 @@ type MemoryRow = {
   created_at: string;
   updated_at: string;
   last_accessed_at: string | null;
+};
+
+export type CandidateView = {
+  displayId: string;
+  legacy: boolean;
+  record?: MemoryCandidateRecord;
+  raw: Record<string, unknown>;
 };
 
 export class MemoryManager {
@@ -158,6 +174,33 @@ export class MemoryManager {
     }
   }
 
+  listMemories(limit = 20): MemoryRecord[] {
+    this.ensureSchema();
+    const db = this.open();
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM memories
+        WHERE status = 'active'
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `).all(limit) as MemoryRow[];
+      return rows.map(rowToRecord);
+    } finally {
+      db.close();
+    }
+  }
+
+  countMemories(): number {
+    this.ensureSchema();
+    const db = this.open();
+    try {
+      const row = db.prepare("SELECT COUNT(*) AS count FROM memories WHERE status = 'active'").get() as { count: number };
+      return row.count;
+    } finally {
+      db.close();
+    }
+  }
+
   async writeReferenceMemory(session: SessionMetadata, userPrompt: string): Promise<MemoryRecord[]> {
     const records = this.search(`${session.goal} ${userPrompt}`, 10);
     const sessionDir = join(this.workspaceRoot, "sessions", session.id);
@@ -172,21 +215,164 @@ export class MemoryManager {
     if (!candidates?.length) {
       return;
     }
+    this.ensureMemoryDir();
     const lines = candidates.map((candidate) => {
       const parsed = memoryCandidateSchema.parse(candidate);
-      return JSON.stringify({
+      const record: MemoryCandidateRecord = {
+        id: randomUUID(),
+        status: "pending",
         ...parsed,
         sourceSessionId: session.id,
         sourceAgentId: session.agentId,
         createdAt: new Date().toISOString()
-      });
+      };
+      return JSON.stringify(record);
     });
     await appendFile(join(this.memoryDir, "memory_candidates.jsonl"), `${lines.join("\n")}\n`, "utf8");
+  }
+
+  async listCandidates(includeAll = false): Promise<CandidateView[]> {
+    const entries = await this.readCandidateEntries();
+    return entries.filter((entry) => includeAll || entry.record?.status === "pending" || (entry.legacy && !includeAll));
+  }
+
+  async getCandidate(candidateId: string): Promise<CandidateView> {
+    const entries = await this.readCandidateEntries();
+    const found = entries.find((entry) => entry.displayId === candidateId);
+    if (!found) {
+      throw new Error(`Memory candidate not found: ${candidateId}`);
+    }
+    return found;
+  }
+
+  async promoteCandidate(candidateId: string): Promise<MemoryRecord> {
+    let promoted: MemoryRecord | undefined;
+    await this.updateCandidate(candidateId, (record) => {
+      if (record.status !== "pending") {
+        throw new Error(`Memory candidate is not pending: ${candidateId}`);
+      }
+      promoted = this.addMemory({
+        scope: record.scope,
+        content: record.content,
+        ownerId: record.ownerId,
+        kind: record.kind,
+        sourceSessionId: record.sourceSessionId,
+        sourceAgentId: record.sourceAgentId,
+        confidence: record.confidence,
+        importance: record.importance
+      });
+      return {
+        ...record,
+        status: "promoted",
+        reviewedAt: new Date().toISOString(),
+        promotedMemoryId: promoted.id
+      };
+    });
+    if (!promoted) {
+      throw new Error(`Memory candidate could not be promoted: ${candidateId}`);
+    }
+    return promoted;
+  }
+
+  async discardCandidate(candidateId: string, reason: string): Promise<MemoryCandidateRecord> {
+    let discarded: MemoryCandidateRecord | undefined;
+    await this.updateCandidate(candidateId, (record) => {
+      if (record.status !== "pending") {
+        throw new Error(`Memory candidate is not pending: ${candidateId}`);
+      }
+      discarded = {
+        ...record,
+        status: "discarded",
+        reviewedAt: new Date().toISOString(),
+        discardReason: reason
+      };
+      return discarded;
+    });
+    if (!discarded) {
+      throw new Error(`Memory candidate could not be discarded: ${candidateId}`);
+    }
+    return discarded;
+  }
+
+  async countPendingCandidates(): Promise<number> {
+    return (await this.listCandidates(false)).filter((candidate) => candidate.record?.status === "pending").length;
+  }
+
+  private async updateCandidate(
+    candidateId: string,
+    update: (record: MemoryCandidateRecord) => MemoryCandidateRecord
+  ): Promise<void> {
+    const entries = await this.readCandidateEntries();
+    const index = entries.findIndex((entry) => entry.displayId === candidateId);
+    if (index === -1) {
+      throw new Error(`Memory candidate not found: ${candidateId}`);
+    }
+    const entry = entries[index];
+    if (entry.legacy || !entry.record) {
+      throw new Error(`Legacy memory candidate cannot be promoted or discarded: ${candidateId}`);
+    }
+    entries[index] = candidateToView(update(entry.record), index + 1);
+    await this.writeCandidateEntries(entries);
+  }
+
+  private async readCandidateEntries(): Promise<CandidateView[]> {
+    this.ensureMemoryDir();
+    const path = this.candidatePath();
+    if (!existsSync(path)) {
+      await writeFile(path, "", "utf8");
+      return [];
+    }
+    const text = await readFile(path, "utf8");
+    const entries: CandidateView[] = [];
+    text.split(/\r?\n/).forEach((line, index) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return;
+      }
+      const lineNumber = index + 1;
+      const raw = JSON.parse(trimmed) as Record<string, unknown>;
+      const parsed = memoryCandidateRecordSchema.safeParse(raw);
+      if (parsed.success) {
+        entries.push(candidateToView(parsed.data, lineNumber));
+      } else {
+        entries.push({
+          displayId: `line:${lineNumber}`,
+          legacy: true,
+          raw
+        });
+      }
+    });
+    return entries;
+  }
+
+  private async writeCandidateEntries(entries: CandidateView[]): Promise<void> {
+    this.ensureMemoryDir();
+    const lines = entries.map((entry) => JSON.stringify(entry.record ?? entry.raw));
+    await writeFile(this.candidatePath(), lines.length ? `${lines.join("\n")}\n` : "", "utf8");
+  }
+
+  private ensureMemoryDir(): void {
+    if (!existsSync(this.memoryDir)) {
+      mkdirSync(this.memoryDir, { recursive: true });
+    }
+  }
+
+  private candidatePath(): string {
+    return join(this.memoryDir, "memory_candidates.jsonl");
   }
 
   private open(): DatabaseSync {
     return new DatabaseSync(this.dbPath);
   }
+}
+
+function candidateToView(record: MemoryCandidateRecord, lineNumber: number): CandidateView {
+  return {
+    displayId: record.id || `line:${lineNumber}`,
+    legacy: false,
+    record,
+    raw: record
+  };
 }
 
 function rowToRecord(row: MemoryRow): MemoryRecord {

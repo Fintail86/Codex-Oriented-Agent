@@ -71,6 +71,22 @@ export const memoryCandidateSchema = z.object({
 
 export type MemoryCandidate = z.infer<typeof memoryCandidateSchema>;
 
+export const memoryCandidateStatusSchema = z.enum(["pending", "promoted", "discarded"]);
+export type MemoryCandidateStatus = z.infer<typeof memoryCandidateStatusSchema>;
+
+export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
+  id: z.string().min(1),
+  status: memoryCandidateStatusSchema,
+  sourceSessionId: z.string().min(1),
+  sourceAgentId: z.string().min(1),
+  createdAt: z.string().min(1),
+  reviewedAt: z.string().optional(),
+  promotedMemoryId: z.string().optional(),
+  discardReason: z.string().optional()
+});
+
+export type MemoryCandidateRecord = z.infer<typeof memoryCandidateRecordSchema>;
+
 export const finalAgentStepSchema = z.object({
   type: z.literal("final"),
   content: z.string(),

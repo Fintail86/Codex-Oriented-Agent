@@ -1,8 +1,8 @@
-# COSIA v0.1
+# COSIA v0.2
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scoped SQLite memory, policy-gated tools, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scoped SQLite memory, policy-gated tools, memory candidate review, require-tools execution discipline, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -68,6 +68,12 @@ For runtime-only verification without Codex login:
 cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
 
+To force COSIA to inspect files before answering:
+
+```powershell
+cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보고 요약해줘." --require-tools
+```
+
 ## CLI Commands
 
 ```text
@@ -77,6 +83,14 @@ cosia session create --agent <agent-id> --goal "<goal>"
 cosia run --session <session-id> --prompt "<prompt>"
 cosia memory add --scope <scope> --content "<content>"
 cosia memory search --query "<query>"
+cosia memory list --limit <n>
+cosia memory candidate list
+cosia memory candidate show <candidate-id>
+cosia memory candidate promote <candidate-id>
+cosia memory candidate discard <candidate-id> --reason "<reason>"
+cosia status
+cosia session list
+cosia session show <session-id>
 ```
 
 ## Runtime Rules
@@ -84,8 +98,20 @@ cosia memory search --query "<query>"
 - `read_file` and `search_files` are read-only workspace tools.
 - `write_file` can only write inside the workspace.
 - Existing file overwrite requires explicit approval.
-- Destructive, network, external-send, and shell tools are not registered in v0.1.
+- Destructive, network, external-send, and shell tools are not registered in v0.2.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
+- `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
+- `write_file` does not satisfy `--require-tools`; it is not an observation tool.
+- Memory candidates are written to `memory/memory_candidates.jsonl` and must be explicitly promoted.
+
+## Memory Candidate Review
+
+```powershell
+cosia memory candidate list
+cosia memory candidate show <candidate-id>
+cosia memory candidate promote <candidate-id>
+cosia memory candidate discard <candidate-id> --reason "Not durable enough"
+```
 
 ## Test
 

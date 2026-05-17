@@ -5,14 +5,34 @@ import { initProject } from "./runtime/init_project.js";
 import { MemoryManager } from "./runtime/memory_manager.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
+import { getStatusReport } from "./runtime/status_report.js";
 import { memoryScopeSchema } from "./runtime/types.js";
+import { COSIA_VERSION } from "./runtime/version.js";
 
 const program = new Command();
 
 program
   .name("cosia")
   .description("COSIA: Codex-Oriented Self-Improving Agent Runtime CLI MVP")
-  .version("0.1.0");
+  .version(COSIA_VERSION);
+
+program
+  .command("status")
+  .option("--provider <provider>", "Model provider smoke check: codex-cli or mock", "codex-cli")
+  .description("Show workspace, runtime, memory, session, and provider status.")
+  .action(async (options: { provider: string }) => {
+    await main(async (workspaceRoot) => {
+      const report = await getStatusReport(workspaceRoot, options.provider);
+      console.log(`COSIA ${report.version}`);
+      console.log(`Workspace: ${report.workspaceRoot}`);
+      console.log(`Agents: ${report.agentsCount}`);
+      console.log(`Sessions: ${report.sessionsCount}`);
+      console.log(`Memories: ${report.memoriesCount}`);
+      console.log(`Pending candidates: ${report.pendingCandidatesCount}`);
+      console.log(`Provider: ${report.providerId} (${report.providerOk ? "ok" : "failed"})`);
+      console.log(`Provider message: ${report.providerMessage}`);
+    });
+  });
 
 program
   .command("init")
@@ -57,6 +77,38 @@ session
     });
   });
 
+session
+  .command("list")
+  .description("List sessions.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const sessions = await new SessionManager(workspaceRoot).listSessions();
+      if (!sessions.length) {
+        console.log("No sessions.");
+        return;
+      }
+      for (const item of sessions) {
+        console.log(`${item.id}\t${item.agentId}\t${item.status}\t${item.updatedAt}\t${item.goal}`);
+      }
+    });
+  });
+
+session
+  .command("show")
+  .argument("<session-id>")
+  .option("--tail <chars>", "Context tail character count", "1200")
+  .description("Show session metadata and recent context memory.")
+  .action(async (sessionId: string, options: { tail: string }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      const metadata = await sessions.loadSession(sessionId);
+      console.log(JSON.stringify(metadata, null, 2));
+      const tail = await sessions.contextTail(sessionId, Number.parseInt(options.tail, 10));
+      console.log("\n# CONTEXT TAIL\n");
+      console.log(tail || "No context memory.");
+    });
+  });
+
 const memory = program.command("memory").description("Manage long-term memory.");
 
 memory
@@ -98,20 +150,97 @@ memory
     });
   });
 
+memory
+  .command("list")
+  .option("--limit <limit>", "Result limit", "20")
+  .description("List latest active long-term memories.")
+  .action(async (options: { limit: string }) => {
+    await main(async (workspaceRoot) => {
+      const records = new MemoryManager(workspaceRoot).listMemories(Number.parseInt(options.limit, 10));
+      if (!records.length) {
+        console.log("No memories.");
+        return;
+      }
+      for (const record of records) {
+        console.log(`${record.id}\t[${record.scope}/${record.kind}]\t${record.content}`);
+      }
+    });
+  });
+
+const candidate = memory.command("candidate").description("Review memory candidates.");
+
+candidate
+  .command("list")
+  .option("--all", "Show pending, promoted, discarded, and legacy candidates.", false)
+  .description("List memory candidates.")
+  .action(async (options: { all: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const candidates = await new MemoryManager(workspaceRoot).listCandidates(options.all);
+      if (!candidates.length) {
+        console.log("No memory candidates.");
+        return;
+      }
+      for (const candidate of candidates) {
+        const record = candidate.record;
+        const status = record?.status ?? "legacy";
+        const scope = record?.scope ?? String(candidate.raw.scope ?? "unknown");
+        const kind = record?.kind ?? String(candidate.raw.kind ?? "unknown");
+        const content = record?.content ?? String(candidate.raw.content ?? JSON.stringify(candidate.raw));
+        console.log(`${candidate.displayId}\t${status}\t[${scope}/${kind}]\t${content}`);
+      }
+    });
+  });
+
+candidate
+  .command("show")
+  .argument("<candidate-id>")
+  .description("Show one memory candidate.")
+  .action(async (candidateId: string) => {
+    await main(async (workspaceRoot) => {
+      const candidate = await new MemoryManager(workspaceRoot).getCandidate(candidateId);
+      console.log(JSON.stringify(candidate.record ?? candidate.raw, null, 2));
+    });
+  });
+
+candidate
+  .command("promote")
+  .argument("<candidate-id>")
+  .description("Promote a pending memory candidate into long-term memory.")
+  .action(async (candidateId: string) => {
+    await main(async (workspaceRoot) => {
+      const record = await new MemoryManager(workspaceRoot).promoteCandidate(candidateId);
+      console.log(record.id);
+    });
+  });
+
+candidate
+  .command("discard")
+  .argument("<candidate-id>")
+  .requiredOption("--reason <reason>", "Discard reason")
+  .description("Discard a pending memory candidate.")
+  .action(async (candidateId: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      const record = await new MemoryManager(workspaceRoot).discardCandidate(candidateId, options.reason);
+      console.log(`${record.id} discarded`);
+    });
+  });
+
 program
   .command("run")
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
   .option("--provider <provider>", "Model provider: codex-cli or mock", "codex-cli")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
+  .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .description("Run a session turn.")
-  .action(async (options: { session: string; prompt: string; provider: string; approveOverwrite: boolean }) => {
+  .action(async (options: { session: string; prompt: string; provider: string; approveOverwrite: boolean; requireTools: boolean }) => {
     await main(async (workspaceRoot) => {
       const content = await runSession(workspaceRoot, {
         sessionId: options.session,
         prompt: options.prompt,
         providerId: options.provider,
-        approveOverwriteFiles: options.approveOverwrite
+        approveOverwriteFiles: options.approveOverwrite,
+        requireTools: options.requireTools
       });
       console.log(content);
     });

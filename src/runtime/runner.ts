@@ -13,6 +13,8 @@ type RunOptions = {
   prompt: string;
   providerId?: string;
   approveOverwriteFiles?: boolean;
+  requireTools?: boolean;
+  provider?: ModelProvider;
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
@@ -24,7 +26,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const agent = await agents.loadAgent(session.agentId);
   await memory.writeReferenceMemory(session, options.prompt);
 
-  const provider = createProvider(options.providerId ?? "codex-cli", workspaceRoot);
+  const provider = options.provider ?? createProvider(options.providerId ?? "codex-cli", workspaceRoot);
   if (provider.id !== "mock") {
     const auth = await provider.checkAuth();
     if (!auth.ok) {
@@ -33,6 +35,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   }
 
   const toolResults: string[] = [];
+  const toolNames: string[] = [];
+  let hasObservationTool = false;
   let finalContent = "";
   let lastStep: AgentStep | undefined;
 
@@ -42,11 +46,18 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       agent,
       session,
       userPrompt: options.prompt,
-      toolResults
+      toolResults,
+      requireTools: options.requireTools
     });
     const output = await complete(provider, prompt, session.id);
     lastStep = output.step;
     if (output.step.type === "final") {
+      if (options.requireTools && !hasObservationTool) {
+        toolResults.push(
+          "Runtime rejection: current mode is require-tools. You must call read_file or search_files at least once before returning final."
+        );
+        continue;
+      }
       finalContent = output.step.content;
       await memory.appendCandidates(output.step.memoryCandidates, session);
       break;
@@ -56,6 +67,10 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       allowedTools: agent.allowedTools,
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false
     });
+    toolNames.push(output.step.tool);
+    if ((output.step.tool === "read_file" || output.step.tool === "search_files") && result.ok) {
+      hasObservationTool = true;
+    }
     toolResults.push(`Tool: ${output.step.tool}\nOK: ${result.ok}\n${result.content}`);
   }
 
@@ -63,7 +78,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     throw new Error(`Run did not produce a final answer after 5 tool steps. Last step: ${JSON.stringify(lastStep)}`);
   }
 
-  await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent));
+  await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames));
   await memory.writeReferenceMemory(session, options.prompt);
   return finalContent;
 }
@@ -72,11 +87,14 @@ async function complete(provider: ModelProvider, prompt: string, sessionId: stri
   return provider.complete({ prompt, sessionId });
 }
 
-function contextEntry(prompt: string, finalContent: string): string {
+function contextEntry(prompt: string, finalContent: string, toolNames: string[]): string {
   return `## Run ${new Date().toISOString()}
 
 Prompt:
 ${prompt}
+
+Tools:
+${toolNames.length ? toolNames.join(", ") : "none"}
 
 Final:
 ${finalContent}
