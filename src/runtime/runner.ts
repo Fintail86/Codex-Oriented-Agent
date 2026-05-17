@@ -41,16 +41,24 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   let hasObservationTool = false;
   let finalContent = "";
   let lastStep: AgentStep | undefined;
+  const maxToolCalls = 5;
+  const maxModelAttempts = maxToolCalls + 2;
+  let toolCallCount = 0;
 
-  for (let depth = 0; depth < 5; depth += 1) {
-    options.onEvent?.(`model step ${depth + 1}/5`);
+  for (let depth = 0; depth < maxModelAttempts; depth += 1) {
+    const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
+    const forceFinal = remainingToolCalls === 0;
+    options.onEvent?.(`model step ${depth + 1}/${maxModelAttempts}`);
     const prompt = await buildPrompt({
       workspaceRoot,
       agent,
       session,
       userPrompt: options.prompt,
       toolResults,
-      requireTools: options.requireTools
+      requireTools: options.requireTools,
+      hasObservationTool,
+      remainingToolCalls,
+      forceFinal
     });
     const output = await complete(provider, prompt, session.id);
     lastStep = output.step;
@@ -66,11 +74,19 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       await memory.appendCandidates(output.step.memoryCandidates, session);
       break;
     }
+    if (forceFinal) {
+      options.onEvent?.("tool_call rejected because tool call budget is exhausted");
+      toolResults.push(
+        "Runtime rejection: tool call budget is exhausted. Return a final answer now using the available tool results. Do not call another tool."
+      );
+      continue;
+    }
     const result = await tools.execute(output.step.tool, output.step.args, {
       workspaceRoot,
       allowedTools: agent.allowedTools,
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false
     });
+    toolCallCount += 1;
     options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
     toolNames.push(output.step.tool);
     if ((output.step.tool === "read_file" || output.step.tool === "search_files") && result.ok) {
@@ -80,7 +96,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   }
 
   if (!finalContent) {
-    throw new Error(`Run did not produce a final answer after 5 tool steps. Last step: ${JSON.stringify(lastStep)}`);
+    throw new Error(`Run did not produce a final answer after ${maxToolCalls} tool calls. Last step: ${JSON.stringify(lastStep)}`);
   }
 
   await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames));

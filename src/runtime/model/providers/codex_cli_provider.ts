@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseModelOutput, modelInstructionForRetry } from "../model_provider.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
 
@@ -17,10 +20,14 @@ export class CodexCliProvider implements ModelProvider {
     if (result.code === 0) {
       return { ok: true, message: result.stdout.trim() || "Codex login status is OK." };
     }
+    const isolated = await ensureProviderWorkdir();
+    const schemaPath = await ensureOutputSchema(isolated);
     const smoke = await runCodex(
-      ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "-"],
-      "Say only: codex-ready",
-      this.options.workspaceRoot,
+      codexExecArgs(schemaPath),
+      boundaryPrompt(
+        "Say only this JSON object: {\"type\":\"final\",\"tool\":\"read_file\",\"args\":{\"path\":\"\",\"content\":\"\",\"query\":\"\",\"directory\":\"\"},\"content\":\"codex-ready\",\"memoryCandidates\":[]}"
+      ),
+      isolated,
       30_000
     );
     return {
@@ -44,10 +51,12 @@ ${input.retryInstruction ?? modelInstructionForRetry(error)}
   }
 
   private async completeOnce(prompt: string): Promise<string> {
+    const isolated = await ensureProviderWorkdir();
+    const schemaPath = await ensureOutputSchema(isolated);
     const result = await runCodex(
-      ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "-"],
-      prompt,
-      this.options.workspaceRoot,
+      codexExecArgs(schemaPath),
+      boundaryPrompt(prompt),
+      isolated,
       this.options.timeoutMs ?? 120_000
     );
     if (result.code !== 0) {
@@ -56,6 +65,128 @@ ${input.retryInstruction ?? modelInstructionForRetry(error)}
     return extractFinalMessage(result.stdout) || result.stdout;
   }
 }
+
+function codexExecArgs(schemaPath: string): string[] {
+  return [
+    "exec",
+    "--disable",
+    "plugins",
+    "--disable",
+    "remote_plugin",
+    "--disable",
+    "shell_tool",
+    "--disable",
+    "shell_snapshot",
+    "--disable",
+    "browser_use",
+    "--disable",
+    "computer_use",
+    "--json",
+    "--ephemeral",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--output-schema",
+    schemaPath.replaceAll("\\", "/"),
+    "-"
+  ];
+}
+
+function boundaryPrompt(prompt: string): string {
+  return `You are being used as COSIA's model provider, not as an autonomous Codex coding agent.
+
+Provider boundary:
+- Do not use Codex CLI internal tools.
+- Do not run shell commands.
+- Do not call rg, grep, Get-Content, Select-String, cat, ls, or any filesystem command.
+- Do not inspect files directly through Codex.
+- If you need file or implementation information, return a COSIA JSON tool_call for read_file or search_files.
+- Return only one JSON object matching the AgentStep schema.
+
+${prompt}`;
+}
+
+async function ensureProviderWorkdir(): Promise<string> {
+  const dir = join(tmpdir(), "cosia-codex-provider");
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function ensureOutputSchema(dir: string): Promise<string> {
+  const schemaPath = join(dir, "agent-step.schema.json");
+  await writeFile(schemaPath, JSON.stringify(agentStepJsonSchema, null, 2), "utf8");
+  return schemaPath;
+}
+
+const agentStepJsonSchema = {
+  type: "object",
+  properties: {
+    type: {
+      enum: ["tool_call", "final"]
+    },
+    tool: {
+      enum: ["read_file", "write_file", "search_files"]
+    },
+    args: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string"
+        },
+        content: {
+          type: "string"
+        },
+        query: {
+          type: "string"
+        },
+        directory: {
+          type: "string"
+        }
+      },
+      required: ["path", "content", "query", "directory"],
+      additionalProperties: false
+    },
+    content: {
+      type: "string"
+    },
+    memoryCandidates: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          scope: {
+            enum: ["global", "user", "codex", "agent", "project", "session", "task", "tool"]
+          },
+          ownerId: {
+            type: "string"
+          },
+          kind: {
+            type: "string"
+          },
+          content: {
+            type: "string"
+          },
+          importance: {
+            type: "integer",
+            minimum: 1,
+            maximum: 5
+          },
+          confidence: {
+            type: "number",
+            minimum: 0,
+            maximum: 1
+          }
+        },
+        required: ["scope", "ownerId", "kind", "content", "importance", "confidence"],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ["type", "tool", "args", "content", "memoryCandidates"],
+  additionalProperties: false
+};
 
 function extractFinalMessage(stdout: string): string | undefined {
   const candidates: string[] = [];

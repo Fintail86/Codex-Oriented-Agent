@@ -9,6 +9,9 @@ type PromptInput = {
   userPrompt: string;
   toolResults?: string[];
   requireTools?: boolean;
+  hasObservationTool?: boolean;
+  remainingToolCalls?: number;
+  forceFinal?: boolean;
 };
 
 const codexFiles = ["SECURITY.md", "RULES.md", "SOUL.md", "USER.md"] as const;
@@ -38,8 +41,19 @@ export async function buildPrompt(input: PromptInput): Promise<string> {
     ? `\n\n# TOOL RESULTS\n\n${input.toolResults.map((result, index) => `## Result ${index + 1}\n\n${result}`).join("\n\n")}`
     : "";
   const requireToolsText = input.requireTools
-    ? `\n\n# REQUIRE-TOOLS MODE\n\nThis run is in require-tools mode. Before returning a final answer, you must call at least one observation tool: read_file or search_files. write_file does not satisfy this requirement.`
+    ? `\n\n# REQUIRE-TOOLS MODE\n\nThis run is in require-tools mode. Before returning a final answer, you must call at least one observation tool: read_file or search_files. write_file does not satisfy this requirement.${
+        input.hasObservationTool
+          ? "\n\nThe observation requirement is already satisfied. Use the tool results you have. Prefer returning final now unless the last tool result failed and one more targeted observation is essential."
+          : ""
+      }`
     : "";
+  const loopControlText = `\n\n# TOOL LOOP CONTROL\n\nRemaining executable tool calls: ${
+    input.remainingToolCalls ?? 5
+  }.${
+    input.forceFinal
+      ? "\n\nTool call budget is exhausted. You must return a final answer now using the available tool results. Do not return a tool_call."
+      : ""
+  }`;
 
   return `${blocks.map((block) => `# BEGIN ${block.title}\n${block.content.trim()}\n# END ${block.title}`).join("\n\n")}
 
@@ -48,14 +62,18 @@ export async function buildPrompt(input: PromptInput): Promise<string> {
 Return only one valid JSON object. Do not wrap it in Markdown.
 
 For a tool call:
-{"type":"tool_call","tool":"read_file","args":{"path":"README.md"}}
+{"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":""},"content":"","memoryCandidates":[]}
+
+For a search tool call:
+{"type":"tool_call","tool":"search_files","args":{"path":"","content":"","query":"cosia","directory":""},"content":"","memoryCandidates":[]}
 
 For a final answer:
-{"type":"final","content":"...","memoryCandidates":[]}
+{"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":""},"content":"...","memoryCandidates":[]}
 
 Allowed tools for this agent: ${input.agent.allowedTools.join(", ")}
 Maximum tool loop depth: 5
 ${requireToolsText}
+${loopControlText}
 ${toolText}
 
 # CURRENT USER REQUEST

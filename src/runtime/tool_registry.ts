@@ -19,7 +19,7 @@ const writeFileArgs = z.object({
 
 const searchFilesArgs = z.object({
   query: z.string().min(1),
-  directory: z.string().min(1).optional()
+  directory: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional())
 });
 
 export class ToolRegistry {

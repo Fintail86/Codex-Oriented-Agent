@@ -11,6 +11,7 @@ import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
+import type { ModelProvider } from "../src/runtime/types.js";
 
 const tempRoots: string[] = [];
 
@@ -244,6 +245,36 @@ describe("model parsing and run loop", () => {
     const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
     expect(context).toContain("write_file");
     expect(context).toContain("search_files");
+  });
+
+  it("allows a final answer after five executed tool calls", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Inspect until budget is spent");
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async () => {
+        calls += 1;
+        if (calls <= 5) {
+          return parseModelOutput('{"type":"tool_call","tool":"read_file","args":{"path":"codex/RULES.md"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"final after tools","memoryCandidates":[]}');
+      }
+    };
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "Inspect the runtime files",
+      provider,
+      requireTools: true
+    });
+
+    expect(content).toBe("final after tools");
+    expect(calls).toBe(6);
   });
 });
 
