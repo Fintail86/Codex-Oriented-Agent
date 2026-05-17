@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { AgentManager } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
-import { MemoryManager } from "./runtime/memory_manager.js";
+import { formatMemoryConflicts, MemoryManager } from "./runtime/memory_manager.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import { runSession } from "./runtime/runner.js";
@@ -120,15 +120,19 @@ memory
   .requiredOption("--content <content>", "Memory content")
   .option("--kind <kind>", "Memory kind", "note")
   .option("--owner-id <owner-id>", "Owner id")
+  .option("--importance <importance>", "Memory importance from 1 to 5", "3")
+  .option("--confidence <confidence>", "Memory confidence from 0 to 1", "0.7")
   .description("Add an explicit long-term memory.")
-  .action(async (options: { scope: string; content: string; kind: string; ownerId?: string }) => {
+  .action(async (options: { scope: string; content: string; kind: string; ownerId?: string; importance: string; confidence: string }) => {
     await main(async (workspaceRoot) => {
       const manager = new MemoryManager(workspaceRoot);
       const record = manager.addMemory({
         scope: memoryScopeSchema.parse(options.scope),
         content: options.content,
         kind: options.kind,
-        ownerId: options.ownerId
+        ownerId: options.ownerId,
+        importance: parseIntegerOption(options.importance, "importance"),
+        confidence: parseNumberOption(options.confidence, "confidence")
       });
       console.log(record.id);
     });
@@ -138,17 +142,20 @@ memory
   .command("search")
   .requiredOption("--query <query>", "Search query")
   .option("--limit <limit>", "Result limit", "8")
+  .option("--show-score", "Show memory search scores.", false)
   .description("Search explicit long-term memory.")
-  .action(async (options: { query: string; limit: string }) => {
+  .action(async (options: { query: string; limit: string; showScore: boolean }) => {
     await main(async (workspaceRoot) => {
       const manager = new MemoryManager(workspaceRoot);
-      const records = manager.search(options.query, Number.parseInt(options.limit, 10));
-      if (!records.length) {
+      const results = manager.search(options.query, Number.parseInt(options.limit, 10));
+      if (!results.length) {
         console.log("No matches.");
         return;
       }
-      for (const record of records) {
-        console.log(`[${record.scope}/${record.kind}] ${record.content}`);
+      for (const result of results) {
+        const record = result.record;
+        const score = options.showScore ? ` score:${result.score.toFixed(2)} tokens:${result.matchedTokens.join(",") || "none"}` : "";
+        console.log(`${record.id}\t[${record.scope}/${record.kind}]${score}\t${record.content}`);
       }
     });
   });
@@ -156,17 +163,64 @@ memory
 memory
   .command("list")
   .option("--limit <limit>", "Result limit", "20")
+  .option("--all", "Show active and archived memories.", false)
   .description("List latest active long-term memories.")
-  .action(async (options: { limit: string }) => {
+  .action(async (options: { limit: string; all: boolean }) => {
     await main(async (workspaceRoot) => {
-      const records = new MemoryManager(workspaceRoot).listMemories(Number.parseInt(options.limit, 10));
+      const records = new MemoryManager(workspaceRoot).listMemories(Number.parseInt(options.limit, 10), options.all);
       if (!records.length) {
         console.log("No memories.");
         return;
       }
       for (const record of records) {
-        console.log(`${record.id}\t[${record.scope}/${record.kind}]\t${record.content}`);
+        console.log(`${record.id}\t${record.status}\t[${record.scope}/${record.kind}]\t${record.content}`);
       }
+    });
+  });
+
+memory
+  .command("show")
+  .argument("<memory-id>")
+  .description("Show one long-term memory.")
+  .action(async (memoryId: string) => {
+    await main(async (workspaceRoot) => {
+      console.log(JSON.stringify(new MemoryManager(workspaceRoot).getMemory(memoryId), null, 2));
+    });
+  });
+
+memory
+  .command("update")
+  .argument("<memory-id>")
+  .option("--content <content>", "Memory content")
+  .option("--kind <kind>", "Memory kind")
+  .option("--scope <scope>", "Memory scope")
+  .option("--owner-id <owner-id>", "Owner id")
+  .option("--importance <importance>", "Memory importance from 1 to 5")
+  .option("--confidence <confidence>", "Memory confidence from 0 to 1")
+  .description("Update an active long-term memory.")
+  .action(async (memoryId: string, options: { content?: string; kind?: string; scope?: string; ownerId?: string; importance?: string; confidence?: string }) => {
+    await main(async (workspaceRoot) => {
+      const record = new MemoryManager(workspaceRoot).updateMemory(memoryId, {
+        content: options.content,
+        kind: options.kind,
+        scope: options.scope ? memoryScopeSchema.parse(options.scope) : undefined,
+        ownerId: options.ownerId,
+        importance: options.importance ? parseIntegerOption(options.importance, "importance") : undefined,
+        confidence: options.confidence ? parseNumberOption(options.confidence, "confidence") : undefined
+      });
+      console.log(record.id);
+    });
+  });
+
+memory
+  .command("archive")
+  .argument("<memory-id>")
+  .requiredOption("--reason <reason>", "Archive reason")
+  .description("Archive an active long-term memory.")
+  .action(async (memoryId: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      const record = new MemoryManager(workspaceRoot).archiveMemory(memoryId, options.reason);
+      console.log(`${record.id} archived`);
     });
   });
 
@@ -209,11 +263,36 @@ candidate
 candidate
   .command("promote")
   .argument("<candidate-id>")
+  .option("--force", "Promote even if conflicts are detected.", false)
+  .option("--replace <memory-id>", "Archive an existing memory and promote this candidate.")
+  .option("--merge <memory-id>", "Merge this candidate into an existing memory.")
+  .option("--content <content>", "Merged memory content for --merge.")
   .description("Promote a pending memory candidate into long-term memory.")
-  .action(async (candidateId: string) => {
+  .action(async (candidateId: string, options: { force: boolean; replace?: string; merge?: string; content?: string }) => {
     await main(async (workspaceRoot) => {
-      const record = await new MemoryManager(workspaceRoot).promoteCandidate(candidateId);
+      const record = await new MemoryManager(workspaceRoot).promoteCandidate(candidateId, {
+        force: options.force,
+        replaceMemoryId: options.replace,
+        mergeMemoryId: options.merge,
+        mergeContent: options.content
+      });
       console.log(record.id);
+    });
+  });
+
+candidate
+  .command("conflicts")
+  .argument("<candidate-id>")
+  .option("--json", "Print raw JSON conflict records.", false)
+  .description("Show memory conflicts for one pending candidate.")
+  .action(async (candidateId: string, options: { json: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const result = await new MemoryManager(workspaceRoot).findCandidateConflicts(candidateId);
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log(formatMemoryConflicts(result.candidate, result.conflicts));
     });
   });
 
@@ -339,4 +418,20 @@ async function main(fn: (workspaceRoot: string) => Promise<void>, options: { all
     console.error((error as Error).message);
     process.exitCode = 1;
   }
+}
+
+function parseIntegerOption(value: string, name: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+  return parsed;
+}
+
+function parseNumberOption(value: string, name: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+  return parsed;
 }

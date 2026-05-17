@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.4.0",
   "tools": {
     "read_file": {
       "permission": "read_only",
@@ -63,6 +63,8 @@
       "session",
       "task",
       "tool"
-    ]
+    ],
+    "promotionConflictPolicy": "block_until_resolved",
+    "archivePolicy": "explicit_cli_only"
   }
 }

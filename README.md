@@ -1,8 +1,8 @@
-# COSIA v0.3
+# COSIA v0.4
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scoped SQLite memory, executable policy core, policy-gated tools, memory candidate review, require-tools execution discipline, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, memory conflict review, require-tools execution discipline, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ The legacy `agent-runtime` alias is also kept for compatibility.
 cosia init
 cosia agent create architect-agent --template architect
 cosia session create --agent architect-agent --goal "Design the COSIA runtime MVP"
-cosia memory add --scope project --content "COSIA uses Codex / Agent / Session layers."
+cosia memory add --scope project --content "COSIA uses Codex / Agent / Session layers." --importance 5 --confidence 0.9
 cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 ```
 
@@ -88,11 +88,17 @@ cosia agent create <agent-id> --template architect
 cosia session create --agent <agent-id> --goal "<goal>"
 cosia run --session <session-id> --prompt "<prompt>"
 cosia memory add --scope <scope> --content "<content>"
-cosia memory search --query "<query>"
-cosia memory list --limit <n>
+cosia memory search --query "<query>" --show-score
+cosia memory list --limit <n> --all
+cosia memory show <memory-id>
+cosia memory update <memory-id> --content "<content>"
+cosia memory archive <memory-id> --reason "<reason>"
 cosia memory candidate list
 cosia memory candidate show <candidate-id>
-cosia memory candidate promote <candidate-id>
+cosia memory candidate conflicts <candidate-id>
+cosia memory candidate promote <candidate-id> --force
+cosia memory candidate promote <candidate-id> --replace <memory-id>
+cosia memory candidate promote <candidate-id> --merge <memory-id> --content "<merged content>"
 cosia memory candidate discard <candidate-id> --reason "<reason>"
 cosia policy show
 cosia policy check
@@ -111,12 +117,15 @@ cosia session show <session-id>
 - `codex/POLICY.json` is the runtime policy source of truth.
 - `codex/POLICY.md` mirrors the JSON policy for humans.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.3.
+- Destructive, network, external-send, and shell tools are not registered in v0.4.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
 - `write_file` does not satisfy `--require-tools`; it is not an observation tool.
 - Codex provider calls have a default per-call timeout of 120000ms.
 - Memory candidates are written to `memory/memory_candidates.jsonl` and must be explicitly promoted.
+- Memory search is scored with deterministic keyword, importance, confidence, and recency signals.
+- Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
+- Long-term memory archive is explicit CLI-only soft deletion.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
 
 ## Policy
@@ -136,9 +145,14 @@ Policy audit logs are append-only per session. Each new `run` writes a `runId`, 
 ## Memory Candidate Review
 
 ```powershell
+cosia memory search --query "memory ranking" --show-score
+cosia memory show <memory-id>
+cosia memory update <memory-id> --importance 5 --confidence 0.9
+cosia memory archive <memory-id> --reason "Superseded by newer decision"
 cosia memory candidate list
 cosia memory candidate show <candidate-id>
-cosia memory candidate promote <candidate-id>
+cosia memory candidate conflicts <candidate-id>
+cosia memory candidate promote <candidate-id> --replace <memory-id>
 cosia memory candidate discard <candidate-id> --reason "Not durable enough"
 ```
 
@@ -146,7 +160,14 @@ Candidate ids accept unique prefixes:
 
 ```powershell
 cosia memory candidate show d1ec6de4
-cosia memory candidate promote d1ec6de4
+cosia memory candidate conflicts d1ec6de4
+cosia memory candidate promote d1ec6de4 --force
+```
+
+Reference memory is written with source hints so model answers can cite durable context:
+
+```md
+- [mem:abcd1234 score:8.42 project/decision] COSIA v0.4 improves memory ranking.
 ```
 
 ## Test
@@ -157,7 +178,6 @@ npm test
 
 ## Roadmap
 
-- v0.4: Memory intelligence, conflict review, archive/update flows.
 - v0.5: Skill candidate loop with manual promotion.
 - v0.6: Codex amendment gate for constitutional changes.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.

@@ -150,6 +150,12 @@ export type MemoryRecord = {
   createdAt: string;
   updatedAt: string;
   lastAccessedAt: string | null;
+  validFrom: string | null;
+  validUntil: string | null;
+  expiresAt: string | null;
+  archivedAt: string | null;
+  archiveReason: string | null;
+  replacedByMemoryId: string | null;
 };
 
 export type PolicyAuditEventType = "tool_decision" | "final_rejection" | "approval_required";

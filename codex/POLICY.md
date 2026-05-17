@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.3.0`
+- Policy version: `0.4.0`
 
 ## Tools
 
@@ -36,3 +36,5 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 - Long-term memory write policy: `candidate_promote_only`
 - Candidate scopes: `global`, `user`, `codex`, `agent`, `project`, `session`, `task`, `tool`
+- Promotion conflict policy: `block_until_resolved`
+- Archive policy: `explicit_cli_only`

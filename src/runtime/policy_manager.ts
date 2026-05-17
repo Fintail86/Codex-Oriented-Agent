@@ -27,7 +27,9 @@ export const policyConfigSchema = z.object({
   }),
   memory: z.object({
     longTermWrite: z.literal("candidate_promote_only"),
-    candidateScopes: z.array(memoryScopeSchema)
+    candidateScopes: z.array(memoryScopeSchema),
+    promotionConflictPolicy: z.literal("block_until_resolved").default("block_until_resolved"),
+    archivePolicy: z.literal("explicit_cli_only").default("explicit_cli_only")
   })
 });
 
@@ -44,7 +46,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.3.0",
+  version: "0.4.0",
   tools: {
     read_file: {
       permission: "read_only",
@@ -91,7 +93,9 @@ export const defaultPolicy: PolicyConfig = {
   },
   memory: {
     longTermWrite: "candidate_promote_only",
-    candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"]
+    candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"],
+    promotionConflictPolicy: "block_until_resolved",
+    archivePolicy: "explicit_cli_only"
   }
 };
 
@@ -220,6 +224,8 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 
 - Long-term memory write policy: \`${policy.memory.longTermWrite}\`
 - Candidate scopes: ${policy.memory.candidateScopes.map((scope) => `\`${scope}\``).join(", ")}
+- Promotion conflict policy: \`${policy.memory.promotionConflictPolicy}\`
+- Archive policy: \`${policy.memory.archivePolicy}\`
 `;
 }
 
@@ -232,7 +238,8 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Tools: ${toolSummary}`,
     `Disabled permissions: ${policy.disabledPermissions.join(", ")}`,
     `Overwrite approval: ${policy.overwrite.existingFileRequiresApproval ? "required" : "not required"}`,
-    `Long-term memory: ${policy.memory.longTermWrite}`
+    `Long-term memory: ${policy.memory.longTermWrite}`,
+    `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`
   ].join("\n");
 }
 
