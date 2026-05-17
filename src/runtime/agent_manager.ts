@@ -1,0 +1,40 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { ensureDir, pathExists, readText, writeTextIfMissing } from "./fs_utils.js";
+import { agentTemplates, architectManifest } from "./templates.js";
+import { agentManifestSchema, type AgentManifest } from "./types.js";
+
+export class AgentManager {
+  constructor(private readonly workspaceRoot: string) {}
+
+  async createAgent(agentId: string, template: string): Promise<AgentManifest> {
+    if (template !== "architect") {
+      throw new Error(`Unsupported agent template: ${template}`);
+    }
+    const agentDir = this.agentDir(agentId);
+    if (await pathExists(agentDir)) {
+      throw new Error(`Agent already exists: ${agentId}`);
+    }
+    await mkdir(agentDir, { recursive: true });
+    for (const [fileName, content] of Object.entries(agentTemplates)) {
+      await writeTextIfMissing(join(agentDir, fileName), content);
+    }
+    const manifest = architectManifest(agentId);
+    await writeFile(join(agentDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    return manifest;
+  }
+
+  async loadAgent(agentId: string): Promise<AgentManifest> {
+    const manifestPath = join(this.agentDir(agentId), "manifest.json");
+    const parsed = JSON.parse(await readText(manifestPath));
+    return agentManifestSchema.parse(parsed);
+  }
+
+  async ensureAgentsDir(): Promise<void> {
+    await ensureDir(join(this.workspaceRoot, "agents"));
+  }
+
+  agentDir(agentId: string): string {
+    return join(this.workspaceRoot, "agents", agentId);
+  }
+}

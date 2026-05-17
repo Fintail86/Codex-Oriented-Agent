@@ -1,0 +1,17 @@
+{
+  "id": "architect-agent",
+  "name": "Architect Agent",
+  "description": "Designs systems, implementation plans, and runtime decisions.",
+  "allowedTools": [
+    "read_file",
+    "write_file",
+    "search_files"
+  ],
+  "skills": [],
+  "memoryScopes": [
+    "agent",
+    "project",
+    "user",
+    "tool"
+  ]
+}
