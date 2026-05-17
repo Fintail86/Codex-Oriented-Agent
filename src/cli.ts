@@ -188,6 +188,7 @@ candidate
         const content = record?.content ?? String(candidate.raw.content ?? JSON.stringify(candidate.raw));
         console.log(`${candidate.displayId}\t${status}\t[${scope}/${kind}]\t${content}`);
       }
+      console.log("\nTip: candidate ids accept unique prefixes, e.g. `cosia memory candidate show d1ec6de4`.");
     });
   });
 

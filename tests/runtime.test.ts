@@ -188,11 +188,14 @@ describe("memory", () => {
     expect(pending[0].record?.sourceSessionId).toBe(session.id);
     expect(pending[0].record?.sourceAgentId).toBe(session.agentId);
 
-    const promoted = await memory.promoteCandidate(pending[0].displayId);
+    const candidatePrefix = pending[0].displayId.slice(0, 12);
+    expect((await memory.getCandidate(candidatePrefix)).displayId).toBe(pending[0].displayId);
+
+    const promoted = await memory.promoteCandidate(candidatePrefix);
     expect(promoted.content).toContain("reviews memory candidates");
     expect(memory.search("reviews memory candidates")).toHaveLength(1);
 
-    const discarded = await memory.discardCandidate(pending[1].displayId, "test discard");
+    const discarded = await memory.discardCandidate(pending[1].displayId.slice(0, 12), "test discard");
     expect(discarded.status).toBe("discarded");
     expect(discarded.discardReason).toBe("test discard");
 

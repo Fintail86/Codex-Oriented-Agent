@@ -40,7 +40,7 @@ npm run dev -- init
 After build, the binary entry is:
 
 ```powershell
-node dist/src/cli.js --help
+node dist/src/bin.js --help
 ```
 
 After linking, use the short project command:
@@ -118,6 +118,13 @@ cosia memory candidate list
 cosia memory candidate show <candidate-id>
 cosia memory candidate promote <candidate-id>
 cosia memory candidate discard <candidate-id> --reason "Not durable enough"
+```
+
+Candidate ids accept unique prefixes:
+
+```powershell
+cosia memory candidate show d1ec6de4
+cosia memory candidate promote d1ec6de4
 ```
 
 ## Test

@@ -238,11 +238,7 @@ export class MemoryManager {
 
   async getCandidate(candidateId: string): Promise<CandidateView> {
     const entries = await this.readCandidateEntries();
-    const found = entries.find((entry) => entry.displayId === candidateId);
-    if (!found) {
-      throw new Error(`Memory candidate not found: ${candidateId}`);
-    }
-    return found;
+    return entries[this.resolveCandidateIndex(entries, candidateId)];
   }
 
   async promoteCandidate(candidateId: string): Promise<MemoryRecord> {
@@ -303,16 +299,35 @@ export class MemoryManager {
     update: (record: MemoryCandidateRecord) => MemoryCandidateRecord
   ): Promise<void> {
     const entries = await this.readCandidateEntries();
-    const index = entries.findIndex((entry) => entry.displayId === candidateId);
-    if (index === -1) {
-      throw new Error(`Memory candidate not found: ${candidateId}`);
-    }
+    const index = this.resolveCandidateIndex(entries, candidateId);
     const entry = entries[index];
     if (entry.legacy || !entry.record) {
       throw new Error(`Legacy memory candidate cannot be promoted or discarded: ${candidateId}`);
     }
     entries[index] = candidateToView(update(entry.record), index + 1);
     await this.writeCandidateEntries(entries);
+  }
+
+  private resolveCandidateIndex(entries: CandidateView[], candidateId: string): number {
+    const normalized = candidateId.trim();
+    if (!normalized) {
+      throw new Error("Memory candidate id is required.");
+    }
+    const exactIndex = entries.findIndex((entry) => entry.displayId === normalized);
+    if (exactIndex !== -1) {
+      return exactIndex;
+    }
+
+    const matches = entries
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.displayId.startsWith(normalized));
+    if (matches.length === 1) {
+      return matches[0].index;
+    }
+    if (matches.length > 1) {
+      throw new Error(`Memory candidate id prefix is ambiguous: ${candidateId}. Matches: ${matches.map(({ entry }) => entry.displayId).join(", ")}`);
+    }
+    throw new Error(`Memory candidate not found: ${candidateId}`);
   }
 
   private async readCandidateEntries(): Promise<CandidateView[]> {
