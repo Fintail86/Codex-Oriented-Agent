@@ -1,9 +1,10 @@
 {
-  "name": "codex-oriented-agent-runtime",
+  "name": "cosia",
   "version": "0.1.0",
-  "description": "Codex-oriented agent runtime CLI MVP with scoped memory, policy-gated tools, and Codex CLI provider.",
+  "description": "COSIA: Codex-Oriented Self-Improving Agent Runtime CLI MVP with scoped memory, policy-gated tools, and Codex CLI provider.",
   "type": "module",
   "bin": {
+    "cosia": "./dist/src/cli.js",
     "agent-runtime": "./dist/src/cli.js"
   },
   "scripts": {

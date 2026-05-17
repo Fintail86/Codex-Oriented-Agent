@@ -1,4 +1,6 @@
-# Codex-Oriented Agent Runtime v0.1
+# COSIA v0.1
+
+**Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scoped SQLite memory, policy-gated tools, and a Codex CLI model provider.
 
@@ -41,31 +43,40 @@ After build, the binary entry is:
 node dist/src/cli.js --help
 ```
 
+After linking, use the short project command:
+
+```powershell
+npm link
+cosia --help
+```
+
+The legacy `agent-runtime` alias is also kept for compatibility.
+
 ## Quick Start
 
 ```powershell
-npm run dev -- init
-npm run dev -- agent create architect-agent --template architect
-$session = npm run dev -- session create --agent architect-agent --goal "Design the runtime MVP"
-npm run dev -- memory add --scope project --content "This runtime uses Codex / Agent / Session layers."
-npm run dev -- run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
+cosia init
+cosia agent create architect-agent --template architect
+cosia session create --agent architect-agent --goal "Design the COSIA runtime MVP"
+cosia memory add --scope project --content "COSIA uses Codex / Agent / Session layers."
+cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 ```
 
 For runtime-only verification without Codex login:
 
 ```powershell
-npm run dev -- run --session <session-id> --prompt "Smoke test" --provider mock
+cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
 
 ## CLI Commands
 
 ```text
-agent-runtime init
-agent-runtime agent create <agent-id> --template architect
-agent-runtime session create --agent <agent-id> --goal "<goal>"
-agent-runtime run --session <session-id> --prompt "<prompt>"
-agent-runtime memory add --scope <scope> --content "<content>"
-agent-runtime memory search --query "<query>"
+cosia init
+cosia agent create <agent-id> --template architect
+cosia session create --agent <agent-id> --goal "<goal>"
+cosia run --session <session-id> --prompt "<prompt>"
+cosia memory add --scope <scope> --content "<content>"
+cosia memory search --query "<query>"
 ```
 
 ## Runtime Rules

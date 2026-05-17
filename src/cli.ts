@@ -10,8 +10,8 @@ import { memoryScopeSchema } from "./runtime/types.js";
 const program = new Command();
 
 program
-  .name("agent-runtime")
-  .description("Codex-oriented agent runtime CLI MVP")
+  .name("cosia")
+  .description("COSIA: Codex-Oriented Self-Improving Agent Runtime CLI MVP")
   .version("0.1.0");
 
 program
