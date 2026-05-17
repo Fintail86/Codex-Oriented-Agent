@@ -92,7 +92,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     if ((output.step.tool === "read_file" || output.step.tool === "search_files") && result.ok) {
       hasObservationTool = true;
     }
-    toolResults.push(`Tool: ${output.step.tool}\nOK: ${result.ok}\n${result.content}`);
+    toolResults.push(`Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`);
   }
 
   if (!finalContent) {

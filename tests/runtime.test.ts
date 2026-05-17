@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -99,6 +99,8 @@ describe("tools and policy", () => {
     const root = await workspace();
     const registry = new ToolRegistry();
     await writeFile(join(root, "note.txt"), "Codex Agent Session", "utf8");
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(join(root, "src", "cli.ts"), "program.command(\"status\")", "utf8");
 
     const read = await registry.execute("read_file", { path: "note.txt" }, {
       workspaceRoot: root,
@@ -112,6 +114,14 @@ describe("tools and policy", () => {
     });
     expect(search.ok).toBe(true);
     expect(search.content).toContain("note.txt");
+
+    const pathSearch = await registry.execute("search_files", { query: "현재 구현된 CLI 명령" }, {
+      workspaceRoot: root,
+      allowedTools: ["search_files"]
+    });
+    expect(pathSearch.ok).toBe(true);
+    expect(pathSearch.content).toContain("Path matches:");
+    expect(pathSearch.content).toContain("src/cli.ts");
   });
 });
 

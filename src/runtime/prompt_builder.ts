@@ -61,6 +61,8 @@ export async function buildPrompt(input: PromptInput): Promise<string> {
 
 Return only one valid JSON object. Do not wrap it in Markdown.
 
+When the request asks about implementation, files, CLI commands, package metadata, or current project state, inspect actual files before final. A good pattern is search_files first, then read_file on the most relevant path matches such as package.json, README.md, src/cli.ts, src/index.ts, or bin entrypoints.
+
 For a tool call:
 {"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":""},"content":"","memoryCandidates":[]}
 

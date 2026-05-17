@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
+import { isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { readText, resolveExistingInside, resolveInside, writeText } from "./fs_utils.js";
@@ -58,8 +59,11 @@ export class ToolRegistry {
       execute: async (args, ctx) => {
         const parsed = searchFilesArgs.parse(args);
         const directory = resolveInside(ctx.workspaceRoot, parsed.directory ?? ".");
-        const { stdout, stderr } = await runRipgrep(parsed.query, directory);
-        const content = stdout.trim() || stderr.trim() || "No matches.";
+        const [contentMatches, pathMatches] = await Promise.all([
+          runRipgrep(parsed.query, directory),
+          findPathMatches(parsed.query, directory)
+        ]);
+        const content = formatSearchResult(contentMatches, pathMatches);
         return { ok: true, content };
       }
     });
@@ -122,4 +126,59 @@ async function runRipgrep(query: string, directory: string): Promise<{ stdout: s
       stderr: err.stderr ?? err.message
     };
   }
+}
+
+async function findPathMatches(query: string, directory: string): Promise<string[]> {
+  try {
+    const result = await execFileAsync("rg", ["--files", directory], {
+      maxBuffer: 1024 * 1024
+    });
+    return result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => toDisplayPath(line, directory))
+      .filter((path) => matchesPathQuery(path, query))
+      .slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+function formatSearchResult(
+  contentMatches: { stdout: string; stderr: string },
+  pathMatches: string[]
+): string {
+  const sections: string[] = [];
+  if (pathMatches.length > 0) {
+    sections.push(`Path matches:\n${pathMatches.join("\n")}`);
+  }
+  const content = contentMatches.stdout.trim();
+  if (content) {
+    sections.push(`Content matches:\n${content}`);
+  }
+  const errors = contentMatches.stderr.trim();
+  if (errors) {
+    sections.push(`Search diagnostics:\n${errors}`);
+  }
+  return sections.join("\n\n") || "No matches.";
+}
+
+function toDisplayPath(path: string, directory: string): string {
+  const display = isAbsolute(path) ? relative(directory, path) : path;
+  return display.replaceAll("\\", "/");
+}
+
+function matchesPathQuery(path: string, query: string): boolean {
+  const pathText = path.toLowerCase();
+  const normalizedQuery = query
+    .toLowerCase()
+    .replace(/[`"']/g, "")
+    .replaceAll("\\", "/")
+    .trim();
+  if (normalizedQuery && pathText.includes(normalizedQuery)) {
+    return true;
+  }
+  const tokens = normalizedQuery.split(/[^a-z0-9_.-]+/i).filter((token) => token.length >= 2);
+  return tokens.length > 0 && tokens.every((token) => pathText.includes(token));
 }
