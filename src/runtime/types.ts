@@ -71,7 +71,10 @@ export const memoryCandidateSchema = z.object({
 
 export type MemoryCandidate = z.infer<typeof memoryCandidateSchema>;
 
-export const memoryCandidateStatusSchema = z.enum(["pending", "promoted", "discarded"]);
+export const riskLevelSchema = z.enum(["low", "medium", "high"]);
+export type RiskLevel = z.infer<typeof riskLevelSchema>;
+
+export const memoryCandidateStatusSchema = z.enum(["pending", "promoted", "discarded", "auto_promoted", "reverted"]);
 export type MemoryCandidateStatus = z.infer<typeof memoryCandidateStatusSchema>;
 
 export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
@@ -79,9 +82,13 @@ export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
   status: memoryCandidateStatusSchema,
   sourceSessionId: z.string().min(1),
   sourceAgentId: z.string().min(1),
+  runId: z.string().optional(),
   createdAt: z.string().min(1),
   reviewedAt: z.string().optional(),
   promotedMemoryId: z.string().optional(),
+  autoPromotionId: z.string().optional(),
+  riskLevel: riskLevelSchema.optional(),
+  riskReasons: z.array(z.string()).optional(),
   discardReason: z.string().optional()
 });
 

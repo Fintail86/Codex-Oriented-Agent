@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { classifyMemoryCandidate, redactedCandidatePreview, type RiskClassification } from "./risk_classifier.js";
 import {
   memoryCandidateRecordSchema,
   memoryCandidateSchema,
@@ -11,6 +12,7 @@ import {
   type MemoryCandidateRecord,
   type MemoryRecord,
   type MemoryScope,
+  type RiskLevel,
   type SessionMetadata
 } from "./types.js";
 
@@ -88,6 +90,47 @@ export type PromoteCandidateOptions = {
   replaceMemoryId?: string;
   mergeMemoryId?: string;
   mergeContent?: string;
+};
+
+export type AutoPromotionMode = "manual" | "conservative" | "balanced" | "strict";
+
+export type AutoPromotionPolicy = {
+  mode: AutoPromotionMode;
+  allowRiskLevels: RiskLevel[];
+  requireNoConflict: boolean;
+  allowScopes: MemoryScope[];
+  denyScopes: MemoryScope[];
+  denyKinds: string[];
+};
+
+export type AutoPromotionRecord = {
+  id: string;
+  candidateId: string;
+  promotedMemoryId: string;
+  runId?: string;
+  sessionId: string;
+  agentId: string;
+  riskLevel: RiskLevel;
+  reasons: string[];
+  policyMode: AutoPromotionMode;
+  createdAt: string;
+  revertedAt?: string;
+  revertReason?: string;
+};
+
+export type CandidateReview = {
+  candidate: MemoryCandidateRecord;
+  conflicts: MemoryConflict[];
+  classification: RiskClassification;
+  autoPromoted?: AutoPromotionRecord;
+};
+
+export type MemoryReviewSummary = {
+  created: number;
+  autoPromoted: number;
+  pending: number;
+  conflicts: number;
+  reviews: CandidateReview[];
 };
 
 const memoryColumnMigrations: Record<string, string> = {
@@ -270,24 +313,26 @@ export class MemoryManager {
     return results;
   }
 
-  async appendCandidates(candidates: MemoryCandidate[] | undefined, session: SessionMetadata): Promise<void> {
+  async appendCandidates(candidates: MemoryCandidate[] | undefined, session: SessionMetadata, runId?: string): Promise<MemoryCandidateRecord[]> {
     if (!candidates?.length) {
-      return;
+      return [];
     }
     this.ensureMemoryDir();
-    const lines = candidates.map((candidate) => {
+    const records: MemoryCandidateRecord[] = candidates.map((candidate) => {
       const parsed = memoryCandidateSchema.parse(candidate);
-      const record: MemoryCandidateRecord = {
+      return {
         id: randomUUID(),
-        status: "pending",
+        status: "pending" as const,
         ...parsed,
         sourceSessionId: session.id,
         sourceAgentId: session.agentId,
+        runId,
         createdAt: new Date().toISOString()
       };
-      return JSON.stringify(record);
     });
+    const lines = records.map((record) => JSON.stringify(record));
     await appendFile(join(this.memoryDir, "memory_candidates.jsonl"), `${lines.join("\n")}\n`, "utf8");
+    return records;
   }
 
   async listCandidates(includeAll = false): Promise<CandidateView[]> {
@@ -360,6 +405,106 @@ export class MemoryManager {
     return (await this.listCandidates(false)).filter((candidate) => candidate.record?.status === "pending").length;
   }
 
+  async reviewCandidates(candidates: MemoryCandidateRecord[], policy: AutoPromotionPolicy): Promise<MemoryReviewSummary> {
+    const reviews: CandidateReview[] = [];
+    for (const candidate of candidates) {
+      const conflicts = this.findConflictsForCandidate(candidate);
+      const classification = classifyMemoryCandidate(candidate, conflicts.length > 0);
+      let autoPromoted: AutoPromotionRecord | undefined;
+      if (shouldAutoPromote(candidate, conflicts, classification, policy)) {
+        autoPromoted = this.autoPromoteCandidate(candidate.id, classification, policy.mode);
+      }
+      reviews.push({ candidate, conflicts, classification, autoPromoted });
+    }
+    return summarizeReviews(reviews);
+  }
+
+  async reviewPendingCandidates(options: { latest?: boolean } = {}): Promise<CandidateReview[]> {
+    const candidates = (await this.listCandidates()).flatMap((candidate) => candidate.record ? [candidate.record] : []);
+    const selected = options.latest ? latestRunCandidates(candidates) : candidates;
+    return selected.map((candidate) => {
+      const conflicts = this.findConflictsForCandidate(candidate);
+      return {
+        candidate,
+        conflicts,
+        classification: classifyMemoryCandidate(candidate, conflicts.length > 0)
+      };
+    });
+  }
+
+  listPromotions(includeReverted = false): AutoPromotionRecord[] {
+    return this.readPromotionEntries().filter((record) => includeReverted || !record.revertedAt);
+  }
+
+  getPromotion(promotionId: string): AutoPromotionRecord {
+    return resolvePromotionFromEntries(this.readPromotionEntries(), promotionId, true);
+  }
+
+  revertPromotion(promotionId: string, reason: string): AutoPromotionRecord {
+    const promotions = this.readPromotionEntries();
+    const promotion = resolvePromotionFromEntries(promotions, promotionId, false);
+    this.archiveMemory(promotion.promotedMemoryId, `Reverted auto promotion ${promotion.id}: ${reason}`);
+    const entries = this.readCandidateEntriesSync();
+    const index = this.resolveCandidateIndex(entries, promotion.candidateId);
+    const candidate = entries[index].record;
+    if (candidate) {
+      entries[index] = candidateToView({
+        ...candidate,
+        status: "reverted",
+        reviewedAt: new Date().toISOString()
+      }, index + 1);
+      this.writeCandidateEntriesSync(entries);
+    }
+    const updated = {
+      ...promotion,
+      revertedAt: new Date().toISOString(),
+      revertReason: reason
+    };
+    const promotionIndex = promotions.findIndex((record) => record.id === promotion.id);
+    promotions[promotionIndex] = updated;
+    this.writePromotionEntriesSync(promotions);
+    return updated;
+  }
+
+  async promoteAllLowRisk(options: { yes?: boolean } = {}): Promise<MemoryReviewSummary> {
+    const reviews = await this.reviewPendingCandidates();
+    const promotable = reviews.filter((review) => review.classification.riskLevel === "low" && !review.conflicts.length);
+    if (!options.yes) {
+      return summarizeReviews(promotable);
+    }
+    const promoted: CandidateReview[] = [];
+    for (const review of promotable) {
+      const memory = await this.promoteCandidate(review.candidate.id);
+      promoted.push({
+        ...review,
+        autoPromoted: {
+          id: `manual-batch:${memory.id}`,
+          candidateId: review.candidate.id,
+          promotedMemoryId: memory.id,
+          sessionId: review.candidate.sourceSessionId,
+          agentId: review.candidate.sourceAgentId,
+          riskLevel: review.classification.riskLevel,
+          reasons: review.classification.reasons,
+          policyMode: "manual",
+          createdAt: new Date().toISOString()
+        }
+      });
+    }
+    return summarizeReviews(promoted);
+  }
+
+  async discardAllLowRisk(reason: string, options: { yes?: boolean } = {}): Promise<MemoryReviewSummary> {
+    const reviews = await this.reviewPendingCandidates();
+    const discardable = reviews.filter((review) => review.classification.riskLevel === "low" && !review.conflicts.length);
+    if (!options.yes) {
+      return summarizeReviews(discardable);
+    }
+    for (const review of discardable) {
+      await this.discardCandidate(review.candidate.id, reason);
+    }
+    return summarizeReviews(discardable);
+  }
+
   private insertCandidateMemory(entries: CandidateView[], index: number, candidate: MemoryCandidateRecord): MemoryRecord {
     return this.transactCandidateUpdate(entries, index, (db) => {
       const promoted = insertMemory(db, candidateToMemoryInput(candidate));
@@ -370,6 +515,43 @@ export class MemoryManager {
           status: "promoted",
           reviewedAt: new Date().toISOString(),
           promotedMemoryId: promoted.id
+        }
+      };
+    });
+  }
+
+  private autoPromoteCandidate(candidateId: string, classification: RiskClassification, policyMode: AutoPromotionMode): AutoPromotionRecord {
+    const entries = this.readCandidateEntriesSync();
+    const index = this.resolveCandidateIndex(entries, candidateId);
+    const entry = entries[index];
+    if (entry.legacy || !entry.record || entry.record.status !== "pending") {
+      throw new Error(`Memory candidate is not pending: ${candidateId}`);
+    }
+    return this.transactCandidateUpdate(entries, index, (db) => {
+      const promoted = insertMemory(db, candidateToMemoryInput(entry.record as MemoryCandidateRecord));
+      const promotion: AutoPromotionRecord = {
+        id: randomUUID(),
+        candidateId: entry.record!.id,
+        promotedMemoryId: promoted.id,
+        runId: entry.record!.runId,
+        sessionId: entry.record!.sourceSessionId,
+        agentId: entry.record!.sourceAgentId,
+        riskLevel: classification.riskLevel,
+        reasons: classification.reasons,
+        policyMode,
+        createdAt: new Date().toISOString()
+      };
+      this.appendPromotionSync(promotion);
+      return {
+        result: promotion,
+        candidate: {
+          ...entry.record!,
+          status: "auto_promoted",
+          reviewedAt: new Date().toISOString(),
+          promotedMemoryId: promoted.id,
+          autoPromotionId: promotion.id,
+          riskLevel: classification.riskLevel,
+          riskReasons: classification.reasons
         }
       };
     });
@@ -426,6 +608,7 @@ export class MemoryManager {
     this.ensureSchema();
     this.ensureMemoryDir();
     const candidateSnapshot = this.candidateFileTextSync();
+    const promotionSnapshot = this.promotionFileTextSync();
     const db = this.open();
     try {
       db.exec("BEGIN IMMEDIATE");
@@ -442,6 +625,7 @@ export class MemoryManager {
       }
       try {
         writeFileSync(this.candidatePath(), candidateSnapshot, "utf8");
+        writeFileSync(this.promotionPath(), promotionSnapshot, "utf8");
       } catch {
         // Best-effort restore for the JSONL side of the transaction.
       }
@@ -574,27 +758,17 @@ export class MemoryManager {
       await writeFile(path, "", "utf8");
       return [];
     }
-    const text = await readFile(path, "utf8");
-    const entries: CandidateView[] = [];
-    text.split(/\r?\n/).forEach((line, index) => {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        return;
-      }
-      const lineNumber = index + 1;
-      const raw = JSON.parse(trimmed) as Record<string, unknown>;
-      const parsed = memoryCandidateRecordSchema.safeParse(raw);
-      if (parsed.success) {
-        entries.push(candidateToView(parsed.data, lineNumber));
-      } else {
-        entries.push({
-          displayId: `line:${lineNumber}`,
-          legacy: true,
-          raw
-        });
-      }
-    });
-    return entries;
+    return parseCandidateEntries(await readFile(path, "utf8"));
+  }
+
+  private readCandidateEntriesSync(): CandidateView[] {
+    this.ensureMemoryDir();
+    const path = this.candidatePath();
+    if (!existsSync(path)) {
+      writeFileSync(path, "", "utf8");
+      return [];
+    }
+    return parseCandidateEntries(readFileSync(path, "utf8"));
   }
 
   private async writeCandidateEntries(entries: CandidateView[]): Promise<void> {
@@ -612,6 +786,37 @@ export class MemoryManager {
     return existsSync(path) ? readFileSync(path, "utf8") : "";
   }
 
+  private readPromotionEntries(): AutoPromotionRecord[] {
+    this.ensureMemoryDir();
+    const path = this.promotionPath();
+    if (!existsSync(path)) {
+      writeFileSync(path, "", "utf8");
+      return [];
+    }
+    return readFileSync(path, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as AutoPromotionRecord);
+  }
+
+  private writePromotionEntriesSync(entries: AutoPromotionRecord[]): void {
+    this.ensureMemoryDir();
+    writeFileSync(this.promotionPath(), entries.length ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "", "utf8");
+  }
+
+  private appendPromotionSync(record: AutoPromotionRecord): void {
+    this.ensureMemoryDir();
+    const entries = this.readPromotionEntries();
+    entries.push(record);
+    this.writePromotionEntriesSync(entries);
+  }
+
+  private promotionFileTextSync(): string {
+    const path = this.promotionPath();
+    return existsSync(path) ? readFileSync(path, "utf8") : "";
+  }
+
   private ensureMemoryDir(): void {
     if (!existsSync(this.memoryDir)) {
       mkdirSync(this.memoryDir, { recursive: true });
@@ -620,6 +825,10 @@ export class MemoryManager {
 
   private candidatePath(): string {
     return join(this.memoryDir, "memory_candidates.jsonl");
+  }
+
+  private promotionPath(): string {
+    return join(this.memoryDir, "auto_promotions.jsonl");
   }
 
   private open(): DatabaseSync {
@@ -652,6 +861,115 @@ export function calculateMemoryScore(query: string, record: MemoryRecord): Memor
     score: Number(score.toFixed(2)),
     matchedTokens
   };
+}
+
+export function formatMemoryReviewSummary(summary: MemoryReviewSummary): string {
+  const lines = [
+    `Memory review: ${summary.created} candidates`,
+    `Auto-promoted: ${summary.autoPromoted}`,
+    `Pending review: ${summary.pending}`,
+    `Conflicts: ${summary.conflicts}`
+  ];
+  for (const review of summary.reviews) {
+    const id = review.candidate.id.slice(0, 8);
+    const status = review.autoPromoted ? "auto-promoted" : "pending";
+    const conflictText = review.conflicts.length ? ` conflicts:${review.conflicts.length}` : "";
+    lines.push(`- ${id} ${status} risk:${review.classification.riskLevel}${conflictText} ${review.candidate.scope}/${review.candidate.kind}`);
+    lines.push(`  reasons: ${review.classification.reasons.join(", ") || "none"}`);
+    lines.push(`  content: ${redactedCandidatePreview(review.candidate, review.classification)}`);
+    if (review.conflicts.length) {
+      lines.push(`  review: cosia memory candidate conflicts ${id}`);
+    }
+    if (review.autoPromoted) {
+      lines.push(`  revert: cosia memory promotion revert ${review.autoPromoted.id.slice(0, 8)} --reason "<reason>"`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function shouldAutoPromote(
+  candidate: MemoryCandidateRecord,
+  conflicts: MemoryConflict[],
+  classification: RiskClassification,
+  policy: AutoPromotionPolicy
+): boolean {
+  if (policy.mode === "manual" || policy.mode === "strict") {
+    return false;
+  }
+  if (policy.requireNoConflict && conflicts.length > 0) {
+    return false;
+  }
+  if (policy.denyScopes.includes(candidate.scope) || policy.denyKinds.includes(candidate.kind.toLowerCase())) {
+    return false;
+  }
+  if (!policy.allowScopes.includes(candidate.scope)) {
+    return false;
+  }
+  const modeAllowedLevels = policy.mode === "balanced" ? ["low", "medium"] : ["low"];
+  const allowedLevels = policy.allowRiskLevels.filter((level) => modeAllowedLevels.includes(level));
+  return classification.autoPromotable && allowedLevels.includes(classification.riskLevel);
+}
+
+function summarizeReviews(reviews: CandidateReview[]): MemoryReviewSummary {
+  return {
+    created: reviews.length,
+    autoPromoted: reviews.filter((review) => review.autoPromoted).length,
+    pending: reviews.filter((review) => !review.autoPromoted).length,
+    conflicts: reviews.filter((review) => review.conflicts.length > 0).length,
+    reviews
+  };
+}
+
+function latestRunCandidates(candidates: MemoryCandidateRecord[]): MemoryCandidateRecord[] {
+  const latestRunId = [...candidates].reverse().find((candidate) => candidate.runId)?.runId;
+  if (latestRunId) {
+    return candidates.filter((candidate) => candidate.runId === latestRunId);
+  }
+  const latestCreatedAt = candidates.map((candidate) => candidate.createdAt).sort().at(-1);
+  return latestCreatedAt ? candidates.filter((candidate) => candidate.createdAt === latestCreatedAt) : [];
+}
+
+function resolvePromotionFromEntries(entries: AutoPromotionRecord[], promotionId: string, includeReverted: boolean): AutoPromotionRecord {
+  const normalized = promotionId.trim();
+  if (!normalized) {
+    throw new Error("Promotion id is required.");
+  }
+  const candidates = includeReverted ? entries : entries.filter((entry) => !entry.revertedAt);
+  const exact = candidates.find((entry) => entry.id === normalized);
+  if (exact) {
+    return exact;
+  }
+  const matches = candidates.filter((entry) => entry.id.startsWith(normalized));
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (matches.length > 1) {
+    throw new Error(`Promotion id prefix is ambiguous: ${promotionId}. Matches: ${matches.map((entry) => entry.id).join(", ")}`);
+  }
+  throw new Error(`Promotion not found: ${promotionId}`);
+}
+
+function parseCandidateEntries(text: string): CandidateView[] {
+  const entries: CandidateView[] = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    const lineNumber = index + 1;
+    const raw = JSON.parse(trimmed) as Record<string, unknown>;
+    const parsed = memoryCandidateRecordSchema.safeParse(raw);
+    if (parsed.success) {
+      entries.push(candidateToView(parsed.data, lineNumber));
+    } else {
+      entries.push({
+        displayId: `line:${lineNumber}`,
+        legacy: true,
+        raw
+      });
+    }
+  });
+  return entries;
 }
 
 export function normalizeMemoryText(value: string): string {

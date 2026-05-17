@@ -1,8 +1,8 @@
-# COSIA v0.4
+# COSIA v0.5
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, memory conflict review, require-tools execution discipline, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, memory conflict review, governed auto-promotion, revertable memory promotion logs, require-tools execution discipline, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -94,12 +94,19 @@ cosia memory show <memory-id>
 cosia memory update <memory-id> --content "<content>"
 cosia memory archive <memory-id> --reason "<reason>"
 cosia memory candidate list
+cosia memory candidate review --latest
+cosia memory candidate review --pending
 cosia memory candidate show <candidate-id>
 cosia memory candidate conflicts <candidate-id>
 cosia memory candidate promote <candidate-id> --force
 cosia memory candidate promote <candidate-id> --replace <memory-id>
 cosia memory candidate promote <candidate-id> --merge <memory-id> --content "<merged content>"
+cosia memory candidate promote --all-low-risk --yes
 cosia memory candidate discard <candidate-id> --reason "<reason>"
+cosia memory candidate discard --all-low-risk --reason "<reason>" --yes
+cosia memory promotion list
+cosia memory promotion show <promotion-id>
+cosia memory promotion revert <promotion-id> --reason "<reason>"
 cosia policy show
 cosia policy check
 cosia policy sync
@@ -117,7 +124,7 @@ cosia session show <session-id>
 - `codex/POLICY.json` is the runtime policy source of truth.
 - `codex/POLICY.md` mirrors the JSON policy for humans.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.4.
+- Destructive, network, external-send, and shell tools are not registered in v0.5.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
 - `write_file` does not satisfy `--require-tools`; it is not an observation tool.
@@ -125,6 +132,9 @@ cosia session show <session-id>
 - Memory candidates are written to `memory/memory_candidates.jsonl` and must be explicitly promoted.
 - Memory search is scored with deterministic keyword, importance, confidence, and recency signals.
 - Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
+- Low-risk, no-conflict memory candidates can be auto-promoted by runtime policy.
+- Auto-promotions are recorded in `memory/auto_promotions.jsonl` and can be reverted.
+- Secret-like candidates are high-risk and remain pending with redacted summaries.
 - Long-term memory archive is explicit CLI-only soft deletion.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
 
@@ -150,10 +160,13 @@ cosia memory show <memory-id>
 cosia memory update <memory-id> --importance 5 --confidence 0.9
 cosia memory archive <memory-id> --reason "Superseded by newer decision"
 cosia memory candidate list
+cosia memory candidate review --latest
 cosia memory candidate show <candidate-id>
 cosia memory candidate conflicts <candidate-id>
 cosia memory candidate promote <candidate-id> --replace <memory-id>
 cosia memory candidate discard <candidate-id> --reason "Not durable enough"
+cosia memory promotion list
+cosia memory promotion revert <promotion-id> --reason "Not durable enough"
 ```
 
 Candidate ids accept unique prefixes:
@@ -178,6 +191,6 @@ npm test
 
 ## Roadmap
 
-- v0.5: Skill candidate loop with manual promotion.
-- v0.6: Codex amendment gate for constitutional changes.
+- v0.6: Skill candidate loop with manual promotion.
+- v0.7: Codex amendment gate for constitutional changes.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.

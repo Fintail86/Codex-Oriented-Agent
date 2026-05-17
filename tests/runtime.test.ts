@@ -10,6 +10,7 @@ import { parseModelOutput } from "../src/runtime/model/model_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { PolicyManager } from "../src/runtime/policy_manager.js";
 import { buildPrompt } from "../src/runtime/prompt_builder.js";
+import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
@@ -48,8 +49,9 @@ describe("runtime setup", () => {
     expect(manifest.allowedTools).toEqual(["read_file", "write_file", "search_files"]);
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
-    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.4.0\"");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.5.0\"");
     expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
+    expect(await readFile(join(root, "memory", "auto_promotions.jsonl"), "utf8")).toBe("");
   });
 
   it("builds prompts in the required order", async () => {
@@ -417,6 +419,83 @@ describe("memory", () => {
     expect(merged.id).toBe(existing.id);
     expect(memory.getMemory(existing.id).content).toContain("COSIA");
   });
+
+  it("classifies secret-like candidates as high risk with redaction", async () => {
+    const candidate = {
+      id: "candidate-secret",
+      status: "pending" as const,
+      scope: "project" as const,
+      kind: "decision",
+      content: "Use token = \"sk-testsecret1234567890\" for local auth.",
+      importance: 3,
+      confidence: 0.8,
+      sourceSessionId: "session-test",
+      sourceAgentId: "architect-agent",
+      createdAt: new Date().toISOString()
+    };
+
+    const secret = detectSecrets(candidate.content);
+    expect(secret.matched).toBe(true);
+    expect(secret.redactedPreview).toContain("[REDACTED]");
+    const classification = classifyMemoryCandidate(candidate, false);
+    expect(classification.riskLevel).toBe("high");
+    expect(classification.autoPromotable).toBe(false);
+  });
+
+  it("auto-promotes low-risk no-conflict candidates and can revert them", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Auto promote safe memory");
+    const events: string[] = [];
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_CANDIDATE] auto promote safe memory",
+      providerId: "mock",
+      onEvent: (message) => events.push(message)
+    });
+
+    expect(events.some((event) => event.includes("memory review: 1 candidates, 1 auto-promoted"))).toBe(true);
+    const memory = new MemoryManager(root);
+    const promotions = memory.listPromotions();
+    expect(promotions).toHaveLength(1);
+    expect((await memory.listCandidates(true))[0].record?.status).toBe("auto_promoted");
+
+    const reverted = memory.revertPromotion(promotions[0].id.slice(0, 12), "test revert");
+    expect(reverted.revertedAt).toBeTruthy();
+    expect(memory.getMemory(promotions[0].promotedMemoryId).status).toBe("archived");
+    expect((await memory.listCandidates(true))[0].record?.status).toBe("reverted");
+  });
+
+  it("keeps conflicting candidates pending after a run", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Keep conflicts pending");
+    const memory = new MemoryManager(root);
+    memory.addMemory({
+      scope: "project",
+      kind: "note",
+      content: "Mock candidate memory",
+      importance: 3,
+      confidence: 0.8
+    });
+    const events: string[] = [];
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_CANDIDATE] conflict pending memory",
+      providerId: "mock",
+      onEvent: (message) => events.push(message)
+    });
+
+    expect(events.some((event) => event.includes("memory review: 1 candidates, 0 auto-promoted, 1 pending, 1 conflicts"))).toBe(true);
+    expect(memory.listPromotions()).toHaveLength(0);
+    expect((await memory.listCandidates())[0].record?.status).toBe("pending");
+  });
 });
 
 describe("model parsing and run loop", () => {
@@ -721,7 +800,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.4.0");
+    expect(emptyReport.version).toBe("0.5.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

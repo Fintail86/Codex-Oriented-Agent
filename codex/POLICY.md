@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.4.0`
+- Policy version: `0.5.0`
 
 ## Tools
 
@@ -38,3 +38,6 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Candidate scopes: `global`, `user`, `codex`, `agent`, `project`, `session`, `task`, `tool`
 - Promotion conflict policy: `block_until_resolved`
 - Archive policy: `explicit_cli_only`
+- Auto promotion mode: `conservative`
+- Auto promotion risk levels: `low`
+- Auto promotion requires no conflict: `true`

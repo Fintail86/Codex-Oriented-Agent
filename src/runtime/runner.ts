@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { approveOverwrite } from "./approval_gate.js";
 import { AgentManager } from "./agent_manager.js";
-import { MemoryManager } from "./memory_manager.js";
+import { formatMemoryReviewSummary, MemoryManager } from "./memory_manager.js";
 import { createProvider } from "./model/provider_registry.js";
 import { PolicyAuditLog } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
@@ -93,7 +93,14 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         continue;
       }
       finalContent = output.step.content;
-      await memory.appendCandidates(output.step.memoryCandidates, session);
+      const candidates = await memory.appendCandidates(output.step.memoryCandidates, session, runId);
+      if (candidates.length) {
+        const summary = await memory.reviewCandidates(candidates, policy.memory.autoPromotion);
+        options.onEvent?.(`memory review: ${summary.created} candidates, ${summary.autoPromoted} auto-promoted, ${summary.pending} pending, ${summary.conflicts} conflicts`);
+        for (const line of formatMemoryReviewSummary(summary).split(/\r?\n/).slice(1)) {
+          options.onEvent?.(line);
+        }
+      }
       break;
     }
     if (forceFinal) {

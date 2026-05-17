@@ -1,5 +1,5 @@
 {
-  "version": "0.4.0",
+  "version": "0.5.0",
   "tools": {
     "read_file": {
       "permission": "read_only",
@@ -65,6 +65,30 @@
       "tool"
     ],
     "promotionConflictPolicy": "block_until_resolved",
-    "archivePolicy": "explicit_cli_only"
+    "archivePolicy": "explicit_cli_only",
+    "autoPromotion": {
+      "mode": "conservative",
+      "allowRiskLevels": [
+        "low"
+      ],
+      "requireNoConflict": true,
+      "allowScopes": [
+        "project",
+        "session",
+        "task",
+        "tool"
+      ],
+      "denyScopes": [
+        "codex",
+        "user",
+        "global"
+      ],
+      "denyKinds": [
+        "security",
+        "policy",
+        "credential",
+        "secret"
+      ]
+    }
   }
 }

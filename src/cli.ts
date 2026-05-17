@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { AgentManager } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
-import { formatMemoryConflicts, MemoryManager } from "./runtime/memory_manager.js";
+import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import { runSession } from "./runtime/runner.js";
@@ -226,6 +226,8 @@ memory
 
 const candidate = memory.command("candidate").description("Review memory candidates.");
 
+const promotion = memory.command("promotion").description("Review automatic memory promotions.");
+
 candidate
   .command("list")
   .option("--all", "Show pending, promoted, discarded, and legacy candidates.", false)
@@ -262,15 +264,29 @@ candidate
 
 candidate
   .command("promote")
-  .argument("<candidate-id>")
+  .argument("[candidate-id]")
   .option("--force", "Promote even if conflicts are detected.", false)
   .option("--replace <memory-id>", "Archive an existing memory and promote this candidate.")
   .option("--merge <memory-id>", "Merge this candidate into an existing memory.")
   .option("--content <content>", "Merged memory content for --merge.")
+  .option("--all-low-risk", "Promote all low-risk pending candidates with no conflicts.", false)
+  .option("--yes", "Confirm a batch operation.", false)
   .description("Promote a pending memory candidate into long-term memory.")
-  .action(async (candidateId: string, options: { force: boolean; replace?: string; merge?: string; content?: string }) => {
+  .action(async (candidateId: string | undefined, options: { force: boolean; replace?: string; merge?: string; content?: string; allLowRisk: boolean; yes: boolean }) => {
     await main(async (workspaceRoot) => {
-      const record = await new MemoryManager(workspaceRoot).promoteCandidate(candidateId, {
+      const manager = new MemoryManager(workspaceRoot);
+      if (options.allLowRisk) {
+        const summary = await manager.promoteAllLowRisk({ yes: options.yes });
+        console.log(formatMemoryReviewSummary(summary));
+        if (!options.yes) {
+          console.log("\nNo changes made. Re-run with --yes to promote these candidates.");
+        }
+        return;
+      }
+      if (!candidateId) {
+        throw new Error("candidate-id is required unless --all-low-risk is used.");
+      }
+      const record = await manager.promoteCandidate(candidateId, {
         force: options.force,
         replaceMemoryId: options.replace,
         mergeMemoryId: options.merge,
@@ -297,14 +313,87 @@ candidate
   });
 
 candidate
-  .command("discard")
-  .argument("<candidate-id>")
-  .requiredOption("--reason <reason>", "Discard reason")
-  .description("Discard a pending memory candidate.")
-  .action(async (candidateId: string, options: { reason: string }) => {
+  .command("review")
+  .option("--latest", "Review pending candidates from the latest run.", false)
+  .option("--pending", "Review all pending candidates.", false)
+  .description("Show risk and conflict review for memory candidates.")
+  .action(async (options: { latest: boolean; pending: boolean }) => {
     await main(async (workspaceRoot) => {
-      const record = await new MemoryManager(workspaceRoot).discardCandidate(candidateId, options.reason);
+      const manager = new MemoryManager(workspaceRoot);
+      const reviews = await manager.reviewPendingCandidates({ latest: options.latest && !options.pending });
+      console.log(formatMemoryReviewSummary({
+        created: reviews.length,
+        autoPromoted: 0,
+        pending: reviews.length,
+        conflicts: reviews.filter((review) => review.conflicts.length).length,
+        reviews
+      }));
+    });
+  });
+
+candidate
+  .command("discard")
+  .argument("[candidate-id]")
+  .requiredOption("--reason <reason>", "Discard reason")
+  .option("--all-low-risk", "Discard all low-risk pending candidates with no conflicts.", false)
+  .option("--yes", "Confirm a batch operation.", false)
+  .description("Discard a pending memory candidate.")
+  .action(async (candidateId: string | undefined, options: { reason: string; allLowRisk: boolean; yes: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const manager = new MemoryManager(workspaceRoot);
+      if (options.allLowRisk) {
+        const summary = await manager.discardAllLowRisk(options.reason, { yes: options.yes });
+        console.log(formatMemoryReviewSummary(summary));
+        if (!options.yes) {
+          console.log("\nNo changes made. Re-run with --yes to discard these candidates.");
+        }
+        return;
+      }
+      if (!candidateId) {
+        throw new Error("candidate-id is required unless --all-low-risk is used.");
+      }
+      const record = await manager.discardCandidate(candidateId, options.reason);
       console.log(`${record.id} discarded`);
+    });
+  });
+
+promotion
+  .command("list")
+  .option("--all", "Include reverted promotions.", false)
+  .description("List automatic memory promotions.")
+  .action(async (options: { all: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const records = new MemoryManager(workspaceRoot).listPromotions(options.all);
+      if (!records.length) {
+        console.log("No auto promotions.");
+        return;
+      }
+      for (const record of records) {
+        const status = record.revertedAt ? "reverted" : "active";
+        console.log(`${record.id}\t${status}\t${record.riskLevel}\tmem:${record.promotedMemoryId.slice(0, 8)}\tcandidate:${record.candidateId.slice(0, 8)}`);
+      }
+    });
+  });
+
+promotion
+  .command("show")
+  .argument("<promotion-id>")
+  .description("Show one automatic memory promotion.")
+  .action(async (promotionId: string) => {
+    await main(async (workspaceRoot) => {
+      console.log(JSON.stringify(new MemoryManager(workspaceRoot).getPromotion(promotionId), null, 2));
+    });
+  });
+
+promotion
+  .command("revert")
+  .argument("<promotion-id>")
+  .requiredOption("--reason <reason>", "Revert reason")
+  .description("Archive the memory created by an automatic promotion.")
+  .action(async (promotionId: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      const record = new MemoryManager(workspaceRoot).revertPromotion(promotionId, options.reason);
+      console.log(`${record.id} reverted`);
     });
   });
 

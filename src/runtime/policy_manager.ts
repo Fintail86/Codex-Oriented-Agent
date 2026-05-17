@@ -2,13 +2,15 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { ensureDir, readText, writeText } from "./fs_utils.js";
-import { memoryScopeSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
+import { memoryScopeSchema, riskLevelSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
 
 const policyToolSchema = z.object({
   permission: toolPermissionSchema,
   workspace: z.literal("inside_only"),
   enabled: z.boolean()
 });
+
+const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
 
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
@@ -29,7 +31,22 @@ export const policyConfigSchema = z.object({
     longTermWrite: z.literal("candidate_promote_only"),
     candidateScopes: z.array(memoryScopeSchema),
     promotionConflictPolicy: z.literal("block_until_resolved").default("block_until_resolved"),
-    archivePolicy: z.literal("explicit_cli_only").default("explicit_cli_only")
+    archivePolicy: z.literal("explicit_cli_only").default("explicit_cli_only"),
+    autoPromotion: z.object({
+      mode: autoPromotionModeSchema,
+      allowRiskLevels: z.array(riskLevelSchema),
+      requireNoConflict: z.boolean(),
+      allowScopes: z.array(memoryScopeSchema),
+      denyScopes: z.array(memoryScopeSchema),
+      denyKinds: z.array(z.string().min(1))
+    }).default({
+      mode: "conservative",
+      allowRiskLevels: ["low"],
+      requireNoConflict: true,
+      allowScopes: ["project", "session", "task", "tool"],
+      denyScopes: ["codex", "user", "global"],
+      denyKinds: ["security", "policy", "credential", "secret"]
+    })
   })
 });
 
@@ -46,7 +63,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.4.0",
+  version: "0.5.0",
   tools: {
     read_file: {
       permission: "read_only",
@@ -95,7 +112,15 @@ export const defaultPolicy: PolicyConfig = {
     longTermWrite: "candidate_promote_only",
     candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"],
     promotionConflictPolicy: "block_until_resolved",
-    archivePolicy: "explicit_cli_only"
+    archivePolicy: "explicit_cli_only",
+    autoPromotion: {
+      mode: "conservative",
+      allowRiskLevels: ["low"],
+      requireNoConflict: true,
+      allowScopes: ["project", "session", "task", "tool"],
+      denyScopes: ["codex", "user", "global"],
+      denyKinds: ["security", "policy", "credential", "secret"]
+    }
   }
 };
 
@@ -226,6 +251,9 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Candidate scopes: ${policy.memory.candidateScopes.map((scope) => `\`${scope}\``).join(", ")}
 - Promotion conflict policy: \`${policy.memory.promotionConflictPolicy}\`
 - Archive policy: \`${policy.memory.archivePolicy}\`
+- Auto promotion mode: \`${policy.memory.autoPromotion.mode}\`
+- Auto promotion risk levels: ${policy.memory.autoPromotion.allowRiskLevels.map((level) => `\`${level}\``).join(", ")}
+- Auto promotion requires no conflict: \`${policy.memory.autoPromotion.requireNoConflict}\`
 `;
 }
 
@@ -239,7 +267,8 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Disabled permissions: ${policy.disabledPermissions.join(", ")}`,
     `Overwrite approval: ${policy.overwrite.existingFileRequiresApproval ? "required" : "not required"}`,
     `Long-term memory: ${policy.memory.longTermWrite}`,
-    `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`
+    `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`,
+    `Memory auto promotion: ${policy.memory.autoPromotion.mode}`
   ].join("\n");
 }
 

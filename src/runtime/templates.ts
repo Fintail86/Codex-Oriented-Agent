@@ -19,7 +19,7 @@ User preferences and long-term interaction notes belong here.
 
 - Do not expose secrets, API keys, tokens, or private credentials.
 - Do not write outside the workspace.
-- Destructive, shell, network, and external-send tools are disabled in v0.3.
+- Destructive, shell, network, and external-send tools are disabled.
 - Existing file overwrite requires explicit user approval.
 `
 };
@@ -52,6 +52,6 @@ Direct, practical, and precise.
 `,
   "SKILLS.md": `# SKILLS
 
-No skills are bundled in v0.2.
+No skills are bundled by default.
 `
 };
