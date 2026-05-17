@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { readText } from "./fs_utils.js";
+import type { PolicyConfig } from "./policy_manager.js";
 import type { AgentManifest, SessionMetadata } from "./types.js";
 
 type PromptInput = {
@@ -12,6 +13,7 @@ type PromptInput = {
   hasObservationTool?: boolean;
   requiresFileRead?: boolean;
   hasReadFile?: boolean;
+  policy?: PolicyConfig;
   remainingToolCalls?: number;
   forceFinal?: boolean;
 };
@@ -43,7 +45,7 @@ export async function buildPrompt(input: PromptInput): Promise<string> {
     ? `\n\n# TOOL RESULTS\n\n${input.toolResults.map((result, index) => `## Result ${index + 1}\n\n${result}`).join("\n\n")}`
     : "";
   const requireToolsText = input.requireTools
-    ? `\n\n# REQUIRE-TOOLS MODE\n\nThis run is in require-tools mode. Before returning a final answer, you must call at least one observation tool: read_file or search_files. write_file does not satisfy this requirement.${
+    ? `\n\n# REQUIRE-TOOLS MODE\n\nThis run is in require-tools mode. Before returning a final answer, you must call at least one observation tool: ${observationToolsText(input.policy)}. write_file satisfies this requirement: ${input.policy?.requireTools.writeFileSatisfies ?? false}.${
         input.hasObservationTool
           ? "\n\nThe observation requirement is already satisfied. Use the tool results you have. Prefer returning final now unless the last tool result failed and one more targeted observation is essential."
           : ""
@@ -90,4 +92,9 @@ ${toolText}
 
 ${input.userPrompt}
 `;
+}
+
+function observationToolsText(policy: PolicyConfig | undefined): string {
+  const tools = policy?.requireTools.observationTools ?? ["read_file", "search_files"];
+  return tools.map((tool) => `\`${tool}\``).join(", ");
 }

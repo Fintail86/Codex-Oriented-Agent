@@ -292,6 +292,53 @@ describe("model parsing and run loop", () => {
     expect(audit.some((event) => event.eventType === "tool_decision" && event.allowed && event.tool === "search_files")).toBe(true);
   });
 
+  it("uses POLICY.json observation tools as the source of truth for requireTools", async () => {
+    const root = await initializedWorkspace();
+    const policyPath = join(root, "codex", "POLICY.json");
+    const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
+    policy.requireTools = {
+      observationTools: ["read_file"],
+      writeFileSatisfies: false
+    };
+    await writeFile(policyPath, `${JSON.stringify(policy, null, 2)}\n`, "utf8");
+    await new PolicyManager(root).syncMarkdown();
+
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Policy observation source of truth");
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return parseModelOutput('{"type":"tool_call","tool":"search_files","args":{"query":"COSIA"}}');
+        }
+        if (calls === 2) {
+          return parseModelOutput('{"type":"final","content":"final after search only","memoryCandidates":[]}');
+        }
+        if (calls === 3) {
+          return parseModelOutput('{"type":"tool_call","tool":"read_file","args":{"path":"codex/RULES.md"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"final after policy observation","memoryCandidates":[]}');
+      }
+    };
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "Inspect policy",
+      provider,
+      requireTools: true
+    });
+
+    expect(content).toBe("final after policy observation");
+    expect(calls).toBe(4);
+    const audit = await new PolicyAuditLog(root).list(session.id, 20);
+    expect(audit.some((event) => event.ruleId === "runtime.require_tools.observation")).toBe(true);
+  });
+
   it("records denied workspace access and overwrite approval requirements in policy audit", async () => {
     const root = await initializedWorkspace();
     const agents = new AgentManager(root);

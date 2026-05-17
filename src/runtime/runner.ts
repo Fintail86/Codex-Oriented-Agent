@@ -4,11 +4,12 @@ import { AgentManager } from "./agent_manager.js";
 import { MemoryManager } from "./memory_manager.js";
 import { createProvider } from "./model/provider_registry.js";
 import { PolicyAuditLog } from "./policy_audit.js";
+import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { buildPrompt } from "./prompt_builder.js";
 import { SessionManager } from "./session_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
-import type { AgentStep, ModelProvider } from "./types.js";
+import type { AgentStep, ModelProvider, ToolName } from "./types.js";
 
 type RunOptions = {
   sessionId: string;
@@ -29,6 +30,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const session = await sessions.loadSession(options.sessionId);
   const agent = await agents.loadAgent(session.agentId);
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const policyEngine = new PolicyEngine(policy);
   const audit = new PolicyAuditLog(workspaceRoot);
   const recordPolicyEvent = audit.append.bind(audit, session);
   await memory.writeReferenceMemory(session, options.prompt);
@@ -42,17 +44,12 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   }
 
   const toolResults: string[] = [];
-  const toolNames: string[] = [];
-  let hasObservationTool = false;
-  let hasReadFile = false;
+  const toolNames: ToolName[] = [];
   let finalContent = "";
   let lastStep: AgentStep | undefined;
   const maxToolCalls = 5;
   const maxModelAttempts = maxToolCalls + 2;
   let toolCallCount = 0;
-  const requiresFileRead = Boolean(
-    options.requireTools && policy.fileInspection.requiresReadFile && asksForActualFiles(options.prompt, policy.fileInspection.triggerPhrases)
-  );
 
   for (let depth = 0; depth < maxModelAttempts; depth += 1) {
     const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
@@ -65,38 +62,31 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       userPrompt: options.prompt,
       toolResults,
       requireTools: options.requireTools,
-      hasObservationTool,
-      requiresFileRead,
-      hasReadFile,
+      hasObservationTool: hasObservationTool(toolNames, policy.requireTools.observationTools),
+      requiresFileRead: requiresFileRead(options.prompt, policy),
+      hasReadFile: toolNames.includes("read_file"),
+      policy,
       remainingToolCalls,
       forceFinal
     });
     const output = await complete(provider, prompt, session.id);
     lastStep = output.step;
     if (output.step.type === "final") {
-      if (options.requireTools && !hasObservationTool) {
-        options.onEvent?.("final rejected because require-tools has not observed with read_file/search_files yet");
+      const decision = policyEngine.evaluateFinalAnswer({
+        requireTools: options.requireTools,
+        userPrompt: options.prompt,
+        executedTools: toolNames
+      });
+      if (!decision.allowed) {
+        options.onEvent?.(`final rejected by policy ${decision.ruleId}`);
         await recordPolicyEvent({
           eventType: "final_rejection",
           allowed: false,
-          ruleId: "runtime.require_tools.observation",
-          reason: "Final answer rejected because no observation tool has run."
+          ruleId: decision.ruleId,
+          reason: decision.reason
         });
         toolResults.push(
-          "Runtime rejection: current mode is require-tools. You must call read_file or search_files at least once before returning final."
-        );
-        continue;
-      }
-      if (requiresFileRead && !hasReadFile) {
-        options.onEvent?.("final rejected because current request requires read_file before final");
-        await recordPolicyEvent({
-          eventType: "final_rejection",
-          allowed: false,
-          ruleId: "runtime.file_inspection.read_file_required",
-          reason: "Final answer rejected because explicit file inspection requires read_file."
-        });
-        toolResults.push(
-          "Runtime rejection: the current request asks to inspect actual files. search_files only finds candidate paths; call read_file on a relevant path before returning final."
+          `Runtime rejection: ${decision.reason} ${runtimeRetryInstruction(decision.ruleId, policy)}`
         );
         continue;
       }
@@ -120,12 +110,6 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     toolCallCount += 1;
     options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
     toolNames.push(output.step.tool);
-    if ((output.step.tool === "read_file" || output.step.tool === "search_files") && result.ok) {
-      hasObservationTool = true;
-    }
-    if (output.step.tool === "read_file" && result.ok) {
-      hasReadFile = true;
-    }
     toolResults.push(`Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`);
   }
 
@@ -156,26 +140,25 @@ ${finalContent}
 `;
 }
 
-function asksForActualFiles(prompt: string, triggerPhrases = defaultFileInspectionPhrases()): boolean {
+function hasObservationTool(toolNames: string[], observationTools: string[]): boolean {
+  return toolNames.some((tool) => observationTools.includes(tool));
+}
+
+function requiresFileRead(prompt: string, policy: { fileInspection: { requiresReadFile: boolean; triggerPhrases: string[] } }): boolean {
+  return policy.fileInspection.requiresReadFile && asksForActualFiles(prompt, policy.fileInspection.triggerPhrases);
+}
+
+function asksForActualFiles(prompt: string, triggerPhrases: string[]): boolean {
   const normalized = prompt.toLowerCase();
   return triggerPhrases.some((needle) => normalized.includes(needle.toLowerCase()));
 }
 
-function defaultFileInspectionPhrases(): string[] {
-  return [
-    "파일을 보고",
-    "실제 파일",
-    "파일 기준",
-    "파일 내용",
-    "파일을 확인",
-    "read_file",
-    "actual file",
-    "actual files",
-    "inspect file",
-    "inspect files",
-    "read the file",
-    "read files",
-    "from the file",
-    "from files"
-  ];
+function runtimeRetryInstruction(ruleId: string, policy: { requireTools: { observationTools: string[] } }): string {
+  if (ruleId === "runtime.require_tools.observation") {
+    return `Call one observation tool first: ${policy.requireTools.observationTools.join(", ")}.`;
+  }
+  if (ruleId === "runtime.file_inspection.read_file_required") {
+    return "Call read_file on a relevant path before returning final.";
+  }
+  return "Return a policy-compliant AgentStep.";
 }

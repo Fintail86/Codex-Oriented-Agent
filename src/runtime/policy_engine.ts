@@ -1,13 +1,19 @@
 import { stat } from "node:fs/promises";
 import { resolveInside } from "./fs_utils.js";
 import { defaultPolicy, type PolicyConfig } from "./policy_manager.js";
-import type { ToolDefinition } from "./types.js";
+import type { ToolDefinition, ToolName } from "./types.js";
 
 export type PolicyDecision = {
   allowed: boolean;
   ruleId: string;
   reason: string;
   requiresApproval?: "overwrite";
+};
+
+export type RuntimePolicyState = {
+  requireTools?: boolean;
+  userPrompt: string;
+  executedTools: ToolName[];
 };
 
 export class PolicyEngine {
@@ -88,6 +94,38 @@ export class PolicyEngine {
     }
   }
 
+  evaluateFinalAnswer(state: RuntimePolicyState): PolicyDecision {
+    if (state.requireTools) {
+      const hasObservationTool = state.executedTools.some((tool) => this.policy.requireTools.observationTools.includes(tool));
+      if (!hasObservationTool) {
+        return {
+          allowed: false,
+          ruleId: "runtime.require_tools.observation",
+          reason: `Final answer rejected because no observation tool has run. Required tools: ${this.policy.requireTools.observationTools.join(", ")}.`
+        };
+      }
+    }
+
+    if (
+      state.requireTools &&
+      this.policy.fileInspection.requiresReadFile &&
+      this.asksForActualFiles(state.userPrompt) &&
+      !state.executedTools.includes("read_file")
+    ) {
+      return {
+        allowed: false,
+        ruleId: "runtime.file_inspection.read_file_required",
+        reason: "Final answer rejected because explicit file inspection requires read_file."
+      };
+    }
+
+    return {
+      allowed: true,
+      ruleId: "runtime.final.allowed",
+      reason: "Final answer allowed by runtime policy."
+    };
+  }
+
   private evaluateInsideWorkspace(workspaceRoot: string, path: string): PolicyDecision {
     try {
       const resolved = resolveInside(workspaceRoot, path);
@@ -114,5 +152,10 @@ export class PolicyEngine {
       return value;
     }
     return undefined;
+  }
+
+  private asksForActualFiles(prompt: string): boolean {
+    const normalized = prompt.toLowerCase();
+    return this.policy.fileInspection.triggerPhrases.some((needle) => normalized.includes(needle.toLowerCase()));
   }
 }
