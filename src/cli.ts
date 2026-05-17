@@ -230,17 +230,20 @@ program
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
   .option("--provider <provider>", "Model provider: codex-cli or mock", "codex-cli")
+  .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .description("Run a session turn.")
-  .action(async (options: { session: string; prompt: string; provider: string; approveOverwrite: boolean; requireTools: boolean }) => {
+  .action(async (options: { session: string; prompt: string; provider: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean }) => {
     await main(async (workspaceRoot) => {
       const content = await runSession(workspaceRoot, {
         sessionId: options.session,
         prompt: options.prompt,
         providerId: options.provider,
+        providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
         approveOverwriteFiles: options.approveOverwrite,
-        requireTools: options.requireTools
+        requireTools: options.requireTools,
+        onEvent: (message) => console.error(`[cosia] ${message}`)
       });
       console.log(content);
     });

@@ -74,6 +74,12 @@ To force COSIA to inspect files before answering:
 cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보고 요약해줘." --require-tools
 ```
 
+If a Codex provider call takes too long, lower the per-call timeout:
+
+```powershell
+cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보고 요약해줘." --require-tools --provider-timeout-ms 60000
+```
+
 ## CLI Commands
 
 ```text
@@ -102,6 +108,7 @@ cosia session show <session-id>
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
 - `write_file` does not satisfy `--require-tools`; it is not an observation tool.
+- Codex provider calls have a default per-call timeout of 120000ms.
 - Memory candidates are written to `memory/memory_candidates.jsonl` and must be explicitly promoted.
 
 ## Memory Candidate Review

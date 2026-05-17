@@ -4,6 +4,7 @@ import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../t
 
 type CodexCliProviderOptions = {
   workspaceRoot: string;
+  timeoutMs?: number;
 };
 
 export class CodexCliProvider implements ModelProvider {
@@ -12,14 +13,15 @@ export class CodexCliProvider implements ModelProvider {
   constructor(private readonly options: CodexCliProviderOptions) {}
 
   async checkAuth(): Promise<AuthStatus> {
-    const result = await runCodex(["login", "status"], "", this.options.workspaceRoot);
+    const result = await runCodex(["login", "status"], "", this.options.workspaceRoot, 10_000);
     if (result.code === 0) {
       return { ok: true, message: result.stdout.trim() || "Codex login status is OK." };
     }
     const smoke = await runCodex(
       ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "-"],
       "Say only: codex-ready",
-      this.options.workspaceRoot
+      this.options.workspaceRoot,
+      30_000
     );
     return {
       ok: smoke.code === 0,
@@ -45,7 +47,8 @@ ${input.retryInstruction ?? modelInstructionForRetry(error)}
     const result = await runCodex(
       ["exec", "--json", "--ephemeral", "--sandbox", "read-only", "-"],
       prompt,
-      this.options.workspaceRoot
+      this.options.workspaceRoot,
+      this.options.timeoutMs ?? 120_000
     );
     if (result.code !== 0) {
       throw new Error(`codex exec failed: ${result.stderr || result.stdout}`);
@@ -93,7 +96,12 @@ function collectStrings(value: unknown, out: string[]): void {
   }
 }
 
-function runCodex(args: string[], stdin: string, cwd: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runCodex(
+  args: string[],
+  stdin: string,
+  cwd: string,
+  timeoutMs: number
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const command = process.platform === "win32" ? "cmd.exe" : "codex";
     const commandArgs = process.platform === "win32"
@@ -106,6 +114,16 @@ function runCodex(args: string[], stdin: string, cwd: string): Promise<{ code: n
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      stderr += `\nTimed out after ${timeoutMs}ms while running: codex ${args.join(" ")}`;
+      void killProcessTree(child.pid);
+      resolve({ code: null, stdout, stderr });
+    }, timeoutMs);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -114,11 +132,45 @@ function runCodex(args: string[], stdin: string, cwd: string): Promise<{ code: n
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
     child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
       resolve({ code, stdout, stderr });
     });
     child.stdin.end(stdin);
+  });
+}
+
+function killProcessTree(pid: number | undefined): Promise<void> {
+  if (!pid) {
+    return Promise.resolve();
+  }
+  if (process.platform !== "win32") {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // Process already exited.
+    }
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true
+    });
+    killer.on("close", () => resolve());
+    killer.on("error", () => resolve());
   });
 }
 

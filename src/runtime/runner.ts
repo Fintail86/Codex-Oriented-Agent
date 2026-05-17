@@ -15,6 +15,8 @@ type RunOptions = {
   approveOverwriteFiles?: boolean;
   requireTools?: boolean;
   provider?: ModelProvider;
+  providerTimeoutMs?: number;
+  onEvent?: (message: string) => void;
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
@@ -26,7 +28,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const agent = await agents.loadAgent(session.agentId);
   await memory.writeReferenceMemory(session, options.prompt);
 
-  const provider = options.provider ?? createProvider(options.providerId ?? "codex-cli", workspaceRoot);
+  const provider = options.provider ?? createProvider(options.providerId ?? "codex-cli", workspaceRoot, options.providerTimeoutMs);
   if (provider.id !== "mock") {
     const auth = await provider.checkAuth();
     if (!auth.ok) {
@@ -41,6 +43,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   let lastStep: AgentStep | undefined;
 
   for (let depth = 0; depth < 5; depth += 1) {
+    options.onEvent?.(`model step ${depth + 1}/5`);
     const prompt = await buildPrompt({
       workspaceRoot,
       agent,
@@ -53,6 +56,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     lastStep = output.step;
     if (output.step.type === "final") {
       if (options.requireTools && !hasObservationTool) {
+        options.onEvent?.("final rejected because require-tools has not observed with read_file/search_files yet");
         toolResults.push(
           "Runtime rejection: current mode is require-tools. You must call read_file or search_files at least once before returning final."
         );
@@ -67,6 +71,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       allowedTools: agent.allowedTools,
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false
     });
+    options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
     toolNames.push(output.step.tool);
     if ((output.step.tool === "read_file" || output.step.tool === "search_files") && result.ok) {
       hasObservationTool = true;
