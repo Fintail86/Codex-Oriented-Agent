@@ -275,10 +275,16 @@ policy
   .command("audit")
   .requiredOption("--session <session-id>", "Session id")
   .option("--limit <limit>", "Result limit", "20")
+  .option("--run-id <run-id>", "Show only events from one run id")
+  .option("--latest-run", "Show only events from the latest run id", false)
   .description("Show policy audit events for one session.")
-  .action(async (options: { session: string; limit: string }) => {
+  .action(async (options: { session: string; limit: string; runId?: string; latestRun: boolean }) => {
     await main(async (workspaceRoot) => {
-      const events = await new PolicyAuditLog(workspaceRoot).list(options.session, Number.parseInt(options.limit, 10));
+      const events = await new PolicyAuditLog(workspaceRoot).list(options.session, {
+        limit: Number.parseInt(options.limit, 10),
+        runId: options.runId,
+        latestRun: options.latestRun
+      });
       if (!events.length) {
         console.log("No policy audit events.");
         return;

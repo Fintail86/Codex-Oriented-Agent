@@ -156,6 +156,7 @@ export type PolicyAuditEventType = "tool_decision" | "final_rejection" | "approv
 
 export type PolicyAuditEvent = {
   id: string;
+  runId?: string;
   timestamp: string;
   sessionId: string;
   agentId: string;

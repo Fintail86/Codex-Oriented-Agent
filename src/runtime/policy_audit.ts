@@ -5,12 +5,19 @@ import { join } from "node:path";
 import { ensureDir } from "./fs_utils.js";
 import type { PolicyAuditEvent, PolicyAuditEventInput, SessionMetadata } from "./types.js";
 
+export type PolicyAuditListOptions = {
+  limit?: number;
+  runId?: string;
+  latestRun?: boolean;
+};
+
 export class PolicyAuditLog {
   constructor(private readonly workspaceRoot: string) {}
 
-  async append(session: SessionMetadata, input: PolicyAuditEventInput): Promise<void> {
+  async append(session: SessionMetadata, input: PolicyAuditEventInput, runId?: string): Promise<void> {
     const event: PolicyAuditEvent = {
       id: randomUUID(),
+      runId,
       timestamp: new Date().toISOString(),
       sessionId: session.id,
       agentId: session.agentId,
@@ -20,7 +27,7 @@ export class PolicyAuditLog {
     await appendFile(this.auditPath(session.id), `${JSON.stringify(event)}\n`, "utf8");
   }
 
-  async list(sessionId: string, limit = 20): Promise<PolicyAuditEvent[]> {
+  async list(sessionId: string, limitOrOptions: number | PolicyAuditListOptions = 20): Promise<PolicyAuditEvent[]> {
     const path = this.auditPath(sessionId);
     if (!existsSync(path)) {
       return [];
@@ -31,7 +38,10 @@ export class PolicyAuditLog {
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => JSON.parse(line) as PolicyAuditEvent);
-    return events.slice(Math.max(0, events.length - limit));
+    const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
+    const filtered = filterAuditEvents(events, options);
+    const limit = options.limit ?? 20;
+    return filtered.slice(Math.max(0, filtered.length - limit));
   }
 
   private auditPath(sessionId: string): string {
@@ -41,6 +51,17 @@ export class PolicyAuditLog {
   private sessionDir(sessionId: string): string {
     return join(this.workspaceRoot, "sessions", sessionId);
   }
+}
+
+function filterAuditEvents(events: PolicyAuditEvent[], options: PolicyAuditListOptions): PolicyAuditEvent[] {
+  if (options.runId) {
+    return events.filter((event) => event.runId === options.runId);
+  }
+  if (options.latestRun) {
+    const latestRunId = [...events].reverse().find((event) => event.runId)?.runId;
+    return latestRunId ? events.filter((event) => event.runId === latestRunId) : [];
+  }
+  return events;
 }
 
 export function summarizePolicyArgs(args: unknown): Record<string, unknown> {

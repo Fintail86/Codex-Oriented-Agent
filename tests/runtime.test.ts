@@ -290,6 +290,41 @@ describe("model parsing and run loop", () => {
 
     const audit = await new PolicyAuditLog(root).list(session.id, 10);
     expect(audit.some((event) => event.eventType === "tool_decision" && event.allowed && event.tool === "search_files")).toBe(true);
+    expect(audit.every((event) => event.runId)).toBe(true);
+  });
+
+  it("filters policy audit events by latest run and run id", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Audit run ids");
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "First inspection",
+      providerId: "mock",
+      requireTools: true
+    });
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "Second inspection",
+      providerId: "mock",
+      requireTools: true
+    });
+
+    const audit = new PolicyAuditLog(root);
+    const all = await audit.list(session.id, 50);
+    const runIds = [...new Set(all.map((event) => event.runId).filter(Boolean))];
+    expect(runIds).toHaveLength(2);
+
+    const latest = await audit.list(session.id, { latestRun: true, limit: 20 });
+    expect(latest.length).toBeGreaterThan(0);
+    expect(new Set(latest.map((event) => event.runId))).toEqual(new Set([runIds[1]]));
+
+    const firstRun = await audit.list(session.id, { runId: runIds[0], limit: 20 });
+    expect(firstRun.length).toBeGreaterThan(0);
+    expect(new Set(firstRun.map((event) => event.runId))).toEqual(new Set([runIds[0]]));
   });
 
   it("uses POLICY.json observation tools as the source of truth for requireTools", async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { approveOverwrite } from "./approval_gate.js";
 import { AgentManager } from "./agent_manager.js";
@@ -32,7 +33,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const policyEngine = new PolicyEngine(policy);
   const audit = new PolicyAuditLog(workspaceRoot);
-  const recordPolicyEvent = audit.append.bind(audit, session);
+  const runId = randomUUID();
+  const recordPolicyEvent = (event: Parameters<PolicyAuditLog["append"]>[1]) => audit.append(session, event, runId);
   await memory.writeReferenceMemory(session, options.prompt);
 
   const provider = options.provider ?? createProvider(options.providerId ?? "codex-cli", workspaceRoot, options.providerTimeoutMs);
