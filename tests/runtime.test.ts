@@ -480,6 +480,27 @@ describe("model parsing and run loop", () => {
     const audit = await new PolicyAuditLog(root).list(session.id, 10);
     expect(audit.some((event) => event.eventType === "final_rejection" && event.ruleId === "runtime.file_inspection.read_file_required")).toBe(true);
   });
+
+  it("mock provider follows policy retry instructions that require read_file", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Mock policy retry");
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "현재 구현 상태를 실제 파일을 보고 요약해줘.",
+      providerId: "mock",
+      requireTools: true
+    });
+
+    expect(content).toContain(session.id);
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    expect(context).toContain("search_files, read_file");
+    const audit = await new PolicyAuditLog(root).list(session.id, 10);
+    expect(audit.some((event) => event.ruleId === "runtime.file_inspection.read_file_required")).toBe(true);
+  });
 });
 
 describe("status and listing", () => {

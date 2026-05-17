@@ -9,6 +9,15 @@ export class MockProvider implements ModelProvider {
   }
 
   async complete(input: ModelInput): Promise<ModelOutput> {
+    const normalizedPrompt = input.prompt.toLowerCase();
+    if (normalizedPrompt.includes("call read_file on a relevant path before returning final") && !input.prompt.includes("Tool: read_file")) {
+      return parseModelOutput(JSON.stringify({
+        type: "tool_call",
+        tool: "read_file",
+        args: { path: "codex/RULES.md" }
+      }));
+    }
+
     if (input.prompt.includes("Tool: read_file") || input.prompt.includes("Tool: search_files")) {
       return parseModelOutput(JSON.stringify({
         type: "final",
