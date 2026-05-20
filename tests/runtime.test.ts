@@ -9,7 +9,7 @@ import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMe
 import { parseModelOutput } from "../src/runtime/model/model_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { PolicyManager } from "../src/runtime/policy_manager.js";
-import { buildPrompt } from "../src/runtime/prompt_builder.js";
+import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
@@ -49,8 +49,10 @@ describe("runtime setup", () => {
     expect(manifest.allowedTools).toEqual(["read_file", "write_file", "search_files"]);
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
-    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.5.0\"");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.6.0\"");
     expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
+    expect(await readFile(join(root, "sessions", session.id, "SESSION_SUMMARY.md"), "utf8")).toContain("SESSION SUMMARY");
+    expect(await readFile(join(root, "sessions", session.id, "PROMPT_MANIFEST.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(root, "memory", "auto_promotions.jsonl"), "utf8")).toBe("");
   });
 
@@ -79,6 +81,37 @@ describe("runtime setup", () => {
       expect(next).toBeGreaterThan(cursor);
       cursor = next;
     }
+  });
+
+  it("applies prompt budget metadata and context tailing", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    const agent = await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Budget prompt assembly");
+    await sessions.appendContext(session.id, "x".repeat(10000));
+    const policy = await new PolicyManager(root).loadPolicy();
+    policy.promptBudget = {
+      ...policy.promptBudget,
+      maxPromptChars: 12000,
+      contextTailChars: 2000,
+      refMemoryMaxItems: 8,
+      toolResultsMaxChars: 2000
+    };
+
+    const result = await buildPromptBundle({
+      workspaceRoot: root,
+      agent,
+      session,
+      userPrompt: "Hello",
+      policy
+    });
+
+    expect(result.prompt).toContain("CURRENT USER REQUEST");
+    expect(result.prompt).toContain("CONTEXT_MEMORY.md truncated to latest 2000 chars");
+    expect(result.manifest.promptChars).toBe(result.prompt.length);
+    expect(result.manifest.estimatedTokens).toBeGreaterThan(0);
+    expect(result.manifest.safetyMarginChars).toBeGreaterThan(0);
   });
 });
 
@@ -521,6 +554,12 @@ describe("model parsing and run loop", () => {
 
     const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
     expect(context).toContain("Summarize the goal");
+    const manifest = (await readFile(join(root, "sessions", session.id, "PROMPT_MANIFEST.jsonl"), "utf8")).trim().split(/\r?\n/);
+    expect(manifest.length).toBeGreaterThan(0);
+    expect(JSON.parse(manifest[0])).toMatchObject({
+      sessionId: session.id,
+      modelStep: 1
+    });
   });
 
   it("requires an observation tool before final when requireTools is enabled", async () => {
@@ -800,7 +839,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.5.0");
+    expect(emptyReport.version).toBe("0.6.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

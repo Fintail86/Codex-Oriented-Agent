@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.5.0`
+- Policy version: `0.6.0`
 
 ## Tools
 
@@ -41,3 +41,16 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Auto promotion mode: `conservative`
 - Auto promotion risk levels: `low`
 - Auto promotion requires no conflict: `true`
+
+## Prompt Budget
+
+- Max prompt chars: `60000`
+- Reference memory max items: `8`
+- Context tail chars: `6000`
+- Tool results max chars: `12000`
+- Overflow policy: `truncate_low_priority`
+
+## Model Providers
+
+- Default provider: `codex-cli`
+- Configured providers: `codex-cli`(enabled), `openai-compatible`(disabled)

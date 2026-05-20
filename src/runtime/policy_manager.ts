@@ -11,6 +11,13 @@ const policyToolSchema = z.object({
 });
 
 const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
+const promptOverflowPolicySchema = z.literal("truncate_low_priority");
+const providerConfigSchema = z.object({
+  enabled: z.boolean(),
+  sandbox: z.string().optional(),
+  baseUrl: z.string().nullable().optional(),
+  model: z.string().nullable().optional()
+});
 
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
@@ -47,6 +54,36 @@ export const policyConfigSchema = z.object({
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
     })
+  }),
+  promptBudget: z.object({
+    maxPromptChars: z.number().int().positive(),
+    refMemoryMaxItems: z.number().int().positive(),
+    contextTailChars: z.number().int().positive(),
+    toolResultsMaxChars: z.number().int().positive(),
+    overflowPolicy: promptOverflowPolicySchema
+  }).default({
+    maxPromptChars: 60000,
+    refMemoryMaxItems: 8,
+    contextTailChars: 6000,
+    toolResultsMaxChars: 12000,
+    overflowPolicy: "truncate_low_priority"
+  }),
+  model: z.object({
+    defaultProvider: z.string().min(1),
+    providers: z.record(z.string(), providerConfigSchema)
+  }).default({
+    defaultProvider: "codex-cli",
+    providers: {
+      "codex-cli": {
+        enabled: true,
+        sandbox: "read-only"
+      },
+      "openai-compatible": {
+        enabled: false,
+        baseUrl: null,
+        model: null
+      }
+    }
   })
 });
 
@@ -63,7 +100,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.5.0",
+  version: "0.6.0",
   tools: {
     read_file: {
       permission: "read_only",
@@ -120,6 +157,27 @@ export const defaultPolicy: PolicyConfig = {
       allowScopes: ["project", "session", "task", "tool"],
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
+    }
+  },
+  promptBudget: {
+    maxPromptChars: 60000,
+    refMemoryMaxItems: 8,
+    contextTailChars: 6000,
+    toolResultsMaxChars: 12000,
+    overflowPolicy: "truncate_low_priority"
+  },
+  model: {
+    defaultProvider: "codex-cli",
+    providers: {
+      "codex-cli": {
+        enabled: true,
+        sandbox: "read-only"
+      },
+      "openai-compatible": {
+        enabled: false,
+        baseUrl: null,
+        model: null
+      }
     }
   }
 };
@@ -254,6 +312,19 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Auto promotion mode: \`${policy.memory.autoPromotion.mode}\`
 - Auto promotion risk levels: ${policy.memory.autoPromotion.allowRiskLevels.map((level) => `\`${level}\``).join(", ")}
 - Auto promotion requires no conflict: \`${policy.memory.autoPromotion.requireNoConflict}\`
+
+## Prompt Budget
+
+- Max prompt chars: \`${policy.promptBudget.maxPromptChars}\`
+- Reference memory max items: \`${policy.promptBudget.refMemoryMaxItems}\`
+- Context tail chars: \`${policy.promptBudget.contextTailChars}\`
+- Tool results max chars: \`${policy.promptBudget.toolResultsMaxChars}\`
+- Overflow policy: \`${policy.promptBudget.overflowPolicy}\`
+
+## Model Providers
+
+- Default provider: \`${policy.model.defaultProvider}\`
+- Configured providers: ${Object.entries(policy.model.providers).map(([id, config]) => `\`${id}\`(${config.enabled ? "enabled" : "disabled"})`).join(", ")}
 `;
 }
 
@@ -268,7 +339,9 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Overwrite approval: ${policy.overwrite.existingFileRequiresApproval ? "required" : "not required"}`,
     `Long-term memory: ${policy.memory.longTermWrite}`,
     `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`,
-    `Memory auto promotion: ${policy.memory.autoPromotion.mode}`
+    `Memory auto promotion: ${policy.memory.autoPromotion.mode}`,
+    `Prompt budget: ${policy.promptBudget.maxPromptChars} chars`,
+    `Default provider: ${policy.model.defaultProvider}`
   ].join("\n");
 }
 

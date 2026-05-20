@@ -23,10 +23,12 @@ export class SessionManager {
     await writeFile(join(sessionDir, "session.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
     await writeText(join(sessionDir, "SESSION.md"), `# SESSION\n\n- id: ${id}\n- agent: ${agentId}\n- status: active\n- goal: ${goal}\n`);
     await writeTextIfMissing(join(sessionDir, "SESSION_RULES.md"), "# SESSION RULES\n\nNo session-only rules yet.\n");
+    await writeTextIfMissing(join(sessionDir, "SESSION_SUMMARY.md"), "# SESSION SUMMARY\n\nNo compact session summary yet.\n");
     await writeTextIfMissing(join(sessionDir, "CONTEXT_MEMORY.md"), "# CONTEXT MEMORY\n\n");
     await writeTextIfMissing(join(sessionDir, "REF_MEMORY.md"), "# REFERENCE MEMORY\n\nNo reference memory loaded yet.\n");
     await writeTextIfMissing(join(sessionDir, "NOTES.md"), "# NOTES\n\n");
     await writeTextIfMissing(join(sessionDir, "POLICY_AUDIT.jsonl"), "");
+    await writeTextIfMissing(join(sessionDir, "PROMPT_MANIFEST.jsonl"), "");
     return metadata;
   }
 
@@ -53,6 +55,20 @@ export class SessionManager {
       }
     }
     return sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async ensureSessionSupportFiles(sessionId: string): Promise<void> {
+    const sessionDir = this.sessionDir(sessionId);
+    await writeTextIfMissing(join(sessionDir, "SESSION_SUMMARY.md"), "# SESSION SUMMARY\n\nNo compact session summary yet.\n");
+    await writeTextIfMissing(join(sessionDir, "PROMPT_MANIFEST.jsonl"), "");
+    await writeTextIfMissing(join(sessionDir, "POLICY_AUDIT.jsonl"), "");
+    await writeTextIfMissing(join(sessionDir, "REF_MEMORY.md"), "# REFERENCE MEMORY\n\nNo reference memory loaded yet.\n");
+    await writeTextIfMissing(join(sessionDir, "CONTEXT_MEMORY.md"), "# CONTEXT MEMORY\n\n");
+  }
+
+  async updateSummary(sessionId: string, content: string): Promise<void> {
+    await this.ensureSessionSupportFiles(sessionId);
+    await writeText(join(this.sessionDir(sessionId), "SESSION_SUMMARY.md"), `# SESSION SUMMARY\n\n${content.trim()}\n`);
   }
 
   async contextTail(sessionId: string, maxChars = 1200): Promise<string> {

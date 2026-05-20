@@ -1,5 +1,5 @@
 {
-  "version": "0.5.0",
+  "version": "0.6.0",
   "tools": {
     "read_file": {
       "permission": "read_only",
@@ -89,6 +89,27 @@
         "credential",
         "secret"
       ]
+    }
+  },
+  "promptBudget": {
+    "maxPromptChars": 60000,
+    "refMemoryMaxItems": 8,
+    "contextTailChars": 6000,
+    "toolResultsMaxChars": 12000,
+    "overflowPolicy": "truncate_low_priority"
+  },
+  "model": {
+    "defaultProvider": "codex-cli",
+    "providers": {
+      "codex-cli": {
+        "enabled": true,
+        "sandbox": "read-only"
+      },
+      "openai-compatible": {
+        "enabled": false,
+        "baseUrl": null,
+        "model": null
+      }
     }
   }
 }

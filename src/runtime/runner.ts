@@ -7,10 +7,11 @@ import { createProvider } from "./model/provider_registry.js";
 import { PolicyAuditLog } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
-import { buildPrompt } from "./prompt_builder.js";
+import { appendPromptManifest, buildPromptBundle, type PromptBlock } from "./prompt_builder.js";
 import { SessionManager } from "./session_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
 import type { AgentStep, ModelProvider, ToolName } from "./types.js";
+import type { MemoryReviewSummary } from "./memory_manager.js";
 
 type RunOptions = {
   sessionId: string;
@@ -20,7 +21,11 @@ type RunOptions = {
   requireTools?: boolean;
   provider?: ModelProvider;
   providerTimeoutMs?: number;
+  promptStaticBlocks?: PromptBlock[];
+  refreshReferenceMemory?: boolean;
+  refreshReferenceMemoryAfterRun?: boolean;
   onEvent?: (message: string) => void;
+  onMemoryReview?: (summary: MemoryReviewSummary) => void;
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
@@ -29,15 +34,19 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const memory = new MemoryManager(workspaceRoot);
   const tools = new ToolRegistry();
   const session = await sessions.loadSession(options.sessionId);
+  await sessions.ensureSessionSupportFiles(session.id);
   const agent = await agents.loadAgent(session.agentId);
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const policyEngine = new PolicyEngine(policy);
   const audit = new PolicyAuditLog(workspaceRoot);
   const runId = randomUUID();
   const recordPolicyEvent = (event: Parameters<PolicyAuditLog["append"]>[1]) => audit.append(session, event, runId);
-  await memory.writeReferenceMemory(session, options.prompt);
+  if (options.refreshReferenceMemory ?? true) {
+    await memory.writeReferenceMemory(session, options.prompt);
+  }
 
-  const provider = options.provider ?? createProvider(options.providerId ?? "codex-cli", workspaceRoot, options.providerTimeoutMs);
+  const providerId = options.providerId ?? policy.model.defaultProvider;
+  const provider = options.provider ?? createProvider(providerId, workspaceRoot, options.providerTimeoutMs);
   if (provider.id !== "mock") {
     const auth = await provider.checkAuth();
     if (!auth.ok) {
@@ -57,7 +66,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
     const forceFinal = remainingToolCalls === 0;
     options.onEvent?.(`model step ${depth + 1}/${maxModelAttempts}`);
-    const prompt = await buildPrompt({
+    const promptResult = await buildPromptBundle({
       workspaceRoot,
       agent,
       session,
@@ -69,8 +78,13 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       hasReadFile: toolNames.includes("read_file"),
       policy,
       remainingToolCalls,
-      forceFinal
+      forceFinal,
+      staticBlocks: options.promptStaticBlocks,
+      runId,
+      modelStep: depth + 1
     });
+    await appendPromptManifest(workspaceRoot, session.id, promptResult.manifest);
+    const prompt = promptResult.prompt;
     const output = await complete(provider, prompt, session.id);
     lastStep = output.step;
     if (output.step.type === "final") {
@@ -96,6 +110,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       const candidates = await memory.appendCandidates(output.step.memoryCandidates, session, runId);
       if (candidates.length) {
         const summary = await memory.reviewCandidates(candidates, policy.memory.autoPromotion);
+        options.onMemoryReview?.(summary);
         options.onEvent?.(`memory review: ${summary.created} candidates, ${summary.autoPromoted} auto-promoted, ${summary.pending} pending, ${summary.conflicts} conflicts`);
         for (const line of formatMemoryReviewSummary(summary).split(/\r?\n/).slice(1)) {
           options.onEvent?.(line);
@@ -127,7 +142,9 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   }
 
   await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames));
-  await memory.writeReferenceMemory(session, options.prompt);
+  if (options.refreshReferenceMemoryAfterRun ?? options.refreshReferenceMemory ?? true) {
+    await memory.writeReferenceMemory(session, options.prompt);
+  }
   return finalContent;
 }
 

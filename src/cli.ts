@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { AgentManager } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
+import { loadPromptStaticBlocks } from "./runtime/prompt_builder.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
@@ -21,7 +23,7 @@ program
 
 program
   .command("status")
-  .option("--provider <provider>", "Model provider smoke check: codex-cli or mock", "codex-cli")
+  .option("--provider <provider>", "Model provider smoke check: default, codex-cli, or mock", "default")
   .description("Show workspace, runtime, memory, session, and provider status.")
   .action(async (options: { provider: string }) => {
     await main(async (workspaceRoot) => {
@@ -109,6 +111,20 @@ session
       const tail = await sessions.contextTail(sessionId, Number.parseInt(options.tail, 10));
       console.log("\n# CONTEXT TAIL\n");
       console.log(tail || "No context memory.");
+    });
+  });
+
+session
+  .command("summarize")
+  .argument("<session-id>")
+  .requiredOption("--content <summary>", "Compact session summary")
+  .description("Write SESSION_SUMMARY.md for a session.")
+  .action(async (sessionId: string, options: { content: string }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      await sessions.loadSession(sessionId);
+      await sessions.updateSummary(sessionId, options.content);
+      console.log(`Updated ${sessionId} SESSION_SUMMARY.md`);
     });
   });
 
@@ -472,12 +488,12 @@ program
   .command("run")
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
-  .option("--provider <provider>", "Model provider: codex-cli or mock", "codex-cli")
+  .option("--provider <provider>", "Model provider: codex-cli or mock")
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .description("Run a session turn.")
-  .action(async (options: { session: string; prompt: string; provider: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean }) => {
+  .action(async (options: { session: string; prompt: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean }) => {
     await main(async (workspaceRoot) => {
       const content = await runSession(workspaceRoot, {
         sessionId: options.session,
@@ -489,6 +505,87 @@ program
         onEvent: (message) => console.error(`[cosia] ${message}`)
       });
       console.log(content);
+    });
+  });
+
+program
+  .command("chat")
+  .requiredOption("--session <session-id>", "Session id")
+  .option("--provider <provider>", "Model provider: codex-cli or mock")
+  .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
+  .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
+  .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
+  .description("Enter a simple session REPL.")
+  .action(async (options: { session: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      const session = await sessions.loadSession(options.session);
+      await sessions.ensureSessionSupportFiles(session.id);
+      const agent = await new AgentManager(workspaceRoot).loadAgent(session.agentId);
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const memory = new MemoryManager(workspaceRoot);
+      await memory.writeReferenceMemory(session, session.goal);
+      const staticBlocks = await loadPromptStaticBlocks({ workspaceRoot, agent, session });
+      const history: Array<{ prompt: string; response: string }> = [];
+      let lastPrompt = session.goal;
+
+      console.error(`[cosia] chat started: ${session.id}`);
+      console.error("[cosia] commands: /status, /memory refresh, /exit");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        while (true) {
+          const line = await rl.question("cosia> ");
+          const prompt = line.trim();
+          if (!prompt) {
+            continue;
+          }
+          if (prompt === "/exit") {
+            console.error(`[cosia] chat ended after ${history.length} turn(s).`);
+            console.error(`[cosia] summary hint: cosia session summarize ${session.id} --content "<summary>"`);
+            break;
+          }
+          if (prompt === "/status") {
+            console.log(`Session: ${session.id}`);
+            console.log(`Agent: ${session.agentId}`);
+            console.log(`Provider: ${options.provider ?? policy.model.defaultProvider}`);
+            console.log(`Prompt budget: ${policy.promptBudget.maxPromptChars} chars`);
+            console.log(`Context tail: ${policy.promptBudget.contextTailChars} chars`);
+            console.log(`Turns in this REPL: ${history.length}`);
+            continue;
+          }
+          if (prompt === "/memory refresh") {
+            await memory.writeReferenceMemory(session, lastPrompt);
+            console.error(`[cosia] refreshed REF_MEMORY.md for ${session.id}`);
+            continue;
+          }
+
+          let shouldRefreshMemory = false;
+          const content = await runSession(workspaceRoot, {
+            sessionId: session.id,
+            prompt,
+            providerId: options.provider,
+            providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
+            approveOverwriteFiles: options.approveOverwrite,
+            requireTools: options.requireTools,
+            promptStaticBlocks: staticBlocks,
+            refreshReferenceMemory: false,
+            refreshReferenceMemoryAfterRun: false,
+            onMemoryReview: (summary) => {
+              shouldRefreshMemory = summary.autoPromoted > 0;
+            },
+            onEvent: (message) => console.error(`[cosia] ${message}`)
+          });
+          history.push({ prompt, response: content });
+          lastPrompt = prompt;
+          console.log(content);
+          if (shouldRefreshMemory) {
+            await memory.writeReferenceMemory(session, prompt);
+            console.error("[cosia] refreshed REF_MEMORY.md after memory auto-promotion");
+          }
+        }
+      } finally {
+        rl.close();
+      }
     });
   });
 

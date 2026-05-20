@@ -1,6 +1,7 @@
 import { AgentManager } from "./agent_manager.js";
 import { MemoryManager } from "./memory_manager.js";
 import { createProvider } from "./model/provider_registry.js";
+import { PolicyManager } from "./policy_manager.js";
 import { SessionManager } from "./session_manager.js";
 import { COSIA_VERSION } from "./version.js";
 
@@ -22,7 +23,9 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
     new SessionManager(workspaceRoot).listSessions()
   ]);
   const memory = new MemoryManager(workspaceRoot);
-  const provider = createProvider(providerId, workspaceRoot);
+  const policy = await loadPolicyIfPresent(workspaceRoot);
+  const resolvedProviderId = providerId === "default" && policy ? policy.model.defaultProvider : providerId;
+  const provider = createProvider(resolvedProviderId, workspaceRoot);
   const providerStatus = await provider.checkAuth();
   return {
     version: COSIA_VERSION,
@@ -35,4 +38,12 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
     providerOk: providerStatus.ok,
     providerMessage: providerStatus.message
   };
+}
+
+async function loadPolicyIfPresent(workspaceRoot: string) {
+  try {
+    return await new PolicyManager(workspaceRoot).loadPolicy();
+  } catch {
+    return undefined;
+  }
 }
