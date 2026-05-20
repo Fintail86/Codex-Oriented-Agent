@@ -1,8 +1,10 @@
-# COSIA v0.10.0
+# COSIA v0.10.1
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
+
+v0.10.1 is a structural cleanup release: the global skill toolbox behavior is unchanged, while the internal skill subsystem is split behind the existing `SkillManager` facade.
 
 ## Requirements
 
@@ -159,7 +161,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.10.
+- Destructive, network, external-send, and shell tools are not registered in v0.10.1.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -333,9 +335,9 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.10: Deterministic agent routing through agent manifest triggers.
-- v0.11: Provider hardening and `openai-compatible` provider.
-- v0.12: Context maintenance workflow.
+- v0.11: Agent identity and selection.
+- v0.12: Provider hardening and `openai-compatible` provider.
+- v0.13: Context maintenance workflow.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: automatic session summary/archive after warning thresholds are validated.
