@@ -15,6 +15,7 @@ import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
+import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import type { ModelProvider } from "../src/runtime/types.js";
@@ -61,7 +62,7 @@ describe("runtime setup", () => {
     ]));
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
-    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.8.0\"");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.9.1\"");
     expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(root, "sessions", session.id, "SESSION_SUMMARY.md"), "utf8")).toContain("SESSION SUMMARY");
     expect(await readFile(join(root, "sessions", session.id, "PROMPT_MANIFEST.jsonl"), "utf8")).toBe("");
@@ -304,6 +305,12 @@ describe("policy core", () => {
     expect(stale.ok).toBe(false);
     expect(stale.markdownMatches).toBe(false);
 
+    const repaired = await manager.checkPolicy(false, true);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.repaired).toContain("codex/POLICY.md");
+    expect(await manager.isPolicyMirrorCurrent()).toBe(true);
+
+    await writeFile(join(root, "codex", "POLICY.md"), "# stale again\n", "utf8");
     await manager.syncMarkdown();
     const synced = await manager.checkPolicy();
     expect(synced.ok).toBe(true);
@@ -311,6 +318,26 @@ describe("policy core", () => {
     await writeFile(join(root, "codex", "POLICY.json"), "{}", "utf8");
     const invalid = await manager.checkPolicy();
     expect(invalid.jsonValid).toBe(false);
+  });
+
+  it("auto-syncs stale policy mirrors before run prompt assembly", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Policy repair before run");
+    await writeFile(join(root, "codex", "POLICY.md"), "# stale runtime policy\n", "utf8");
+    const events: string[] = [];
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "Smoke test",
+      providerId: "mock",
+      onEvent: (message) => events.push(message)
+    });
+
+    expect(events).toContain("policy mirror synced from POLICY.json");
+    expect(await new PolicyManager(root).isPolicyMirrorCurrent()).toBe(true);
   });
 
   it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
@@ -702,6 +729,214 @@ describe("memory", () => {
   });
 });
 
+describe("skills", () => {
+  it("stores skill candidates and promotes them into agent-local skill files", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Skill candidate loop");
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_SKILL_CANDIDATE] propose a git skill",
+      providerId: "mock"
+    });
+
+    const skills = new SkillManager(root);
+    const candidates = skills.listCandidates();
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].record.skillId).toBe("git-commit-convention");
+
+    const preview = skills.promoteCandidate(candidates[0].displayId.slice(0, 12));
+    expect(preview.changed).toBe(false);
+    await expect(readFile(join(root, "agents", "architect-agent", "skills", "git-commit-convention.md"), "utf8")).rejects.toThrow();
+
+    const promoted = skills.promoteCandidate(candidates[0].displayId.slice(0, 12), { yes: true });
+    expect(promoted.changed).toBe(true);
+    expect(await readFile(join(root, "agents", "architect-agent", "skills", "git-commit-convention.md"), "utf8")).toContain("git commits");
+    const manifest = JSON.parse(await readFile(join(root, "agents", "architect-agent", "manifest.json"), "utf8")) as {
+      skills: string[];
+      skillTriggers: Record<string, string[]>;
+    };
+    expect(manifest.skills).toContain("git-commit-convention");
+    expect(manifest.skillTriggers["git-commit-convention"]).toEqual(["git", "commit"]);
+    expect(await readFile(join(root, "agents", "architect-agent", "SKILLS.md"), "utf8")).toContain("git-commit-convention");
+  });
+
+  it("warns on manual-only skill promotion and blocks duplicate skill ids", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Manual skills");
+    const skills = new SkillManager(root);
+
+    const [candidate] = skills.appendCandidates([{
+      agentId: "architect-agent",
+      skillName: "Manual Only Skill",
+      reason: "Test manual-only skill.",
+      content: "Only use this when explicitly selected.",
+      triggers: []
+    }], session);
+    const preview = skills.promoteCandidate(candidate.id);
+    expect(preview.warning).toContain("manual-only");
+    skills.promoteCandidate(candidate.id, { yes: true });
+    const cleanCheck = skills.checkSkills("architect-agent");
+    expect(cleanCheck.ok).toBe(true);
+    expect(cleanCheck.manualOnlySkills).toContain("manual-only-skill");
+
+    await writeFile(join(root, "agents", "architect-agent", "SKILLS.md"), "# stale skills\n", "utf8");
+    await writeFile(join(root, "agents", "architect-agent", "skills", "orphan.md"), "# Orphan\n", "utf8");
+    const staleCheck = skills.checkSkills("architect-agent");
+    expect(staleCheck.ok).toBe(false);
+    expect(staleCheck.mirrorMatches).toBe(false);
+    expect(staleCheck.orphanSkillFiles).toContain("orphan");
+    const repaired = skills.checkSkills("architect-agent", true);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.repaired).toBe(true);
+    expect(repaired.orphanSkillFiles).toContain("orphan");
+    expect(await readFile(join(root, "agents", "architect-agent", "SKILLS.md"), "utf8")).toContain("manual-only-skill");
+
+    const [duplicate] = skills.appendCandidates([{
+      agentId: "architect-agent",
+      skillName: "Manual Only Skill",
+      reason: "Duplicate.",
+      content: "Duplicate content.",
+      triggers: ["manual"]
+    }], session);
+    expect(() => skills.promoteCandidate(duplicate.id, { yes: true })).toThrow("Skill already exists");
+  });
+
+  it("classifies secret-like skill candidates as high risk with redaction", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Secret skill");
+    const skills = new SkillManager(root);
+
+    const [candidate] = skills.appendCandidates([{
+      agentId: "architect-agent",
+      skillName: "Secret Handling Skill",
+      reason: "Secret test.",
+      content: "Use token = \"sk-testsecret1234567890\" for local auth.",
+      triggers: ["secret handling"],
+      riskLevel: "low"
+    }], session);
+    expect(candidate.riskLevel).toBe("high");
+    const preview = skills.promoteCandidate(candidate.id);
+    expect(preview.record.riskLevel).toBe("high");
+    expect(() => skills.promoteCandidate(candidate.id, { yes: true })).toThrow("High-risk skill promotion requires");
+  });
+
+  it("selects trigger-matched and manual skills with XML boundaries and prompt budgeting", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "장기기억 설계");
+    const skills = new SkillManager(root);
+
+    const records = skills.appendCandidates([
+      {
+        agentId: "architect-agent",
+        skillName: "Git Skill",
+        reason: "Git operations.",
+        content: "Use git tools when the user asks about git diff or status.",
+        triggers: ["git"]
+      },
+      {
+        agentId: "architect-agent",
+        skillName: "Memory Skill",
+        reason: "Memory operations.",
+        content: "Use scored memory when the user asks about 장기기억.",
+        triggers: ["장기기억"]
+      },
+      {
+        agentId: "architect-agent",
+        skillName: "Manual Skill",
+        reason: "Manual operations.",
+        content: "This contains </skill> and should not break prompt boundaries.",
+        triggers: []
+      }
+    ], session);
+    for (const record of records) {
+      skills.promoteCandidate(record.id, { yes: true });
+    }
+    const agent = await agents.loadAgent("architect-agent");
+    const policy = await new PolicyManager(root).loadPolicy();
+
+    const gitPrompt = await buildPromptBundle({
+      workspaceRoot: root,
+      agent,
+      session,
+      userPrompt: "git diff를 요약해줘",
+      policy
+    });
+    expect(gitPrompt.prompt).toContain("<available_skills>");
+    expect(gitPrompt.prompt).toContain("git-skill");
+    expect(gitPrompt.prompt).not.toContain("manual-skill");
+    expect(gitPrompt.manifest.skillSelections?.some((item) => item.skillId === "git-skill" && item.selected)).toBe(true);
+
+    const manualPrompt = await buildPromptBundle({
+      workspaceRoot: root,
+      agent,
+      session,
+      userPrompt: "일반 요청",
+      policy: {
+        ...policy,
+        promptBudget: {
+          ...policy.promptBudget,
+          skillMaxItems: 1
+        }
+      },
+      manualSkillIds: ["manual-skill"]
+    });
+    expect(manualPrompt.prompt).toContain("manual-skill");
+    expect(manualPrompt.prompt).toContain("<\\/skill>");
+    expect(manualPrompt.manifest.skillSelections?.some((item) => item.skillId === "memory-skill" && item.omittedReason === "skillMaxItems")).toBe(true);
+  });
+
+  it("scores skill triggers without substring false positives and prioritizes current requests", () => {
+    expect(calculateSkillTriggerMatch({
+      skillId: "test-skill",
+      triggers: ["test"],
+      sessionGoal: "",
+      currentRequest: "latest build"
+    }).score).toBe(0);
+    expect(calculateSkillTriggerMatch({
+      skillId: "git-skill",
+      triggers: ["git"],
+      sessionGoal: "",
+      currentRequest: "git diff 확인"
+    }).score).toBe(5);
+    expect(calculateSkillTriggerMatch({
+      skillId: "memory-skill",
+      triggers: ["장기기억"],
+      sessionGoal: "",
+      currentRequest: "장기기억 검색"
+    }).score).toBe(5);
+    expect(calculateSkillTriggerMatch({
+      skillId: "goal-only",
+      triggers: ["sqlite"],
+      sessionGoal: "sqlite memory design",
+      currentRequest: ""
+    }).score).toBeLessThan(calculateSkillTriggerMatch({
+      skillId: "request",
+      triggers: ["sqlite"],
+      sessionGoal: "",
+      currentRequest: "sqlite 상태 확인"
+    }).score);
+    expect(calculateSkillTriggerMatch({
+      skillId: "short",
+      triggers: ["go"],
+      sessionGoal: "go",
+      currentRequest: "go"
+    }).score).toBe(0);
+  });
+});
+
 describe("model parsing and run loop", () => {
   it("parses final and tool_call AgentStep JSON", () => {
     expect(parseModelOutput('{"type":"final","content":"done","memoryCandidates":[]}').step.type).toBe("final");
@@ -1031,7 +1266,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.8.0");
+    expect(emptyReport.version).toBe("0.9.1");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

@@ -2,6 +2,7 @@ import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readText } from "./fs_utils.js";
 import type { PolicyConfig } from "./policy_manager.js";
+import { SkillManager, type SkillSelectionManifest } from "./skill_manager.js";
 import type { AgentManifest, SessionMetadata } from "./types.js";
 
 type PromptInput = {
@@ -20,13 +21,14 @@ type PromptInput = {
   staticBlocks?: PromptBlock[];
   runId?: string;
   modelStep?: number;
+  manualSkillIds?: string[];
 };
 
 export type PromptBlock = {
   title: string;
   content: string;
   required?: boolean;
-  source: "static" | "session" | "memory" | "tool" | "runtime" | "request";
+  source: "static" | "session" | "memory" | "skill" | "tool" | "runtime" | "request";
 };
 
 export type PromptManifestBlock = {
@@ -50,12 +52,15 @@ export type PromptManifest = {
   estimatedTokens: number;
   overflowed: boolean;
   blocks: PromptManifestBlock[];
+  skillSelections?: SkillSelectionManifest[];
 };
 
 export type PromptBuildResult = {
   prompt: string;
   manifest: PromptManifest;
 };
+
+type DynamicPromptBlocks = PromptBlock[] & { skillSelections?: SkillSelectionManifest[] };
 
 const codexFiles = ["SECURITY.md", "POLICY.md", "RULES.md", "SOUL.md", "USER.md"] as const;
 const safetyMarginRatio = 0.15;
@@ -98,6 +103,9 @@ export async function buildPromptBundle(input: PromptInput): Promise<PromptBuild
     contextWarningChars: 30000,
     contextCriticalChars: 60000,
     toolResultsMaxChars: 12000,
+    skillMaxItems: 5,
+    skillMaxChars: 8000,
+    skillItemMaxChars: 2000,
     overflowPolicy: "truncate_low_priority" as const
   };
   const staticBlocks = input.staticBlocks ?? await loadPromptStaticBlocks(input);
@@ -118,7 +126,8 @@ export async function buildPromptBundle(input: PromptInput): Promise<PromptBuild
     modelStep: input.modelStep,
     maxPromptChars: budget.maxPromptChars,
     safetyMarginChars,
-    targetPromptChars
+    targetPromptChars,
+    skillSelections: dynamicBlocks.skillSelections
   });
 }
 
@@ -129,12 +138,28 @@ export async function appendPromptManifest(workspaceRoot: string, sessionId: str
 async function loadDynamicBlocks(
   input: PromptInput,
   budget: NonNullable<PolicyConfig["promptBudget"]>
-): Promise<PromptBlock[]> {
+): Promise<DynamicPromptBlocks> {
   const sessionDir = join(input.workspaceRoot, "sessions", input.session.id);
+  const skillBlock = new SkillManager(input.workspaceRoot).selectSkillPromptBlock({
+    agent: input.agent,
+    sessionGoal: input.session.goal,
+    currentRequest: input.userPrompt,
+    manualSkillIds: input.manualSkillIds,
+    budget: {
+      skillMaxItems: budget.skillMaxItems,
+      skillMaxChars: budget.skillMaxChars,
+      skillItemMaxChars: budget.skillItemMaxChars
+    }
+  });
   const sessionSummary = await readText(join(sessionDir, "SESSION_SUMMARY.md"));
   const refMemory = limitReferenceMemory(await readText(join(sessionDir, "REF_MEMORY.md")), budget.refMemoryMaxItems);
   const contextMemory = tailText(await readText(join(sessionDir, "CONTEXT_MEMORY.md")), budget.contextTailChars, "CONTEXT_MEMORY.md");
   const blocks: PromptBlock[] = [
+    ...(skillBlock ? [{
+      title: skillBlock.title,
+      content: skillBlock.content,
+      source: "skill" as const
+    }] : []),
     {
       title: `sessions/${input.session.id}/SESSION_SUMMARY.md`,
       content: sessionSummary,
@@ -152,7 +177,9 @@ async function loadDynamicBlocks(
     },
     toolResultsBlock(input.toolResults ?? [], budget.toolResultsMaxChars)
   ];
-  return blocks.filter((block) => block.content.trim().length > 0);
+  const filtered = blocks.filter((block) => block.content.trim().length > 0) as DynamicPromptBlocks;
+  filtered.skillSelections = skillBlock?.manifest ?? [];
+  return filtered;
 }
 
 function runtimePromptBlocks(input: PromptInput): PromptBlock[] {
@@ -209,7 +236,7 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
 
 function assembleWithBudget(
   blocks: PromptBlock[],
-  input: Pick<PromptManifest, "sessionId" | "runId" | "modelStep" | "maxPromptChars" | "safetyMarginChars" | "targetPromptChars">
+  input: Pick<PromptManifest, "sessionId" | "runId" | "modelStep" | "maxPromptChars" | "safetyMarginChars" | "targetPromptChars" | "skillSelections">
 ): PromptBuildResult {
   const working = blocks.map((block) => ({
     ...block,
@@ -250,6 +277,7 @@ function assembleWithBudget(
     promptChars: prompt.length,
     estimatedTokens: estimateTokens(prompt.length),
     overflowed: prompt.length > input.targetPromptChars,
+    skillSelections: input.skillSelections,
     blocks: working.map((block) => ({
       title: block.title,
       source: block.source,
@@ -272,13 +300,13 @@ function outputContract(allowedTools: string[]): string {
 When the request asks about implementation, files, CLI commands, package metadata, or current project state, inspect actual files before final. A good pattern is search_files first, then read_file on the most relevant path matches such as package.json, README.md, src/cli.ts, src/index.ts, or bin entrypoints.
 
 For a tool call:
-{"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":""},"content":"","memoryCandidates":[]}
+{"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
 For a search tool call:
-{"type":"tool_call","tool":"search_files","args":{"path":"","content":"","query":"cosia","directory":""},"content":"","memoryCandidates":[]}
+{"type":"tool_call","tool":"search_files","args":{"path":"","content":"","query":"cosia","directory":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
 For a final answer:
-{"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":""},"content":"...","memoryCandidates":[]}
+{"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":""},"content":"...","memoryCandidates":[],"skillCandidates":[]}
 
 Allowed tools for this agent: ${allowedTools.join(", ")}
 Maximum tool loop depth: 5`;

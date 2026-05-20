@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0",
+  "version": "0.9.1",
   "tools": {
     "read_file": {
       "permission": "read_only",
@@ -123,6 +123,9 @@
     "contextWarningChars": 30000,
     "contextCriticalChars": 60000,
     "toolResultsMaxChars": 12000,
+    "skillMaxItems": 5,
+    "skillMaxChars": 8000,
+    "skillItemMaxChars": 2000,
     "overflowPolicy": "truncate_low_priority"
   },
   "model": {

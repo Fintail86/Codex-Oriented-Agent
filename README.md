@@ -1,8 +1,8 @@
-# COSIA v0.7
+# COSIA v0.9.1
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, structured agent-local skills, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -92,7 +92,9 @@ cosia session summarize <session-id> --content "<summary>"
 cosia session prompt <session-id> --latest
 cosia session context undo-last <session-id> --reason "<reason>"
 cosia run --session <session-id> --prompt "<prompt>"
+cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
 cosia chat --session <session-id>
+cosia chat --session <session-id> --skill <skill-id>
 cosia memory add --scope <scope> --content "<content>"
 cosia memory search --query "<query>" --show-score
 cosia memory list --limit <n> --all
@@ -113,8 +115,20 @@ cosia memory candidate discard --all-low-risk --reason "<reason>" --yes
 cosia memory promotion list
 cosia memory promotion show <promotion-id>
 cosia memory promotion revert <promotion-id> --reason "<reason>"
+cosia skill candidate list
+cosia skill candidate show <candidate-id>
+cosia skill candidate promote <candidate-id>
+cosia skill candidate promote <candidate-id> --yes
+cosia skill candidate discard <candidate-id> --reason "<reason>"
+cosia skill candidate export --jsonl
+cosia skill list --agent <agent-id>
+cosia skill show <skill-id> --agent <agent-id>
+cosia skill check --agent <agent-id>
+cosia skill check --agent <agent-id> --repair
+cosia skill sync <agent-id>
 cosia policy show
 cosia policy check
+cosia policy check --repair
 cosia policy sync
 cosia policy audit --session <session-id> --limit <n>
 cosia tool git-status
@@ -134,9 +148,10 @@ cosia session show <session-id>
 - Existing file overwrite requires explicit approval.
 - `codex/POLICY.json` is the runtime policy source of truth.
 - `codex/POLICY.md` mirrors the JSON policy for humans.
+- `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.8.
+- Destructive, network, external-send, and shell tools are not registered in v0.9.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -156,19 +171,25 @@ cosia session show <session-id>
 - Controlled Git/NPM tools are individual read-only tools, not generic shell access.
 - Long tool output is capped with an explicit truncation marker.
 - Session context size warnings appear in status/session/chat output; automatic context summary/archive is deferred.
+- Skill candidates are stored in SQLite and remain pending until explicit promotion.
+- Promoted skills are agent-local files in `agents/<agent-id>/skills/`; `SKILLS.md` is a generated mirror/index.
+- `cosia skill check --agent <agent-id> --repair` regenerates stale `SKILLS.md`; it does not delete orphan skill files or rewrite manifest entries.
+- PromptBuilder loads selected skill files with XML-style boundaries and prompt budget limits.
+- Triggerless skills are manual-only and must be selected with `--skill` or `/skills use`.
 
 ## Policy
 
 ```powershell
 cosia policy show
 cosia policy check
+cosia policy check --repair
 cosia policy sync
 cosia policy audit --session <session-id> --limit 20
 cosia policy audit --session <session-id> --latest-run
 cosia policy audit --session <session-id> --latest-run --json
 ```
 
-`policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source.
+`policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source. Use `policy check --repair` to regenerate a stale or missing Markdown mirror without changing the JSON source.
 Policy audit logs are append-only per session. Each new `run` writes a `runId`, so `--latest-run` or `--run-id <id>` can focus the output. The default audit output is a readable summary; use `--json` for raw events. Clear/archive commands are intentionally deferred to a later maintenance pass.
 
 ## Prompt Budget and Chat
@@ -183,10 +204,52 @@ cosia session summarize <session-id> --content "Short compact summary of the ses
 ```text
 /status
 /memory refresh
+/skills list
+/skills use <skill-id>
+/skills drop <skill-id>
+/skills clear
 /exit
 ```
 
 Chat history is durable through `CONTEXT_MEMORY.md`; the in-process REPL history is only a display/cache aid. `REF_MEMORY.md` is generated once when chat starts, then refreshed by `/memory refresh` or after memory auto-promotion. `SESSION_SUMMARY.md` is included in prompt assembly but is manually updated in v0.6.
+
+Manual skills selected with `--skill` or `/skills use` are included even when they have no triggers. Trigger-matched skills are selected automatically from agent manifest triggers and are capped by the prompt budget.
+
+## Skill Candidate Review
+
+```powershell
+cosia run --session <session-id> --provider mock --prompt "[MOCK_SKILL_CANDIDATE]"
+cosia skill candidate list
+cosia skill candidate show <candidate-id>
+cosia skill candidate promote <candidate-id>
+cosia skill candidate promote <candidate-id> --yes
+cosia skill check --agent architect-agent
+cosia skill check --agent architect-agent --repair
+cosia skill list --agent architect-agent
+cosia run --session <session-id> --prompt "git diff를 요약해줘."
+cosia run --session <session-id> --prompt "수동 스킬 적용 테스트" --skill <skill-id>
+```
+
+Skill promotion preview does not mutate files. `--yes` writes `agents/<agent-id>/skills/<skill-id>.md`, updates `manifest.json`, and regenerates `SKILLS.md`. High-risk skill candidates require the explicit confirmation phrase shown in the preview.
+
+## Repo Hygiene
+
+Live runtime state is local-only and ignored by git:
+
+```text
+memory/*
+sessions/*
+```
+
+Already-tracked runtime state must be removed from the git index once without deleting local files:
+
+```powershell
+git ls-files sessions memory
+git rm --cached -- <tracked-runtime-files>
+git commit -m "chore: stop tracking runtime state"
+```
+
+Source, policy, agent definitions, promoted skill files, tests, and docs remain project files. Runtime files such as `CONTEXT_MEMORY.md`, `REF_MEMORY.md`, `POLICY_AUDIT.jsonl`, `PROMPT_MANIFEST.jsonl`, SQLite databases, migration reports, and `.bak` queue files should not be committed.
 
 Prompt manifests record block sizes and truncation metadata without storing full prompt text:
 
@@ -257,7 +320,9 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.9: Provider hardening and deterministic agent routing through agent manifest triggers.
-- v1.0+: Skill candidate loop and Codex amendment gate.
+- v0.10: Deterministic agent routing through agent manifest triggers.
+- v0.11: Provider hardening and `openai-compatible` provider.
+- v0.12: Context maintenance workflow.
+- v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: automatic session summary/archive after warning thresholds are validated.

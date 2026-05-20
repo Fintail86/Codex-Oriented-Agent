@@ -9,6 +9,7 @@ import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { appendPromptManifest, buildPromptBundle, type PromptBlock } from "./prompt_builder.js";
 import { SessionManager } from "./session_manager.js";
+import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
 import type { AgentStep, ModelProvider, ToolName } from "./types.js";
 import type { MemoryReviewSummary } from "./memory_manager.js";
@@ -26,17 +27,23 @@ type RunOptions = {
   refreshReferenceMemoryAfterRun?: boolean;
   onEvent?: (message: string) => void;
   onMemoryReview?: (summary: MemoryReviewSummary) => void;
+  manualSkillIds?: string[];
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
   const sessions = new SessionManager(workspaceRoot);
   const agents = new AgentManager(workspaceRoot);
   const memory = new MemoryManager(workspaceRoot);
+  const skills = new SkillManager(workspaceRoot);
   const tools = new ToolRegistry();
   const session = await sessions.loadSession(options.sessionId);
   await sessions.ensureSessionSupportFiles(session.id);
   const agent = await agents.loadAgent(session.agentId);
-  const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const policyManager = new PolicyManager(workspaceRoot);
+  const policy = await policyManager.loadPolicy();
+  if (await policyManager.ensureMarkdownCurrent()) {
+    options.onEvent?.("policy mirror synced from POLICY.json");
+  }
   const policyEngine = new PolicyEngine(policy);
   const audit = new PolicyAuditLog(workspaceRoot);
   const runId = randomUUID();
@@ -81,7 +88,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       forceFinal,
       staticBlocks: options.promptStaticBlocks,
       runId,
-      modelStep: depth + 1
+      modelStep: depth + 1,
+      manualSkillIds: options.manualSkillIds
     });
     await appendPromptManifest(workspaceRoot, session.id, promptResult.manifest);
     const prompt = promptResult.prompt;
@@ -114,6 +122,13 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         options.onEvent?.(`memory review: ${summary.created} candidates, ${summary.autoPromoted} auto-promoted, ${summary.pending} pending, ${summary.conflicts} conflicts`);
         for (const line of formatMemoryReviewSummary(summary).split(/\r?\n/).slice(1)) {
           options.onEvent?.(line);
+        }
+      }
+      const skillCandidates = skills.appendCandidates(output.step.skillCandidates, session, runId);
+      if (skillCandidates.length) {
+        options.onEvent?.(`skill review: ${skillCandidates.length} candidates pending`);
+        for (const candidate of skillCandidates) {
+          options.onEvent?.(`skill candidate: ${candidate.id.slice(0, 8)} ${candidate.riskLevel} ${candidate.agentId}/${candidate.skillId}`);
         }
       }
       break;

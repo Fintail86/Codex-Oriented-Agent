@@ -62,6 +62,9 @@ export const policyConfigSchema = z.object({
     contextWarningChars: z.number().int().positive().default(30000),
     contextCriticalChars: z.number().int().positive().default(60000),
     toolResultsMaxChars: z.number().int().positive(),
+    skillMaxItems: z.number().int().positive().default(5),
+    skillMaxChars: z.number().int().positive().default(8000),
+    skillItemMaxChars: z.number().int().positive().default(2000),
     overflowPolicy: promptOverflowPolicySchema
   }).default({
     maxPromptChars: 60000,
@@ -70,6 +73,9 @@ export const policyConfigSchema = z.object({
     contextWarningChars: 30000,
     contextCriticalChars: 60000,
     toolResultsMaxChars: 12000,
+    skillMaxItems: 5,
+    skillMaxChars: 8000,
+    skillItemMaxChars: 2000,
     overflowPolicy: "truncate_low_priority"
   }),
   model: z.object({
@@ -100,11 +106,12 @@ export type PolicyCheckResult = {
   jsonValid: boolean;
   markdownMatches: boolean;
   created: string[];
+  repaired: string[];
   errors: string[];
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.8.0",
+  version: "0.9.1",
   tools: {
     read_file: {
       permission: "read_only",
@@ -195,6 +202,9 @@ export const defaultPolicy: PolicyConfig = {
     contextWarningChars: 30000,
     contextCriticalChars: 60000,
     toolResultsMaxChars: 12000,
+    skillMaxItems: 5,
+    skillMaxChars: 8000,
+    skillItemMaxChars: 2000,
     overflowPolicy: "truncate_low_priority"
   },
   model: {
@@ -245,10 +255,32 @@ export class PolicyManager {
     return this.policyMarkdownPath();
   }
 
-  async checkPolicy(repairMissing = false): Promise<PolicyCheckResult> {
+  async ensureMarkdownCurrent(): Promise<boolean> {
+    if (!existsSync(this.policyJsonPath())) {
+      await this.ensurePolicyFiles();
+    }
+    const policy = await this.loadPolicy();
+    if (await this.isPolicyMirrorCurrent(policy)) {
+      return false;
+    }
+    await writeText(this.policyMarkdownPath(), renderPolicyMarkdown(policy));
+    return true;
+  }
+
+  async isPolicyMirrorCurrent(policy?: PolicyConfig): Promise<boolean> {
+    if (!existsSync(this.policyMarkdownPath())) {
+      return false;
+    }
+    const actual = normalizeNewlines(await readText(this.policyMarkdownPath()));
+    const expected = normalizeNewlines(renderPolicyMarkdown(policy ?? await this.loadPolicy()));
+    return actual === expected;
+  }
+
+  async checkPolicy(repairMissing = false, repairMirror = false): Promise<PolicyCheckResult> {
     const created = repairMissing ? await this.ensurePolicyFiles() : [];
+    const repaired: string[] = [];
     const jsonExists = existsSync(this.policyJsonPath());
-    const markdownExists = existsSync(this.policyMarkdownPath());
+    let markdownExists = existsSync(this.policyMarkdownPath());
     const errors: string[] = [];
     let jsonValid = false;
     let markdownMatches = false;
@@ -266,13 +298,24 @@ export class PolicyManager {
     }
 
     if (!markdownExists) {
-      errors.push("Missing codex/POLICY.md");
+      if (policy && repairMirror) {
+        await writeText(this.policyMarkdownPath(), renderPolicyMarkdown(policy));
+        repaired.push("codex/POLICY.md");
+        markdownExists = true;
+        markdownMatches = true;
+      } else {
+        errors.push("Missing codex/POLICY.md");
+      }
     } else if (policy) {
-      const actual = normalizeNewlines(await readText(this.policyMarkdownPath()));
-      const expected = normalizeNewlines(renderPolicyMarkdown(policy));
-      markdownMatches = actual === expected;
+      markdownMatches = await this.isPolicyMirrorCurrent(policy);
       if (!markdownMatches) {
-        errors.push("codex/POLICY.md is out of sync with codex/POLICY.json");
+        if (repairMirror) {
+          await writeText(this.policyMarkdownPath(), renderPolicyMarkdown(policy));
+          repaired.push("codex/POLICY.md");
+          markdownMatches = true;
+        } else {
+          errors.push("codex/POLICY.md is out of sync with codex/POLICY.json");
+        }
       }
     }
 
@@ -283,6 +326,7 @@ export class PolicyManager {
       jsonValid,
       markdownMatches,
       created,
+      repaired,
       errors
     };
   }
@@ -352,6 +396,9 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Context warning chars: \`${policy.promptBudget.contextWarningChars}\`
 - Context critical chars: \`${policy.promptBudget.contextCriticalChars}\`
 - Tool results max chars: \`${policy.promptBudget.toolResultsMaxChars}\`
+- Skill max items: \`${policy.promptBudget.skillMaxItems}\`
+- Skill max chars: \`${policy.promptBudget.skillMaxChars}\`
+- Skill item max chars: \`${policy.promptBudget.skillItemMaxChars}\`
 - Overflow policy: \`${policy.promptBudget.overflowPolicy}\`
 
 ## Model Providers

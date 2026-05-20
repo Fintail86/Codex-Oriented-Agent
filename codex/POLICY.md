@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.8.0`
+- Policy version: `0.9.1`
 
 ## Tools
 
@@ -55,6 +55,9 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Context warning chars: `30000`
 - Context critical chars: `60000`
 - Tool results max chars: `12000`
+- Skill max items: `5`
+- Skill max chars: `8000`
+- Skill item max chars: `2000`
 - Overflow policy: `truncate_low_priority`
 
 ## Model Providers

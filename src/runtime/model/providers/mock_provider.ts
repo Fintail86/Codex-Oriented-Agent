@@ -30,7 +30,8 @@ export class MockProvider implements ModelProvider {
               importance: 3,
               confidence: 0.8
             }]
-          : []
+          : [],
+        skillCandidates: mockSkillCandidates(input.prompt)
       }));
     }
 
@@ -46,7 +47,8 @@ export class MockProvider implements ModelProvider {
               importance: 3,
               confidence: 0.8
             }]
-          : []
+          : [],
+        skillCandidates: mockSkillCandidates(input.prompt)
       }));
     }
 
@@ -90,7 +92,8 @@ export class MockProvider implements ModelProvider {
             importance: 3,
             confidence: 0.8
           }]
-        : []
+        : [],
+      skillCandidates: mockSkillCandidates(input.prompt)
     }));
   }
 }
@@ -109,4 +112,38 @@ function mockToolArgs(tool: string, value: string): Record<string, unknown> {
     return {};
   }
   return { path: value };
+}
+
+function mockSkillCandidates(prompt: string) {
+  if (prompt.includes("[MOCK_SKILL_CANDIDATE_SECRET]")) {
+    return [{
+      agentId: "architect-agent",
+      skillName: "Secret Handling Skill",
+      reason: "Mock secret candidate.",
+      content: "Use token = \"sk-testsecret1234567890\" when testing.",
+      triggers: ["secret handling"],
+      riskLevel: "low"
+    }];
+  }
+  if (prompt.includes("[MOCK_SKILL_CANDIDATE_NO_TRIGGERS]")) {
+    return [{
+      agentId: "architect-agent",
+      skillName: "Manual Only Skill",
+      reason: "Mock manual skill candidate.",
+      content: "Use this skill only when explicitly selected.",
+      triggers: [],
+      riskLevel: "low"
+    }];
+  }
+  if (prompt.includes("[MOCK_SKILL_CANDIDATE]")) {
+    return [{
+      agentId: "architect-agent",
+      skillName: "Git Commit Convention",
+      reason: "Mock skill candidate.",
+      content: "When asked about git commits, inspect git status and write concise commit messages.",
+      triggers: ["git", "commit"],
+      riskLevel: "low"
+    }];
+  }
+  return [];
 }

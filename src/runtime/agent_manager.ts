@@ -19,6 +19,7 @@ export class AgentManager {
     for (const [fileName, content] of Object.entries(agentTemplates)) {
       await writeTextIfMissing(join(agentDir, fileName), content);
     }
+    await mkdir(join(agentDir, "skills"), { recursive: true });
     const manifest = architectManifest(agentId);
     await writeFile(join(agentDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
     return manifest;
@@ -29,7 +30,8 @@ export class AgentManager {
     const parsed = JSON.parse(await readText(manifestPath));
     const manifest = agentManifestSchema.parse(parsed);
     const repaired = repairArchitectManifest(manifest);
-    if (repaired !== manifest) {
+    await mkdir(join(this.agentDir(agentId), "skills"), { recursive: true });
+    if (repaired !== manifest || !("skillTriggers" in parsed)) {
       await writeFile(manifestPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
     }
     return repaired;
@@ -69,11 +71,13 @@ function repairArchitectManifest(manifest: AgentManifest): AgentManifest {
     return manifest;
   }
   const allowedTools = [...new Set([...manifest.allowedTools, ...architectAllowedTools])];
-  if (allowedTools.length === manifest.allowedTools.length) {
+  const skillTriggers = manifest.skillTriggers ?? {};
+  if (allowedTools.length === manifest.allowedTools.length && manifest.skillTriggers === skillTriggers) {
     return manifest;
   }
   return {
     ...manifest,
-    allowedTools
+    allowedTools,
+    skillTriggers
   };
 }

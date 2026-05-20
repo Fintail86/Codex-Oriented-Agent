@@ -9,6 +9,7 @@ import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js"
 import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_builder.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
+import { formatSkillCandidate, formatSkillCheckResult, formatSkillPromotionPreview, SkillManager } from "./runtime/skill_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema } from "./runtime/types.js";
@@ -496,6 +497,134 @@ promotion
     });
   });
 
+const skill = program.command("skill").description("Manage agent-local skills.");
+
+const skillCandidate = skill.command("candidate").description("Review skill candidates.");
+
+skillCandidate
+  .command("list")
+  .option("--all", "Show pending, promoted, and discarded candidates.", false)
+  .description("List skill candidates.")
+  .action(async (options: { all: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const candidates = new SkillManager(workspaceRoot).listCandidates(options.all);
+      if (!candidates.length) {
+        console.log("No skill candidates.");
+        return;
+      }
+      for (const candidate of candidates) {
+        console.log(formatSkillCandidate(candidate.record));
+      }
+      console.log("\nTip: skill candidate ids accept unique prefixes.");
+    });
+  });
+
+skillCandidate
+  .command("show")
+  .argument("<candidate-id>")
+  .description("Show one skill candidate.")
+  .action(async (candidateId: string) => {
+    await main(async (workspaceRoot) => {
+      console.log(JSON.stringify(new SkillManager(workspaceRoot).getCandidate(candidateId).record, null, 2));
+    });
+  });
+
+skillCandidate
+  .command("promote")
+  .argument("<candidate-id>")
+  .option("--yes", "Apply the promotion after preview.", false)
+  .option("--confirm-high-risk <phrase>", "Required phrase for high-risk skill promotion.")
+  .description("Preview or promote a skill candidate into an agent-local skill.")
+  .action(async (candidateId: string, options: { yes: boolean; confirmHighRisk?: string }) => {
+    await main(async (workspaceRoot) => {
+      const result = new SkillManager(workspaceRoot).promoteCandidate(candidateId, {
+        yes: options.yes,
+        confirmHighRisk: options.confirmHighRisk
+      });
+      console.log(formatSkillPromotionPreview(result));
+    });
+  });
+
+skillCandidate
+  .command("discard")
+  .argument("<candidate-id>")
+  .requiredOption("--reason <reason>", "Discard reason")
+  .description("Discard a pending skill candidate.")
+  .action(async (candidateId: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      const record = new SkillManager(workspaceRoot).discardCandidate(candidateId, options.reason);
+      console.log(`${record.id} discarded`);
+    });
+  });
+
+skillCandidate
+  .command("export")
+  .option("--jsonl", "Print JSONL export.", false)
+  .description("Export skill candidates from SQLite.")
+  .action(async (options: { jsonl: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (!options.jsonl) {
+        throw new Error("Only --jsonl export is supported.");
+      }
+      process.stdout.write(new SkillManager(workspaceRoot).exportCandidatesJsonl());
+    });
+  });
+
+skill
+  .command("list")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .description("List promoted skills for an agent.")
+  .action(async (options: { agent: string }) => {
+    await main(async (workspaceRoot) => {
+      const skills = new SkillManager(workspaceRoot).listSkills(options.agent);
+      if (!skills.length) {
+        console.log("No promoted skills.");
+        return;
+      }
+      for (const item of skills) {
+        console.log(`${item.id}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}\t${item.path}`);
+      }
+    });
+  });
+
+skill
+  .command("show")
+  .argument("<skill-id>")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .description("Show one promoted skill.")
+  .action(async (skillId: string, options: { agent: string }) => {
+    await main(async (workspaceRoot) => {
+      const skill = new SkillManager(workspaceRoot).getSkill(options.agent, skillId);
+      console.log(`# ${skill.id}\n\nAgent: ${skill.agentId}\nTriggers: ${skill.triggers.length ? skill.triggers.join(", ") : "manual-only"}\nPath: ${skill.path}\n\n${skill.content}`);
+    });
+  });
+
+skill
+  .command("check")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .option("--repair", "Regenerate SKILLS.md when it is missing or stale.", false)
+  .description("Validate an agent skill mirror and skill files.")
+  .action(async (options: { agent: string; repair: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const result = new SkillManager(workspaceRoot).checkSkills(options.agent, options.repair);
+      console.log(formatSkillCheckResult(result));
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
+    });
+  });
+
+skill
+  .command("sync")
+  .argument("<agent-id>")
+  .description("Regenerate an agent SKILLS.md mirror from manifest skills.")
+  .action(async (agentId: string) => {
+    await main(async (workspaceRoot) => {
+      const path = new SkillManager(workspaceRoot).syncSkillsIndex(agentId);
+      console.log(`Synced ${path}`);
+    });
+  });
+
 const policy = program.command("policy").description("Inspect and maintain runtime policy.");
 
 policy
@@ -510,12 +639,16 @@ policy
 
 policy
   .command("check")
+  .option("--repair", "Regenerate POLICY.md when it is missing or stale.", false)
   .description("Validate policy JSON and Markdown mirror.")
-  .action(async () => {
+  .action(async (options: { repair: boolean }) => {
     await main(async (workspaceRoot) => {
-      const result = await new PolicyManager(workspaceRoot).checkPolicy(true);
+      const result = await new PolicyManager(workspaceRoot).checkPolicy(true, options.repair);
       if (result.created.length) {
         console.log(`Created: ${result.created.join(", ")}`);
+      }
+      if (result.repaired.length) {
+        console.log(`Repaired: ${result.repaired.join(", ")}`);
       }
       console.log(`POLICY.json: ${result.jsonExists && result.jsonValid ? "ok" : "failed"}`);
       console.log(`POLICY.md: ${result.markdownExists && result.markdownMatches ? "ok" : "failed"}`);
@@ -630,8 +763,9 @@ program
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
+  .option("--skill <skill-id...>", "Manually include one or more agent-local skills.")
   .description("Run a session turn.")
-  .action(async (options: { session: string; prompt: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean }) => {
+  .action(async (options: { session: string; prompt: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
       const content = await runSession(workspaceRoot, {
         sessionId: options.session,
@@ -640,6 +774,7 @@ program
         providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
         approveOverwriteFiles: options.approveOverwrite,
         requireTools: options.requireTools,
+        manualSkillIds: options.skill,
         onEvent: (message) => console.error(`[cosia] ${message}`)
       });
       console.log(content);
@@ -653,22 +788,29 @@ program
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
+  .option("--skill <skill-id...>", "Manually include one or more agent-local skills.")
   .description("Enter a simple session REPL.")
-  .action(async (options: { session: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean }) => {
+  .action(async (options: { session: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
       const sessions = new SessionManager(workspaceRoot);
       const session = await sessions.loadSession(options.session);
       await sessions.ensureSessionSupportFiles(session.id);
       const agent = await new AgentManager(workspaceRoot).loadAgent(session.agentId);
-      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const policyManager = new PolicyManager(workspaceRoot);
+      const policy = await policyManager.loadPolicy();
+      if (await policyManager.ensureMarkdownCurrent()) {
+        console.error("[cosia] policy mirror synced from POLICY.json");
+      }
       const memory = new MemoryManager(workspaceRoot);
+      const skills = new SkillManager(workspaceRoot);
       await memory.writeReferenceMemory(session, session.goal);
       const staticBlocks = await loadPromptStaticBlocks({ workspaceRoot, agent, session });
       const history: Array<{ prompt: string; response: string }> = [];
       let lastPrompt = session.goal;
+      const manualSkills = new Set(options.skill ?? []);
 
       console.error(`[cosia] chat started: ${session.id}`);
-      console.error("[cosia] commands: /status, /memory refresh, /exit");
+      console.error("[cosia] commands: /status, /memory refresh, /skills list, /skills use <id>, /skills drop <id>, /skills clear, /exit");
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       try {
         while (true) {
@@ -688,6 +830,7 @@ program
             console.log(`Provider: ${options.provider ?? policy.model.defaultProvider}`);
             console.log(`Prompt budget: ${policy.promptBudget.maxPromptChars} chars`);
             console.log(`Context tail: ${policy.promptBudget.contextTailChars} chars`);
+            console.log(`Manual skills: ${manualSkills.size ? [...manualSkills].join(", ") : "none"}`);
             const health = await sessions.contextHealth(session.id, {
               warningChars: policy.promptBudget.contextWarningChars,
               criticalChars: policy.promptBudget.contextCriticalChars
@@ -704,6 +847,37 @@ program
             console.error(`[cosia] refreshed REF_MEMORY.md for ${session.id}`);
             continue;
           }
+          if (prompt === "/skills list") {
+            const agentSkills = skills.listSkills(agent.id);
+            if (!agentSkills.length) {
+              console.log("No promoted skills.");
+            } else {
+              for (const item of agentSkills) {
+                const selected = manualSkills.has(item.id) ? "selected" : "available";
+                console.log(`${item.id}\t${selected}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}`);
+              }
+            }
+            continue;
+          }
+          if (prompt.startsWith("/skills use ")) {
+            const skillId = prompt.slice("/skills use ".length).trim();
+            const skill = skills.getSkill(agent.id, skillId);
+            manualSkills.add(skill.id);
+            console.error(`[cosia] selected skill ${skill.id}`);
+            continue;
+          }
+          if (prompt.startsWith("/skills drop ")) {
+            const skillId = prompt.slice("/skills drop ".length).trim();
+            const skill = skills.getSkill(agent.id, skillId);
+            manualSkills.delete(skill.id);
+            console.error(`[cosia] dropped skill ${skill.id}`);
+            continue;
+          }
+          if (prompt === "/skills clear") {
+            manualSkills.clear();
+            console.error("[cosia] cleared manual skills");
+            continue;
+          }
 
           let shouldRefreshMemory = false;
           const content = await runSession(workspaceRoot, {
@@ -714,6 +888,7 @@ program
             approveOverwriteFiles: options.approveOverwrite,
             requireTools: options.requireTools,
             promptStaticBlocks: staticBlocks,
+            manualSkillIds: [...manualSkills],
             refreshReferenceMemory: false,
             refreshReferenceMemoryAfterRun: false,
             onMemoryReview: (summary) => {
@@ -781,6 +956,12 @@ function formatPromptManifest(manifest: PromptManifest): string {
   ];
   for (const block of manifest.blocks) {
     lines.push(`- ${block.title} [${block.source}] ${block.retainedChars}/${block.originalChars} chars${block.truncated ? " truncated" : ""}`);
+  }
+  if (manifest.skillSelections?.length) {
+    lines.push("Skills:");
+    for (const skill of manifest.skillSelections) {
+      lines.push(`- ${skill.skillId} ${skill.selected ? "selected" : "omitted"} by:${skill.selectedBy} score:${skill.triggerScore} triggers:${skill.matchedTriggers.join(",") || "none"} ${skill.retainedChars}/${skill.originalChars} chars${skill.truncated ? " truncated" : ""}${skill.omittedReason ? ` reason:${skill.omittedReason}` : ""}`);
+    }
   }
   return lines.join("\n");
 }

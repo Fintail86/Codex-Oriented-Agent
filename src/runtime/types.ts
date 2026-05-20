@@ -41,7 +41,8 @@ export const agentManifestSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
   allowedTools: z.array(toolNameSchema),
-  skills: z.array(z.string()),
+  skills: z.array(z.string()).default([]),
+  skillTriggers: z.record(z.string(), z.array(z.string())).default({}),
   memoryScopes: z.array(memoryScopeSchema)
 });
 
@@ -103,10 +104,42 @@ export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
 
 export type MemoryCandidateRecord = z.infer<typeof memoryCandidateRecordSchema>;
 
+export const skillCandidateStatusSchema = z.enum(["pending", "promoted", "discarded"]);
+export type SkillCandidateStatus = z.infer<typeof skillCandidateStatusSchema>;
+
+export const skillCandidateSchema = z.object({
+  agentId: z.string().min(1),
+  skillName: z.string().min(1),
+  reason: z.string().min(1),
+  content: z.string().min(1),
+  triggers: z.array(z.string()).optional(),
+  riskLevel: riskLevelSchema.optional()
+});
+
+export type SkillCandidate = z.infer<typeof skillCandidateSchema>;
+
+export const skillCandidateRecordSchema = skillCandidateSchema.extend({
+  id: z.string().min(1),
+  status: skillCandidateStatusSchema,
+  skillId: z.string().min(1),
+  triggers: z.array(z.string()),
+  riskLevel: riskLevelSchema,
+  sourceSessionId: z.string().optional(),
+  sourceAgentId: z.string().optional(),
+  runId: z.string().optional(),
+  createdAt: z.string().min(1),
+  reviewedAt: z.string().optional(),
+  promotedSkillId: z.string().optional(),
+  discardReason: z.string().optional()
+});
+
+export type SkillCandidateRecord = z.infer<typeof skillCandidateRecordSchema>;
+
 export const finalAgentStepSchema = z.object({
   type: z.literal("final"),
   content: z.string(),
-  memoryCandidates: z.array(memoryCandidateSchema).optional()
+  memoryCandidates: z.array(memoryCandidateSchema).optional(),
+  skillCandidates: z.array(skillCandidateSchema).optional()
 });
 
 export const toolCallAgentStepSchema = z.object({

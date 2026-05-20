@@ -127,7 +127,7 @@ const agentStepJsonSchema = {
       enum: ["tool_call", "final"]
     },
     tool: {
-      enum: ["read_file", "write_file", "search_files"]
+      enum: ["read_file", "write_file", "search_files", "git_status", "git_diff", "git_log", "npm_test", "npm_typecheck"]
     },
     args: {
       type: "object",
@@ -182,9 +182,40 @@ const agentStepJsonSchema = {
         required: ["scope", "ownerId", "kind", "content", "importance", "confidence"],
         additionalProperties: false
       }
+    },
+    skillCandidates: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          agentId: {
+            type: "string"
+          },
+          skillName: {
+            type: "string"
+          },
+          reason: {
+            type: "string"
+          },
+          content: {
+            type: "string"
+          },
+          triggers: {
+            type: "array",
+            items: {
+              type: "string"
+            }
+          },
+          riskLevel: {
+            enum: ["low", "medium", "high"]
+          }
+        },
+        required: ["agentId", "skillName", "reason", "content", "triggers", "riskLevel"],
+        additionalProperties: false
+      }
     }
   },
-  required: ["type", "tool", "args", "content", "memoryCandidates"],
+  required: ["type", "tool", "args", "content", "memoryCandidates", "skillCandidates"],
   additionalProperties: false
 };
 
