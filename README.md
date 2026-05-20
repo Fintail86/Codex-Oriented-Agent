@@ -1,10 +1,10 @@
-# COSIA v0.14.0
+# COSIA v0.15.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.14 adds explicit memory tier promotion paths with conflict gates, transaction-safe history, revert support, and core-memory-to-skill-candidate handoff.
+v0.15 hardens provider handling: `codex-cli` stays the default, `openai-compatible` is implemented but disabled by default, provider failures get explicit reasons, and malformed AgentStep JSON gets a structured retry.
 
 ## Requirements
 
@@ -64,6 +64,8 @@ cosia memory add --tier core --content "COSIA uses Codex / Agent / Session layer
 cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 cosia chat --session <session-id>
 cosia tool git-status
+cosia provider list
+cosia provider check codex-cli
 ```
 
 For runtime-only verification without Codex login:
@@ -83,6 +85,15 @@ If a Codex provider call takes too long, lower the per-call timeout:
 ```powershell
 cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보고 요약해줘." --require-tools --provider-timeout-ms 60000
 ```
+
+Provider setup:
+
+- `codex-cli` is the default provider and uses the user's existing Codex CLI login.
+- COSIA never reads or stores Codex token files.
+- `openai-compatible` is available in `codex/POLICY.json` but starts disabled.
+- API keys are read only from the configured environment variable, default `OPENAI_API_KEY`.
+- Use `cosia provider list` and `cosia provider check <provider-id>` to inspect provider status.
+- Common failure reasons include `disabled`, `missing_config`, `missing_api_key`, `auth_failed`, `timeout`, `rate_limited`, `network_error`, `http_error`, `malformed_response`, and `malformed_agent_step`.
 
 ## CLI Commands
 
@@ -112,6 +123,8 @@ cosia run --session <session-id> --prompt "<prompt>" --agent <agent-id>
 cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
 cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
+cosia provider list
+cosia provider check <provider-id>
 cosia memory add --tier <tier> --owner-id <owner-id> --content "<content>"
 cosia memory add --scope <scope> --content "<content>"
 cosia memory search --query "<query>" --tier <tier> --owner-id <owner-id> --show-score
@@ -177,9 +190,12 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.13.
+- Destructive, network, external-send, and shell tools are not registered in v0.15.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
+- `openai-compatible` is implemented but disabled by default. Its API key is read only from the configured environment variable.
+- Provider failures are reported with reason codes and short next-action hints.
+- Invalid AgentStep JSON triggers a bounded structured retry that includes the parse error and a short malformed-output preview.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
 - `write_file` does not satisfy `--require-tools`; it is not an observation tool.
 - Codex provider calls have a default per-call timeout of 120000ms.
@@ -388,7 +404,6 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.15: Provider hardening and `openai-compatible` provider.
 - v0.16: Context maintenance workflow.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.

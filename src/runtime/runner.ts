@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { approveOverwrite } from "./approval_gate.js";
 import { AgentManager } from "./agent_manager.js";
 import { formatMemoryReviewSummary, MemoryManager } from "./memory_manager.js";
+import { formatProviderFailure, ProviderError } from "./model/provider_errors.js";
 import { createProvider } from "./model/provider_registry.js";
 import { PolicyAuditLog } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
@@ -58,12 +59,25 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   }
 
   const providerId = options.providerId ?? policy.model.defaultProvider;
-  const provider = options.provider ?? createProvider(providerId, workspaceRoot, options.providerTimeoutMs);
-  if (provider.id !== "mock") {
-    const auth = await provider.checkAuth();
-    if (!auth.ok) {
-      throw new Error(`Model provider auth failed: ${auth.message}`);
+  let provider: ModelProvider | undefined;
+  try {
+    provider = options.provider ?? createProvider(providerId, workspaceRoot, {
+      policy,
+      timeoutMs: options.providerTimeoutMs
+    });
+    if (provider.id !== "mock") {
+      const auth = await provider.checkAuth();
+      if (!auth.ok) {
+        throw new ProviderError(auth.reason ?? "auth_failed", `Model provider auth failed: ${auth.message}`, {
+          hint: auth.hint
+        });
+      }
     }
+  } catch (error) {
+    throw new Error(formatProviderFailure(error, provider?.id ?? providerId));
+  }
+  if (!provider) {
+    throw new Error(`Provider ${providerId} was not created.`);
   }
 
   const toolResults: string[] = [];
@@ -98,7 +112,9 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     });
     await appendPromptManifest(workspaceRoot, session.id, promptResult.manifest);
     const prompt = promptResult.prompt;
-    const output = await complete(provider, prompt, session.id);
+    const output = await complete(provider, prompt, session.id).catch((error: unknown) => {
+      throw new Error(formatProviderFailure(error, provider.id));
+    });
     lastStep = output.step;
     if (output.step.type === "final") {
       const decision = policyEngine.evaluateFinalAnswer({

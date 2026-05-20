@@ -101,7 +101,23 @@ export type SessionMetadata = z.infer<typeof sessionMetadataSchema>;
 export type AuthStatus = {
   ok: boolean;
   message: string;
+  reason?: ProviderFailureReason;
+  hint?: string;
 };
+
+export type ProviderFailureReason =
+  | "cli_missing"
+  | "auth_failed"
+  | "disabled"
+  | "missing_config"
+  | "missing_api_key"
+  | "timeout"
+  | "network_error"
+  | "http_error"
+  | "rate_limited"
+  | "malformed_response"
+  | "malformed_agent_step"
+  | "unknown_provider";
 
 export type ModelInput = {
   prompt: string;

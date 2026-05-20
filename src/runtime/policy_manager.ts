@@ -16,8 +16,13 @@ const promptOverflowPolicySchema = z.literal("truncate_low_priority");
 const providerConfigSchema = z.object({
   enabled: z.boolean(),
   sandbox: z.string().optional(),
-  baseUrl: z.string().nullable().optional(),
-  model: z.string().nullable().optional()
+  baseUrl: z.string().nullable().default(null),
+  model: z.string().nullable().default(null),
+  apiKeyEnv: z.string().min(1).default("OPENAI_API_KEY"),
+  endpointPath: z.string().min(1).default("/chat/completions"),
+  timeoutMs: z.number().int().positive().default(120000),
+  structuredRetryCount: z.number().int().min(0).max(5).default(1),
+  maxPromptChars: z.number().int().positive().default(60000)
 });
 
 export const policyConfigSchema = z.object({
@@ -110,12 +115,24 @@ export const policyConfigSchema = z.object({
     providers: {
       "codex-cli": {
         enabled: true,
-        sandbox: "read-only"
+        sandbox: "read-only",
+        baseUrl: null,
+        model: null,
+        apiKeyEnv: "OPENAI_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000
       },
       "openai-compatible": {
         enabled: false,
         baseUrl: null,
-        model: null
+        model: null,
+        apiKeyEnv: "OPENAI_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000
       }
     }
   })
@@ -135,7 +152,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.14.0",
+  version: "0.15.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -249,12 +266,24 @@ export const defaultPolicy: PolicyConfig = {
     providers: {
       "codex-cli": {
         enabled: true,
-        sandbox: "read-only"
+        sandbox: "read-only",
+        baseUrl: null,
+        model: null,
+        apiKeyEnv: "OPENAI_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000
       },
       "openai-compatible": {
         enabled: false,
         baseUrl: null,
-        model: null
+        model: null,
+        apiKeyEnv: "OPENAI_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000
       }
     }
   }
@@ -478,7 +507,8 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 ## Model Providers
 
 - Default provider: \`${policy.model.defaultProvider}\`
-- Configured providers: ${Object.entries(policy.model.providers).map(([id, config]) => `\`${id}\`(${config.enabled ? "enabled" : "disabled"})`).join(", ")}
+- Configured providers:
+${Object.entries(policy.model.providers).map(([id, config]) => `  - \`${id}\`: ${config.enabled ? "enabled" : "disabled"}, timeout \`${config.timeoutMs}\`, retry \`${config.structuredRetryCount}\`, max prompt chars \`${config.maxPromptChars}\`, model ${config.model ? `\`${config.model}\`` : "`unset`"}, baseUrl ${config.baseUrl ? "`set`" : "`unset`"}`).join("\n")}
 `;
 }
 

@@ -8,6 +8,7 @@ import {
 } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
+import { checkProvider, listProviders } from "./runtime/model/provider_registry.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_builder.js";
@@ -30,7 +31,7 @@ program
 
 program
   .command("status")
-  .option("--provider <provider>", "Model provider smoke check: default, codex-cli, or mock", "default")
+  .option("--provider <provider>", "Model provider smoke check: default, codex-cli, openai-compatible, or mock", "default")
   .description("Show workspace, runtime, memory, session, and provider status.")
   .action(async (options: { provider: string }) => {
     await main(async (workspaceRoot) => {
@@ -48,6 +49,57 @@ program
       }
       console.log(`Provider: ${report.providerId} (${report.providerOk ? "ok" : "failed"})`);
       console.log(`Provider message: ${report.providerMessage}`);
+      if (report.providerReason) {
+        console.log(`Provider reason: ${report.providerReason}`);
+      }
+      if (report.providerHint) {
+        console.log(`Provider hint: ${report.providerHint}`);
+      }
+    });
+  });
+
+const providerCommand = program.command("provider").description("Inspect model providers.");
+
+providerCommand
+  .command("list")
+  .description("List configured model providers.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log("Provider              Default  Enabled  Timeout  Retry  MaxPrompt  Model  BaseUrl  API Key Env");
+      for (const item of listProviders(policy)) {
+        console.log([
+          item.id.padEnd(21),
+          String(item.isDefault).padEnd(7),
+          String(item.enabled).padEnd(7),
+          String(item.timeoutMs ?? "-").padEnd(7),
+          String(item.structuredRetryCount ?? "-").padEnd(5),
+          String(item.maxPromptChars ?? "-").padEnd(9),
+          String(item.modelConfigured ?? "-").padEnd(5),
+          String(item.baseUrlConfigured ?? "-").padEnd(7),
+          item.apiKeyEnv ?? (item.builtIn ? "built-in" : "-")
+        ].join("  "));
+      }
+    });
+  });
+
+providerCommand
+  .command("check")
+  .argument("<provider-id>")
+  .description("Check a provider configuration and auth status.")
+  .action(async (providerId: string) => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const result = await checkProvider(providerId, workspaceRoot, policy);
+      console.log(`Provider: ${result.id}`);
+      console.log(`Status: ${result.ok ? "ok" : "failed"}`);
+      console.log(`Message: ${result.message}`);
+      if (result.reason) {
+        console.log(`Reason: ${result.reason}`);
+      }
+      if (result.hint) {
+        console.log(`Hint: ${result.hint}`);
+      }
     });
   });
 
@@ -1199,20 +1251,20 @@ program
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
   .option("--agent <agent-id>", "Agent id for this run. Overrides the session assignment without changing it.")
-  .option("--provider <provider>", "Model provider: codex-cli or mock")
-  .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
+  .option("--provider <provider>", "Model provider: codex-cli, openai-compatible, or mock")
+  .option("--provider-timeout-ms <ms>", "Override provider call timeout in milliseconds")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .option("--skill <skill-id...>", "Manually include one or more global skills.")
   .description("Run a session turn.")
-  .action(async (options: { session: string; prompt: string; agent?: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
+  .action(async (options: { session: string; prompt: string; agent?: string; provider?: string; providerTimeoutMs?: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
       const content = await runSession(workspaceRoot, {
         sessionId: options.session,
         prompt: options.prompt,
         agentId: options.agent,
         providerId: options.provider,
-        providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
+        providerTimeoutMs: options.providerTimeoutMs ? Number.parseInt(options.providerTimeoutMs, 10) : undefined,
         approveOverwriteFiles: options.approveOverwrite,
         requireTools: options.requireTools,
         manualSkillIds: options.skill,
@@ -1226,13 +1278,13 @@ program
   .command("chat")
   .requiredOption("--session <session-id>", "Session id")
   .option("--agent <agent-id>", "Agent id for this chat. Overrides the session assignment without changing it.")
-  .option("--provider <provider>", "Model provider: codex-cli or mock")
-  .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
+  .option("--provider <provider>", "Model provider: codex-cli, openai-compatible, or mock")
+  .option("--provider-timeout-ms <ms>", "Override provider call timeout in milliseconds")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .option("--skill <skill-id...>", "Manually include one or more global skills.")
   .description("Enter a simple session REPL.")
-  .action(async (options: { session: string; agent?: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
+  .action(async (options: { session: string; agent?: string; provider?: string; providerTimeoutMs?: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
       const sessions = new SessionManager(workspaceRoot);
       const session = await sessions.loadSession(options.session);
@@ -1342,7 +1394,7 @@ program
             prompt,
             agentId: agent.id,
             providerId: options.provider,
-            providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
+            providerTimeoutMs: options.providerTimeoutMs ? Number.parseInt(options.providerTimeoutMs, 10) : undefined,
             approveOverwriteFiles: options.approveOverwrite,
             requireTools: options.requireTools,
             promptStaticBlocks: staticBlocks,

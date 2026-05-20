@@ -1,4 +1,5 @@
 import { agentStepSchema, type AgentStep, type ModelOutput } from "../types.js";
+import { previewText, ProviderError } from "./provider_errors.js";
 
 export function parseModelOutput(raw: string): ModelOutput {
   const json = extractJsonObject(raw);
@@ -58,8 +59,50 @@ export function extractJsonObject(text: string): string {
   throw new Error("Model output contained an incomplete JSON object.");
 }
 
-export function modelInstructionForRetry(error: unknown): string {
-  return `Your previous response could not be parsed as the required AgentStep JSON. Return only one JSON object. Parse error: ${(error as Error).message}`;
+export async function completeWithStructuredRetry(
+  input: { prompt: string; retryInstruction?: string },
+  structuredRetryCount: number,
+  completeOnce: (prompt: string) => Promise<string>
+): Promise<ModelOutput> {
+  let lastRaw = "";
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= structuredRetryCount; attempt += 1) {
+    const prompt = attempt === 0
+      ? input.prompt
+      : `${input.prompt}
+
+${input.retryInstruction ?? modelInstructionForRetry(lastError, lastRaw)}
+`;
+    lastRaw = await completeOnce(prompt);
+    try {
+      return parseModelOutput(lastRaw);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= structuredRetryCount) {
+        throw new ProviderError(
+          "malformed_agent_step",
+          `Provider returned invalid AgentStep JSON: ${(error as Error).message}`,
+          {
+            preview: previewText(lastRaw),
+            cause: error
+          }
+        );
+      }
+    }
+  }
+  throw new ProviderError("malformed_agent_step", "Provider did not return AgentStep JSON.");
+}
+
+export function modelInstructionForRetry(error: unknown, malformedOutput = ""): string {
+  return `You returned invalid JSON. Fix the error below and return ONLY valid AgentStep JSON.
+
+Parse error:
+${(error as Error).message}
+
+Previous malformed output preview:
+${previewText(malformedOutput, 600)}
+
+Return ONLY one JSON object matching the AgentStep schema.`;
 }
 
 export function formatAgentStepForPrompt(step: AgentStep): string {

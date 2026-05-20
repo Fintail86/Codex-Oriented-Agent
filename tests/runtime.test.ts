@@ -8,7 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager, formatAgentRecommendation } from "../src/runtime/agent_manager.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMemoryText } from "../src/runtime/memory_manager.js";
-import { parseModelOutput } from "../src/runtime/model/model_provider.js";
+import { modelInstructionForRetry, parseModelOutput } from "../src/runtime/model/model_provider.js";
+import { ProviderError } from "../src/runtime/model/provider_errors.js";
+import { checkProvider, createProvider, listProviders } from "../src/runtime/model/provider_registry.js";
+import { OpenAICompatibleProvider, type FetchLike } from "../src/runtime/model/providers/openai_compatible_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { PolicyManager } from "../src/runtime/policy_manager.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
@@ -42,6 +45,31 @@ async function initializedWorkspace(): Promise<string> {
   return root;
 }
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json"
+    }
+  });
+}
+
+function configuredOpenAIProvider(fetchImpl: FetchLike, overrides: Partial<ConstructorParameters<typeof OpenAICompatibleProvider>[0]> = {}): OpenAICompatibleProvider {
+  process.env.COSIA_TEST_KEY = process.env.COSIA_TEST_KEY ?? "test-key";
+  return new OpenAICompatibleProvider({
+    enabled: true,
+    baseUrl: "https://example.invalid",
+    model: "test-model",
+    apiKeyEnv: "COSIA_TEST_KEY",
+    endpointPath: "/chat/completions",
+    timeoutMs: 1000,
+    structuredRetryCount: 1,
+    maxPromptChars: 60000,
+    fetchImpl,
+    ...overrides
+  });
+}
+
 describe("runtime setup", () => {
   it("creates Codex templates, an agent, and a session", async () => {
     const root = await initializedWorkspace();
@@ -67,7 +95,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.14.0\"");
+    expect(policyJson).toContain("\"version\": \"0.15.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -1464,6 +1492,135 @@ describe("model parsing and run loop", () => {
     expect(() => parseModelOutput('{"type":"final"}')).toThrow();
   });
 
+  it("formats structured retry instructions with parse error and output preview", () => {
+    const instruction = modelInstructionForRetry(new Error("Unexpected token"), "not-json");
+    expect(instruction).toContain("You returned invalid JSON. Fix the error below and return ONLY valid AgentStep JSON.");
+    expect(instruction).toContain("Unexpected token");
+    expect(instruction).toContain("not-json");
+  });
+
+  it("classifies provider registry disabled and unknown providers", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+
+    expect(() => createProvider("openai-compatible", root, { policy })).toThrow(ProviderError);
+    const disabled = await checkProvider("openai-compatible", root, policy);
+    expect(disabled).toMatchObject({ ok: false, reason: "disabled" });
+
+    const unknown = await checkProvider("missing-provider", root, policy);
+    expect(unknown).toMatchObject({ ok: false, reason: "unknown_provider" });
+
+    const listed = listProviders(policy);
+    expect(listed.some((provider) => provider.id === "codex-cli" && provider.isDefault)).toBe(true);
+    expect(listed.some((provider) => provider.id === "mock" && provider.enabled)).toBe(true);
+  });
+
+  it("checks openai-compatible missing config and missing api key distinctly", async () => {
+    const missingConfig = new OpenAICompatibleProvider({
+      enabled: true,
+      baseUrl: null,
+      model: "test-model",
+      apiKeyEnv: "COSIA_TEST_KEY",
+      endpointPath: "/chat/completions",
+      timeoutMs: 1000,
+      structuredRetryCount: 1,
+      maxPromptChars: 60000
+    });
+    expect(await missingConfig.checkAuth()).toMatchObject({ ok: false, reason: "missing_config" });
+
+    const previous = process.env.COSIA_TEST_KEY;
+    delete process.env.COSIA_TEST_KEY;
+    try {
+      const missingKey = new OpenAICompatibleProvider({
+        enabled: true,
+        baseUrl: "https://example.invalid",
+        model: "test-model",
+        apiKeyEnv: "COSIA_TEST_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 1000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000
+      });
+      expect(await missingKey.checkAuth()).toMatchObject({ ok: false, reason: "missing_api_key" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COSIA_TEST_KEY;
+      } else {
+        process.env.COSIA_TEST_KEY = previous;
+      }
+    }
+  });
+
+  it("parses openai-compatible final and tool_call responses", async () => {
+    const finalProvider = configuredOpenAIProvider(async () => jsonResponse({
+      choices: [{ message: { content: '{"type":"final","content":"ok","memoryCandidates":[]}' } }]
+    }));
+    expect((await finalProvider.complete({ prompt: "hi", sessionId: "s" })).step).toMatchObject({ type: "final", content: "ok" });
+
+    const toolProvider = configuredOpenAIProvider(async () => jsonResponse({
+      choices: [{ message: { content: '{"type":"tool_call","tool":"git_status","args":{}}' } }]
+    }));
+    expect((await toolProvider.complete({ prompt: "status", sessionId: "s" })).step).toMatchObject({ type: "tool_call", tool: "git_status" });
+  });
+
+  it("retries malformed AgentStep JSON using provider retry count", async () => {
+    let calls = 0;
+    let retryBody = "";
+    const provider = configuredOpenAIProvider(async (_input, init) => {
+      calls += 1;
+      if (calls === 2) {
+        retryBody = String(init?.body ?? "");
+      }
+      return jsonResponse({
+        choices: [{
+          message: {
+            content: calls === 1
+              ? "not json"
+              : '{"type":"final","content":"fixed","memoryCandidates":[]}'
+          }
+        }]
+      });
+    });
+
+    const output = await provider.complete({ prompt: "Return JSON", sessionId: "s" });
+    expect(output.step).toMatchObject({ type: "final", content: "fixed" });
+    expect(calls).toBe(2);
+    expect(retryBody).toContain("You returned invalid JSON");
+    expect(retryBody).toContain("not json");
+  });
+
+  it("maps openai-compatible fetch and HTTP failures to provider reasons", async () => {
+    await expect(configuredOpenAIProvider(async () => {
+      throw new Error("ECONNREFUSED");
+    }).complete({ prompt: "x", sessionId: "s" })).rejects.toMatchObject({ reason: "network_error" });
+
+    await expect(configuredOpenAIProvider(async () => jsonResponse({ error: "bad key" }, 401))
+      .complete({ prompt: "x", sessionId: "s" })).rejects.toMatchObject({ reason: "auth_failed" });
+
+    await expect(configuredOpenAIProvider(async () => jsonResponse({ error: "slow down" }, 429))
+      .complete({ prompt: "x", sessionId: "s" })).rejects.toMatchObject({ reason: "rate_limited" });
+
+    await expect(configuredOpenAIProvider(async () => jsonResponse({ error: "server" }, 500))
+      .complete({ prompt: "x", sessionId: "s" })).rejects.toMatchObject({ reason: "http_error" });
+
+    await expect(configuredOpenAIProvider(async () => jsonResponse({ choices: [] }))
+      .complete({ prompt: "x", sessionId: "s" })).rejects.toMatchObject({ reason: "malformed_response" });
+  });
+
+  it("maps openai-compatible timeout and prompt char limit before model use", async () => {
+    const timeoutProvider = configuredOpenAIProvider((_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    }), { timeoutMs: 1 });
+    await expect(timeoutProvider.complete({ prompt: "x", sessionId: "s" })).rejects.toMatchObject({ reason: "timeout" });
+
+    const limitProvider = configuredOpenAIProvider(async () => jsonResponse({ choices: [] }), { maxPromptChars: 3 });
+    await expect(limitProvider.complete({ prompt: "too long", sessionId: "s" })).rejects.toMatchObject({ reason: "malformed_response" });
+  });
+
   it("runs a session with the mock provider and writes context memory", async () => {
     const root = await initializedWorkspace();
     const agents = new AgentManager(root);
@@ -1818,7 +1975,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.14.0");
+    expect(emptyReport.version).toBe("0.15.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

@@ -2,12 +2,16 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseModelOutput, modelInstructionForRetry } from "../model_provider.js";
+import { completeWithStructuredRetry } from "../model_provider.js";
+import { previewText, ProviderError, providerFailureHint } from "../provider_errors.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
 
 type CodexCliProviderOptions = {
   workspaceRoot: string;
   timeoutMs?: number;
+  sandbox?: string;
+  structuredRetryCount?: number;
+  maxPromptChars?: number;
 };
 
 export class CodexCliProvider implements ModelProvider {
@@ -16,57 +20,90 @@ export class CodexCliProvider implements ModelProvider {
   constructor(private readonly options: CodexCliProviderOptions) {}
 
   async checkAuth(): Promise<AuthStatus> {
-    const result = await runCodex(["login", "status"], "", this.options.workspaceRoot, 10_000);
-    if (result.code === 0) {
-      return { ok: true, message: result.stdout.trim() || "Codex login status is OK." };
+    try {
+      const result = await runCodex(["login", "status"], "", this.options.workspaceRoot, 10_000);
+      if (result.code === 0) {
+        return { ok: true, message: result.stdout.trim() || "Codex login status is OK." };
+      }
+      if (looksLikeMissingCli(result.stderr) || looksLikeMissingCli(result.stdout)) {
+        return failedAuth("cli_missing", result.stderr || result.stdout);
+      }
+      const isolated = await ensureProviderWorkdir();
+      const schemaPath = await ensureOutputSchema(isolated);
+      const smoke = await runCodex(
+        codexExecArgs(schemaPath, this.options.sandbox ?? "read-only"),
+        boundaryPrompt(
+          "Say only this JSON object: {\"type\":\"final\",\"tool\":\"read_file\",\"args\":{\"path\":\"\",\"content\":\"\",\"query\":\"\",\"directory\":\"\"},\"content\":\"codex-ready\",\"memoryCandidates\":[],\"skillCandidates\":[]}"
+        ),
+        isolated,
+        30_000
+      );
+      if (smoke.code === 0) {
+        return { ok: true, message: "Codex exec smoke test succeeded." };
+      }
+      const combined = `${smoke.stderr}\n${smoke.stdout}`;
+      if (smoke.timedOut) {
+        return failedAuth("timeout", combined);
+      }
+      if (looksLikeAuthFailure(combined)) {
+        return failedAuth("auth_failed", combined);
+      }
+      if (looksLikeMissingCli(combined)) {
+        return failedAuth("cli_missing", combined);
+      }
+      return failedAuth("malformed_response", combined);
+    } catch (error) {
+      const providerError = classifyCodexError(error);
+      return {
+        ok: false,
+        message: providerError.message,
+        reason: providerError.reason,
+        hint: providerError.hint ?? providerFailureHint(providerError.reason, this.id)
+      };
     }
-    const isolated = await ensureProviderWorkdir();
-    const schemaPath = await ensureOutputSchema(isolated);
-    const smoke = await runCodex(
-      codexExecArgs(schemaPath),
-      boundaryPrompt(
-        "Say only this JSON object: {\"type\":\"final\",\"tool\":\"read_file\",\"args\":{\"path\":\"\",\"content\":\"\",\"query\":\"\",\"directory\":\"\"},\"content\":\"codex-ready\",\"memoryCandidates\":[]}"
-      ),
-      isolated,
-      30_000
-    );
-    return {
-      ok: smoke.code === 0,
-      message: smoke.code === 0 ? "Codex exec smoke test succeeded." : smoke.stderr || smoke.stdout
-    };
   }
 
   async complete(input: ModelInput): Promise<ModelOutput> {
-    const first = await this.completeOnce(input.prompt);
-    try {
-      return parseModelOutput(first);
-    } catch (error) {
-      const retryPrompt = `${input.prompt}
-
-${input.retryInstruction ?? modelInstructionForRetry(error)}
-`;
-      const second = await this.completeOnce(retryPrompt);
-      return parseModelOutput(second);
-    }
+    return completeWithStructuredRetry(
+      input,
+      this.options.structuredRetryCount ?? 1,
+      (prompt) => this.completeOnce(prompt)
+    );
   }
 
   private async completeOnce(prompt: string): Promise<string> {
+    enforcePromptLimit(prompt, this.options.maxPromptChars ?? 60_000, this.id);
     const isolated = await ensureProviderWorkdir();
     const schemaPath = await ensureOutputSchema(isolated);
     const result = await runCodex(
-      codexExecArgs(schemaPath),
+      codexExecArgs(schemaPath, this.options.sandbox ?? "read-only"),
       boundaryPrompt(prompt),
       isolated,
       this.options.timeoutMs ?? 120_000
     );
+    if (result.timedOut) {
+      throw new ProviderError("timeout", "Codex CLI provider timed out.", {
+        preview: previewText(`${result.stderr}\n${result.stdout}`),
+        hint: providerFailureHint("timeout", this.id)
+      });
+    }
     if (result.code !== 0) {
-      throw new Error(`codex exec failed: ${result.stderr || result.stdout}`);
+      const combined = `${result.stderr}\n${result.stdout}`;
+      const reason = looksLikeAuthFailure(combined)
+        ? "auth_failed"
+        : looksLikeMissingCli(combined)
+          ? "cli_missing"
+          : "malformed_response";
+      throw new ProviderError(reason, `codex exec failed with exit code ${result.code}.`, {
+        preview: previewText(combined),
+        hint: providerFailureHint(reason, this.id)
+      });
     }
     return extractFinalMessage(result.stdout) || result.stdout;
   }
 }
 
-function codexExecArgs(schemaPath: string): string[] {
+function codexExecArgs(schemaPath: string, sandbox: string): string[] {
   return [
     "exec",
     "--disable",
@@ -84,7 +121,7 @@ function codexExecArgs(schemaPath: string): string[] {
     "--json",
     "--ephemeral",
     "--sandbox",
-    "read-only",
+    sandbox,
     "--skip-git-repo-check",
     "--ignore-user-config",
     "--ignore-rules",
@@ -269,7 +306,7 @@ function runCodex(
   stdin: string,
   cwd: string,
   timeoutMs: number
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const command = process.platform === "win32" ? "cmd.exe" : "codex";
     const commandArgs = process.platform === "win32"
@@ -290,7 +327,7 @@ function runCodex(
       settled = true;
       stderr += `\nTimed out after ${timeoutMs}ms while running: codex ${args.join(" ")}`;
       void killProcessTree(child.pid);
-      resolve({ code: null, stdout, stderr });
+      resolve({ code: null, stdout, stderr, timedOut: true });
     }, timeoutMs);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -314,10 +351,57 @@ function runCodex(
       }
       settled = true;
       clearTimeout(timeout);
-      resolve({ code, stdout, stderr });
+      resolve({ code, stdout, stderr, timedOut: false });
     });
     child.stdin.end(stdin);
   });
+}
+
+function enforcePromptLimit(prompt: string, maxPromptChars: number, providerId: string): void {
+  if (prompt.length <= maxPromptChars) {
+    return;
+  }
+  throw new ProviderError(
+    "malformed_response",
+    `Prompt is ${prompt.length} chars, above provider maxPromptChars ${maxPromptChars}.`,
+    {
+      hint: `Reduce prompt size or raise model.providers.${providerId}.maxPromptChars in codex/POLICY.json.`
+    }
+  );
+}
+
+function failedAuth(reason: "cli_missing" | "auth_failed" | "timeout" | "malformed_response", output: string): AuthStatus {
+  return {
+    ok: false,
+    message: previewText(output) || reason,
+    reason,
+    hint: providerFailureHint(reason, "codex-cli")
+  };
+}
+
+function classifyCodexError(error: unknown): ProviderError {
+  if (error instanceof ProviderError) {
+    return error;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  if ((error as NodeJS.ErrnoException)?.code === "ENOENT" || looksLikeMissingCli(message)) {
+    return new ProviderError("cli_missing", message, {
+      hint: providerFailureHint("cli_missing", "codex-cli"),
+      cause: error
+    });
+  }
+  return new ProviderError("malformed_response", message, {
+    hint: providerFailureHint("malformed_response", "codex-cli"),
+    cause: error
+  });
+}
+
+function looksLikeMissingCli(text: string): boolean {
+  return /not recognized|cannot find|enoent|command not found|is not recognized/i.test(text);
+}
+
+function looksLikeAuthFailure(text: string): boolean {
+  return /auth|login|unauthorized|forbidden|not logged in|credentials/i.test(text);
 }
 
 function killProcessTree(pid: number | undefined): Promise<void> {

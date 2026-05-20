@@ -1,5 +1,5 @@
 {
-  "version": "0.14.0",
+  "version": "0.15.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -155,12 +155,24 @@
     "providers": {
       "codex-cli": {
         "enabled": true,
-        "sandbox": "read-only"
+        "sandbox": "read-only",
+        "baseUrl": null,
+        "model": null,
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000
       },
       "openai-compatible": {
         "enabled": false,
         "baseUrl": null,
-        "model": null
+        "model": null,
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000
       }
     }
   }
