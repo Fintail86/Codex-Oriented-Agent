@@ -1,4 +1,4 @@
-# COSIA v0.6
+# COSIA v0.6.1
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -88,6 +88,8 @@ cosia init
 cosia agent create <agent-id> --template architect
 cosia session create --agent <agent-id> --goal "<goal>"
 cosia session summarize <session-id> --content "<summary>"
+cosia session prompt <session-id> --latest
+cosia session context undo-last <session-id> --reason "<reason>"
 cosia run --session <session-id> --prompt "<prompt>"
 cosia chat --session <session-id>
 cosia memory add --scope <scope> --content "<content>"
@@ -181,6 +183,16 @@ Prompt manifests record block sizes and truncation metadata without storing full
 ```text
 sessions/<session-id>/PROMPT_MANIFEST.jsonl
 ```
+
+Readable prompt budget summaries and safe context undo are available through:
+
+```powershell
+cosia session prompt <session-id> --latest
+cosia session prompt <session-id> --limit 2
+cosia session context undo-last <session-id> --reason "Mistyped chat command"
+```
+
+`undo-last` archives the last `CONTEXT_MEMORY.md` run entry into `CONTEXT_ARCHIVE.md`; it does not delete the entry without a trace.
 
 ## Memory Candidate Review
 

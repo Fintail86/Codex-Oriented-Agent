@@ -6,7 +6,7 @@ import { initProject } from "./runtime/init_project.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
-import { loadPromptStaticBlocks } from "./runtime/prompt_builder.js";
+import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_builder.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
@@ -125,6 +125,46 @@ session
       await sessions.loadSession(sessionId);
       await sessions.updateSummary(sessionId, options.content);
       console.log(`Updated ${sessionId} SESSION_SUMMARY.md`);
+    });
+  });
+
+session
+  .command("prompt")
+  .argument("<session-id>")
+  .option("--latest", "Show only the latest prompt manifest.", false)
+  .option("--limit <n>", "Prompt manifest count", "1")
+  .description("Show readable prompt budget manifests for a session.")
+  .action(async (sessionId: string, options: { latest: boolean; limit: string }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      await sessions.loadSession(sessionId);
+      const limit = options.latest ? 1 : parseIntegerOption(options.limit, "limit");
+      const manifests = await sessions.listPromptManifests(sessionId, limit);
+      if (!manifests.length) {
+        console.log("No prompt manifests.");
+        return;
+      }
+      console.log(manifests.map(formatPromptManifest).join("\n\n"));
+    });
+  });
+
+const sessionContext = session.command("context").description("Manage session context memory.");
+
+sessionContext
+  .command("undo-last")
+  .argument("<session-id>")
+  .requiredOption("--reason <reason>", "Archive reason")
+  .description("Move the latest context run entry into CONTEXT_ARCHIVE.md.")
+  .action(async (sessionId: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      await sessions.loadSession(sessionId);
+      const result = await sessions.undoLastContextEntry(sessionId, options.reason);
+      console.log(result.message);
+      if (result.moved) {
+        console.log(`Moved at: ${result.movedAt}`);
+        console.log("Archive: CONTEXT_ARCHIVE.md");
+      }
     });
   });
 
@@ -620,4 +660,21 @@ function parseNumberOption(value: string, name: string): number {
     throw new Error(`Invalid ${name}: ${value}`);
   }
   return parsed;
+}
+
+function formatPromptManifest(manifest: PromptManifest): string {
+  const lines = [
+    `Run: ${manifest.runId ?? "legacy/no-run-id"}`,
+    `Model step: ${manifest.modelStep ?? "unknown"}`,
+    `Timestamp: ${manifest.timestamp}`,
+    `Prompt chars: ${manifest.promptChars}/${manifest.maxPromptChars}`,
+    `Target chars: ${manifest.targetPromptChars}`,
+    `Estimated tokens: ${manifest.estimatedTokens}`,
+    `Overflowed: ${manifest.overflowed}`,
+    "Blocks:"
+  ];
+  for (const block of manifest.blocks) {
+    lines.push(`- ${block.title} [${block.source}] ${block.retainedChars}/${block.originalChars} chars${block.truncated ? " truncated" : ""}`);
+  }
+  return lines.join("\n");
 }

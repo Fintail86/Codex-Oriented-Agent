@@ -49,10 +49,11 @@ describe("runtime setup", () => {
     expect(manifest.allowedTools).toEqual(["read_file", "write_file", "search_files"]);
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
-    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.6.0\"");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.6.1\"");
     expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(root, "sessions", session.id, "SESSION_SUMMARY.md"), "utf8")).toContain("SESSION SUMMARY");
     expect(await readFile(join(root, "sessions", session.id, "PROMPT_MANIFEST.jsonl"), "utf8")).toBe("");
+    expect(await readFile(join(root, "sessions", session.id, "CONTEXT_ARCHIVE.md"), "utf8")).toContain("CONTEXT ARCHIVE");
     expect(await readFile(join(root, "memory", "auto_promotions.jsonl"), "utf8")).toBe("");
   });
 
@@ -112,6 +113,29 @@ describe("runtime setup", () => {
     expect(result.manifest.promptChars).toBe(result.prompt.length);
     expect(result.manifest.estimatedTokens).toBeGreaterThan(0);
     expect(result.manifest.safetyMarginChars).toBeGreaterThan(0);
+  });
+
+  it("reads prompt manifests and archives the latest context entry", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Prompt manifest polish");
+
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:00:00.000Z\n\nPrompt:\nfirst\n");
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:01:00.000Z\n\nPrompt:\nsecond\n");
+    const result = await sessions.undoLastContextEntry(session.id, "wrong prompt");
+    expect(result.moved).toBe(true);
+
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    const archive = await readFile(join(root, "sessions", session.id, "CONTEXT_ARCHIVE.md"), "utf8");
+    expect(context).toContain("first");
+    expect(context).not.toContain("second");
+    expect(archive).toContain("wrong prompt");
+    expect(archive).toContain("second");
+
+    const emptySession = await sessions.createSession("architect-agent", "No context");
+    await expect(sessions.undoLastContextEntry(emptySession.id, "nothing")).resolves.toMatchObject({ moved: false });
   });
 });
 
@@ -560,6 +584,8 @@ describe("model parsing and run loop", () => {
       sessionId: session.id,
       modelStep: 1
     });
+    const readable = await sessions.listPromptManifests(session.id, 1);
+    expect(readable[0]).toMatchObject({ sessionId: session.id, modelStep: 1 });
   });
 
   it("requires an observation tool before final when requireTools is enabled", async () => {
@@ -839,7 +865,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.6.0");
+    expect(emptyReport.version).toBe("0.6.1");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
