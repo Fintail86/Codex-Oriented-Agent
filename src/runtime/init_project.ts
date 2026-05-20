@@ -17,8 +17,6 @@ export async function initProject(workspaceRoot: string): Promise<string[]> {
     }
   }
   created.push(...await new PolicyManager(workspaceRoot).ensurePolicyFiles());
-  await writeTextIfMissing(join(workspaceRoot, "memory", "memory_candidates.jsonl"), "");
-  await writeTextIfMissing(join(workspaceRoot, "memory", "auto_promotions.jsonl"), "");
   const memory = new MemoryManager(workspaceRoot);
   memory.ensureSchema();
   return created;

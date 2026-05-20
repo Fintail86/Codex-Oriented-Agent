@@ -5,7 +5,12 @@
   "allowedTools": [
     "read_file",
     "write_file",
-    "search_files"
+    "search_files",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "npm_test",
+    "npm_typecheck"
   ],
   "skills": [],
   "memoryScopes": [

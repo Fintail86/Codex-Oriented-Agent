@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { isAbsolute, relative } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { readText, resolveExistingInside, resolveInside, writeText } from "./fs_utils.js";
@@ -34,6 +35,19 @@ const gitLogArgs = z.object({
 });
 
 const toolOutputMaxChars = 12000;
+const searchFallbackMaxFiles = 1000;
+const searchFallbackMaxMatches = 80;
+const searchFallbackTimeoutMs = 5000;
+
+type PathSearchResult = {
+  matches: string[];
+  diagnostics?: string;
+};
+
+type FileListResult = {
+  files: string[];
+  stoppedReason?: string;
+};
 
 export class ToolRegistry {
   private readonly tools = new Map<ToolName, ToolDefinition>();
@@ -64,11 +78,11 @@ export class ToolRegistry {
       execute: async (args, ctx) => {
         const parsed = searchFilesArgs.parse(args);
         const directory = resolveInside(ctx.workspaceRoot, parsed.directory ?? ".");
-        const [contentMatches, pathMatches] = await Promise.all([
-          runRipgrep(parsed.query, directory),
+        const [contentMatches, pathSearch] = await Promise.all([
+          runTextSearch(parsed.query, directory),
           findPathMatches(parsed.query, directory)
         ]);
-        const content = formatSearchResult(contentMatches, pathMatches);
+        const content = formatSearchResult(contentMatches, pathSearch.matches, pathSearch.diagnostics);
         return { ok: true, content };
       }
     });
@@ -248,29 +262,148 @@ async function runRipgrep(query: string, directory: string): Promise<{ stdout: s
   }
 }
 
-async function findPathMatches(query: string, directory: string): Promise<string[]> {
+async function runTextSearch(query: string, directory: string): Promise<{ stdout: string; stderr: string }> {
+  const rgResult = await runRipgrep(query, directory);
+  if (rgResult.stdout.trim()) {
+    return rgResult;
+  }
+  const fallback = await fallbackTextSearch(query, directory);
+  const stderr = [rgResult.stderr.trim(), fallback.stoppedReason ? searchFallbackMarker(fallback.stoppedReason) : ""]
+    .filter(Boolean)
+    .join("\n");
+  return { stdout: fallback.matches.join("\n"), stderr };
+}
+
+async function fallbackTextSearch(query: string, directory: string): Promise<{ matches: string[]; stoppedReason?: string }> {
+  const matches: string[] = [];
+  const needle = query.toLowerCase();
+  const tokens = pathQueryTokens(query.toLowerCase()).filter((token) => token.length >= 3);
+  const deadline = Date.now() + searchFallbackTimeoutMs;
+
+  async function collectFileMatches(filePath: string): Promise<void> {
+    if (Date.now() > deadline) {
+      return;
+    }
+    let content: string;
+    try {
+      content = await readFile(filePath, "utf8");
+    } catch {
+      return;
+    }
+    if (content.includes("\0")) {
+      return;
+    }
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length && matches.length < searchFallbackMaxMatches; index += 1) {
+      if (Date.now() > deadline) {
+        return;
+      }
+      const line = lines[index];
+      const lower = line.toLowerCase();
+      const matched = lower.includes(needle) || tokens.some((token) => lower.includes(token));
+      if (matched) {
+        matches.push(`${toDisplayPath(filePath, directory)}:${index + 1}:${line.trimEnd()}`);
+      }
+    }
+  }
+
+  const listed = await listWorkspaceFiles(directory, searchFallbackMaxFiles, deadline);
+  for (const filePath of listed.files) {
+    if (matches.length >= searchFallbackMaxMatches || Date.now() > deadline) {
+      break;
+    }
+    await collectFileMatches(filePath);
+  }
+  const stoppedReason = matches.length >= searchFallbackMaxMatches
+    ? "max_matches"
+    : Date.now() > deadline
+      ? "timeout"
+      : listed.stoppedReason;
+  return { matches, stoppedReason };
+}
+
+async function findPathMatches(query: string, directory: string): Promise<PathSearchResult> {
+  let files: string[];
+  let diagnostics: string | undefined;
   try {
     const result = await execFileAsync("rg", ["--files", directory], {
       maxBuffer: 1024 * 1024
     });
-    return result.stdout
+    files = result.stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => toDisplayPath(line, directory))
-      .map((path) => ({ path, score: scorePathQuery(path, query) }))
-      .filter((match) => match.score > 0)
-      .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
-      .map((match) => match.path)
-      .slice(0, 40);
+      .filter(Boolean);
   } catch {
-    return [];
+    const listed = await listWorkspaceFiles(directory, searchFallbackMaxFiles, Date.now() + searchFallbackTimeoutMs);
+    files = listed.files;
+    diagnostics = listed.stoppedReason ? searchFallbackMarker(listed.stoppedReason) : undefined;
   }
+  if (files.length === 0) {
+    const listed = await listWorkspaceFiles(directory, searchFallbackMaxFiles, Date.now() + searchFallbackTimeoutMs);
+    files = listed.files;
+    diagnostics = listed.stoppedReason ? searchFallbackMarker(listed.stoppedReason) : diagnostics;
+  }
+  const matches = files
+    .map((line) => toDisplayPath(line, directory))
+    .map((path) => ({ path, score: scorePathQuery(path, query) }))
+    .filter((match) => match.score > 0)
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+    .map((match) => match.path)
+    .slice(0, 40);
+  return { matches, diagnostics };
+}
+
+async function listWorkspaceFiles(directory: string, maxFiles: number, deadline = Date.now() + searchFallbackTimeoutMs): Promise<FileListResult> {
+  const files: string[] = [];
+  const skipDirs = new Set([".git", "node_modules", "dist", "coverage", ".next", ".turbo"]);
+  let stoppedReason: string | undefined;
+
+  async function visit(current: string): Promise<void> {
+    if (files.length >= maxFiles) {
+      stoppedReason = "max_files";
+      return;
+    }
+    if (Date.now() > deadline) {
+      stoppedReason = "timeout";
+      return;
+    }
+    let entries;
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length >= maxFiles) {
+        stoppedReason = "max_files";
+        return;
+      }
+      if (Date.now() > deadline) {
+        stoppedReason = "timeout";
+        return;
+      }
+      const fullPath = join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (!skipDirs.has(entry.name)) {
+          await visit(fullPath);
+        }
+      } else if (entry.isFile()) {
+        files.push(fullPath);
+      }
+    }
+  }
+
+  await visit(directory);
+  return { files, stoppedReason };
 }
 
 function formatSearchResult(
   contentMatches: { stdout: string; stderr: string },
-  pathMatches: string[]
+  pathMatches: string[],
+  pathDiagnostics?: string
 ): string {
   const sections: string[] = [];
   if (pathMatches.length > 0) {
@@ -280,11 +413,15 @@ function formatSearchResult(
   if (content) {
     sections.push(`Content matches:\n${content}`);
   }
-  const errors = contentMatches.stderr.trim();
+  const errors = [contentMatches.stderr.trim(), pathDiagnostics?.trim()].filter(Boolean).join("\n");
   if (errors) {
     sections.push(`Search diagnostics:\n${errors}`);
   }
   return sections.join("\n\n") || "No matches.";
+}
+
+function searchFallbackMarker(reason: string): string {
+  return `[COSIA: search fallback stopped early, reason=${reason}]`;
 }
 
 function toDisplayPath(path: string, directory: string): string {

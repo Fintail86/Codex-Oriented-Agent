@@ -95,6 +95,8 @@ export async function buildPromptBundle(input: PromptInput): Promise<PromptBuild
     maxPromptChars: 60000,
     refMemoryMaxItems: 8,
     contextTailChars: 6000,
+    contextWarningChars: 30000,
+    contextCriticalChars: 60000,
     toolResultsMaxChars: 12000,
     overflowPolicy: "truncate_low_priority" as const
   };

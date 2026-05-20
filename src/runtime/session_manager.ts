@@ -11,6 +11,16 @@ export type ContextUndoResult = {
   message: string;
 };
 
+export type ContextHealthLevel = "ok" | "warning" | "critical";
+
+export type ContextHealth = {
+  sessionId: string;
+  chars: number;
+  warningChars: number;
+  criticalChars: number;
+  level: ContextHealthLevel;
+};
+
 export class SessionManager {
   constructor(private readonly workspaceRoot: string) {}
 
@@ -88,6 +98,29 @@ export class SessionManager {
     }
     const content = await readText(path);
     return content.length > maxChars ? content.slice(content.length - maxChars) : content;
+  }
+
+  async contextHealth(sessionId: string, thresholds: { warningChars: number; criticalChars: number }): Promise<ContextHealth> {
+    await this.ensureSessionSupportFiles(sessionId);
+    const path = join(this.sessionDir(sessionId), "CONTEXT_MEMORY.md");
+    const chars = (await pathExists(path)) ? (await readText(path)).length : 0;
+    const level: ContextHealthLevel = chars >= thresholds.criticalChars
+      ? "critical"
+      : chars >= thresholds.warningChars
+        ? "warning"
+        : "ok";
+    return {
+      sessionId,
+      chars,
+      warningChars: thresholds.warningChars,
+      criticalChars: thresholds.criticalChars,
+      level
+    };
+  }
+
+  async contextHealthForSessions(thresholds: { warningChars: number; criticalChars: number }): Promise<ContextHealth[]> {
+    const sessions = await this.listSessions();
+    return Promise.all(sessions.map((session) => this.contextHealth(session.id, thresholds)));
   }
 
   async appendContext(sessionId: string, content: string): Promise<void> {

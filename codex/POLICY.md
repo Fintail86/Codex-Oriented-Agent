@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.7.0`
+- Policy version: `0.8.0`
 
 ## Tools
 
@@ -52,6 +52,8 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Max prompt chars: `60000`
 - Reference memory max items: `8`
 - Context tail chars: `6000`
+- Context warning chars: `30000`
+- Context critical chars: `60000`
 - Tool results max chars: `12000`
 - Overflow policy: `truncate_low_priority`
 

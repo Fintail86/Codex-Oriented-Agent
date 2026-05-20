@@ -36,6 +36,11 @@ program
       console.log(`Sessions: ${report.sessionsCount}`);
       console.log(`Memories: ${report.memoriesCount}`);
       console.log(`Pending candidates: ${report.pendingCandidatesCount}`);
+      console.log(`Context warnings: ${report.contextWarningCount}`);
+      console.log(`Context critical: ${report.contextCriticalCount}`);
+      if (report.largestContext) {
+        console.log(`Largest context: ${formatContextHealth(report.largestContext)}`);
+      }
       console.log(`Provider: ${report.providerId} (${report.providerOk ? "ok" : "failed"})`);
       console.log(`Provider message: ${report.providerMessage}`);
     });
@@ -109,7 +114,17 @@ session
     await main(async (workspaceRoot) => {
       const sessions = new SessionManager(workspaceRoot);
       const metadata = await sessions.loadSession(sessionId);
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const contextHealth = await sessions.contextHealth(sessionId, {
+        warningChars: policy.promptBudget.contextWarningChars,
+        criticalChars: policy.promptBudget.contextCriticalChars
+      });
       console.log(JSON.stringify(metadata, null, 2));
+      console.log(`\n# CONTEXT STATUS\n`);
+      console.log(formatContextHealth(contextHealth));
+      if (contextHealth.level === "critical") {
+        console.log(contextCriticalHint(sessionId));
+      }
       const tail = await sessions.contextTail(sessionId, Number.parseInt(options.tail, 10));
       console.log("\n# CONTEXT TAIL\n");
       console.log(tail || "No context memory.");
@@ -287,6 +302,19 @@ const candidate = memory.command("candidate").description("Review memory candida
 const promotion = memory.command("promotion").description("Review automatic memory promotions.");
 
 candidate
+  .command("export")
+  .option("--jsonl", "Print JSONL export.", false)
+  .description("Export memory candidates from the SQLite queue.")
+  .action(async (options: { jsonl: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (!options.jsonl) {
+        throw new Error("Only --jsonl export is supported.");
+      }
+      process.stdout.write(new MemoryManager(workspaceRoot).exportCandidatesJsonl());
+    });
+  });
+
+candidate
   .command("list")
   .option("--all", "Show pending, promoted, discarded, and legacy candidates.", false)
   .description("List memory candidates.")
@@ -412,6 +440,19 @@ candidate
       }
       const record = await manager.discardCandidate(candidateId, options.reason);
       console.log(`${record.id} discarded`);
+    });
+  });
+
+promotion
+  .command("export")
+  .option("--jsonl", "Print JSONL export.", false)
+  .description("Export automatic memory promotions from the SQLite queue.")
+  .action(async (options: { jsonl: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (!options.jsonl) {
+        throw new Error("Only --jsonl export is supported.");
+      }
+      process.stdout.write(new MemoryManager(workspaceRoot).exportPromotionsJsonl());
     });
   });
 
@@ -647,6 +688,14 @@ program
             console.log(`Provider: ${options.provider ?? policy.model.defaultProvider}`);
             console.log(`Prompt budget: ${policy.promptBudget.maxPromptChars} chars`);
             console.log(`Context tail: ${policy.promptBudget.contextTailChars} chars`);
+            const health = await sessions.contextHealth(session.id, {
+              warningChars: policy.promptBudget.contextWarningChars,
+              criticalChars: policy.promptBudget.contextCriticalChars
+            });
+            console.log(`Context status: ${formatContextHealth(health)}`);
+            if (health.level === "critical") {
+              console.log(contextCriticalHint(session.id));
+            }
             console.log(`Turns in this REPL: ${history.length}`);
             continue;
           }
@@ -734,6 +783,19 @@ function formatPromptManifest(manifest: PromptManifest): string {
     lines.push(`- ${block.title} [${block.source}] ${block.retainedChars}/${block.originalChars} chars${block.truncated ? " truncated" : ""}`);
   }
   return lines.join("\n");
+}
+
+function formatContextHealth(health: { sessionId: string; chars: number; warningChars: number; criticalChars: number; level: string }): string {
+  return `${health.sessionId} ${health.level} ${health.chars} chars (warning:${health.warningChars}, critical:${health.criticalChars})`;
+}
+
+function contextCriticalHint(sessionId: string): string {
+  return [
+    "Context is critical. Suggested next steps:",
+    `- cosia session prompt ${sessionId} --latest`,
+    `- cosia session summarize ${sessionId} --content \"<summary>\"`,
+    `- cosia session context undo-last ${sessionId} --reason \"<reason>\"`
+  ].join("\n");
 }
 
 async function runCliTool(workspaceRoot: string, name: ToolName, args: Record<string, unknown>): Promise<void> {

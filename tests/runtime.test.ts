@@ -61,12 +61,14 @@ describe("runtime setup", () => {
     ]));
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
-    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.7.0\"");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.8.0\"");
     expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(root, "sessions", session.id, "SESSION_SUMMARY.md"), "utf8")).toContain("SESSION SUMMARY");
     expect(await readFile(join(root, "sessions", session.id, "PROMPT_MANIFEST.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(root, "sessions", session.id, "CONTEXT_ARCHIVE.md"), "utf8")).toContain("CONTEXT ARCHIVE");
-    expect(await readFile(join(root, "memory", "auto_promotions.jsonl"), "utf8")).toBe("");
+    const memory = new MemoryManager(root);
+    expect(memory.listPromotions()).toEqual([]);
+    expect(memory.exportCandidatesJsonl()).toBe("");
   });
 
   it("builds prompts in the required order", async () => {
@@ -209,6 +211,22 @@ describe("tools and policy", () => {
     expect(combinedPathSearch.ok).toBe(true);
     expect(combinedPathSearch.content).toContain("package.json");
     expect(combinedPathSearch.content).toContain("src/cli.ts");
+  });
+
+  it("marks search fallback early stops when hard limits are reached", async () => {
+    const root = await initializedWorkspace();
+    const directory = join(root, "many-files");
+    await mkdir(directory, { recursive: true });
+    await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(directory, `file-${index}.txt`), "plain text", "utf8")));
+    const registry = new ToolRegistry();
+
+    const result = await registry.execute("search_files", { query: "missing-query-for-fallback", directory: "many-files" }, {
+      workspaceRoot: root,
+      allowedTools: ["search_files"]
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("[COSIA: search fallback stopped early, reason=max_files]");
   });
 
   it("runs readonly git tools and blocks git diff paths outside the workspace", async () => {
@@ -467,6 +485,62 @@ describe("memory", () => {
 
     const all = await memory.listCandidates(true);
     expect(all.map((item) => item.record?.status)).toEqual(["promoted", "discarded"]);
+  });
+
+  it("migrates JSONL candidate and promotion queues into SQLite once", async () => {
+    const root = await initializedWorkspace();
+    const validCandidate = {
+      id: "candidate-jsonl-001",
+      status: "pending" as const,
+      scope: "project" as const,
+      kind: "note",
+      content: "Migrated candidate memory",
+      importance: 3,
+      confidence: 0.8,
+      sourceSessionId: "session-jsonl",
+      sourceAgentId: "architect-agent",
+      createdAt: "2026-05-20T00:00:00.000Z"
+    };
+    const legacyCandidate = {
+      scope: "project",
+      kind: "note",
+      content: "Legacy candidate without v0.2 id",
+      importance: 3,
+      confidence: 0.8
+    };
+    const validPromotion = {
+      id: "promotion-jsonl-001",
+      candidateId: validCandidate.id,
+      promotedMemoryId: "memory-jsonl-001",
+      sessionId: "session-jsonl",
+      agentId: "architect-agent",
+      riskLevel: "low" as const,
+      reasons: ["test migration"],
+      policyMode: "conservative" as const,
+      createdAt: "2026-05-20T00:00:01.000Z"
+    };
+    await writeFile(join(root, "memory", "memory_candidates.jsonl"), `${JSON.stringify(validCandidate)}\n${JSON.stringify(legacyCandidate)}\n`, "utf8");
+    await writeFile(join(root, "memory", "auto_promotions.jsonl"), `${JSON.stringify(validPromotion)}\n`, "utf8");
+
+    const memory = new MemoryManager(root);
+    const candidates = await memory.listCandidates(true);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].displayId).toBe(validCandidate.id);
+    expect(memory.listPromotions(true)).toHaveLength(1);
+    expect(memory.exportCandidatesJsonl()).toContain(validCandidate.id);
+    expect(memory.exportPromotionsJsonl()).toContain(validPromotion.id);
+
+    expect(await readFile(join(root, "memory", "memory_candidates.jsonl.bak"), "utf8")).toContain(validCandidate.id);
+    const report = JSON.parse(await readFile(join(root, "memory", "queue_migration_report.json"), "utf8")) as {
+      migrations: Array<{ source: string; imported: number; skippedLegacy: number }>;
+    };
+    expect(report.migrations.find((item) => item.source === "memory_candidates.jsonl")).toMatchObject({
+      imported: 1,
+      skippedLegacy: 1
+    });
+
+    await writeFile(join(root, "memory", "memory_candidates.jsonl"), `${JSON.stringify(validCandidate)}\n`, "utf8");
+    expect(await memory.listCandidates(true)).toHaveLength(1);
   });
 
   it("blocks conflicting candidate promotion and supports replace resolution", async () => {
@@ -957,7 +1031,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.7.0");
+    expect(emptyReport.version).toBe("0.8.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -966,7 +1040,8 @@ describe("status and listing", () => {
     const agents = new AgentManager(root);
     await agents.createAgent("architect-agent", "architect");
     const sessions = new SessionManager(root);
-    await sessions.createSession("architect-agent", "List sessions");
+    const session = await sessions.createSession("architect-agent", "List sessions");
+    await sessions.appendContext(session.id, "x".repeat(31_000));
     const memory = new MemoryManager(root);
     memory.addMemory({
       scope: "project",
@@ -978,6 +1053,9 @@ describe("status and listing", () => {
     expect(report.agentsCount).toBe(1);
     expect(report.sessionsCount).toBe(1);
     expect(report.memoriesCount).toBe(1);
+    expect(report.contextWarningCount).toBe(1);
+    expect(report.contextCriticalCount).toBe(0);
+    expect(report.largestContext?.sessionId).toBe(session.id);
     expect(await sessions.listSessions()).toHaveLength(1);
     expect(memory.listMemories()).toHaveLength(1);
   });

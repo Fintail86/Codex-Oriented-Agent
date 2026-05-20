@@ -59,12 +59,16 @@ export const policyConfigSchema = z.object({
     maxPromptChars: z.number().int().positive(),
     refMemoryMaxItems: z.number().int().positive(),
     contextTailChars: z.number().int().positive(),
+    contextWarningChars: z.number().int().positive().default(30000),
+    contextCriticalChars: z.number().int().positive().default(60000),
     toolResultsMaxChars: z.number().int().positive(),
     overflowPolicy: promptOverflowPolicySchema
   }).default({
     maxPromptChars: 60000,
     refMemoryMaxItems: 8,
     contextTailChars: 6000,
+    contextWarningChars: 30000,
+    contextCriticalChars: 60000,
     toolResultsMaxChars: 12000,
     overflowPolicy: "truncate_low_priority"
   }),
@@ -100,7 +104,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.7.0",
+  version: "0.8.0",
   tools: {
     read_file: {
       permission: "read_only",
@@ -188,6 +192,8 @@ export const defaultPolicy: PolicyConfig = {
     maxPromptChars: 60000,
     refMemoryMaxItems: 8,
     contextTailChars: 6000,
+    contextWarningChars: 30000,
+    contextCriticalChars: 60000,
     toolResultsMaxChars: 12000,
     overflowPolicy: "truncate_low_priority"
   },
@@ -343,6 +349,8 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Max prompt chars: \`${policy.promptBudget.maxPromptChars}\`
 - Reference memory max items: \`${policy.promptBudget.refMemoryMaxItems}\`
 - Context tail chars: \`${policy.promptBudget.contextTailChars}\`
+- Context warning chars: \`${policy.promptBudget.contextWarningChars}\`
+- Context critical chars: \`${policy.promptBudget.contextCriticalChars}\`
 - Tool results max chars: \`${policy.promptBudget.toolResultsMaxChars}\`
 - Overflow policy: \`${policy.promptBudget.overflowPolicy}\`
 

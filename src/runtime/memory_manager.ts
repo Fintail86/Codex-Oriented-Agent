@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { classifyMemoryCandidate, redactedCandidatePreview, type RiskClassification } from "./risk_classifier.js";
@@ -58,6 +58,30 @@ type MemoryRow = {
 
 type TableColumn = {
   name: string;
+};
+
+type CandidateRow = {
+  id: string;
+  record_json: string;
+};
+
+type PromotionRow = {
+  id: string;
+  record_json: string;
+};
+
+type QueueMigrationReport = {
+  version: 1;
+  generatedAt: string;
+  migrations: Array<{
+    id: string;
+    source: "memory_candidates.jsonl" | "auto_promotions.jsonl";
+    imported: number;
+    skippedLegacy: number;
+    skippedInvalid: number;
+    legacyLines: string[];
+    invalidLines: string[];
+  }>;
 };
 
 export type CandidateView = {
@@ -193,6 +217,57 @@ export class MemoryManager {
           db.exec(`ALTER TABLE memories ADD COLUMN ${columnName} ${columnDefinition}`);
         }
       }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memory_candidates (
+          id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          owner_id TEXT,
+          kind TEXT NOT NULL,
+          content TEXT NOT NULL,
+          importance INTEGER NOT NULL,
+          confidence REAL NOT NULL,
+          source_session_id TEXT NOT NULL,
+          source_agent_id TEXT NOT NULL,
+          run_id TEXT,
+          created_at TEXT NOT NULL,
+          reviewed_at TEXT,
+          promoted_memory_id TEXT,
+          auto_promotion_id TEXT,
+          risk_level TEXT,
+          risk_reasons_json TEXT,
+          discard_reason TEXT,
+          record_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS auto_promotions (
+          id TEXT PRIMARY KEY,
+          candidate_id TEXT NOT NULL,
+          promoted_memory_id TEXT NOT NULL,
+          run_id TEXT,
+          session_id TEXT NOT NULL,
+          agent_id TEXT NOT NULL,
+          risk_level TEXT NOT NULL,
+          reasons_json TEXT NOT NULL,
+          policy_mode TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          reverted_at TEXT,
+          revert_reason TEXT,
+          record_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS queue_migrations (
+          id TEXT PRIMARY KEY,
+          source_path TEXT NOT NULL,
+          target_table TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          imported_count INTEGER NOT NULL DEFAULT 0,
+          skipped_count INTEGER NOT NULL DEFAULT 0,
+          report_path TEXT
+        );
+      `);
     } finally {
       db.close();
     }
@@ -317,7 +392,7 @@ export class MemoryManager {
     if (!candidates?.length) {
       return [];
     }
-    this.ensureMemoryDir();
+    this.ensureQueueStorage();
     const records: MemoryCandidateRecord[] = candidates.map((candidate) => {
       const parsed = memoryCandidateSchema.parse(candidate);
       return {
@@ -330,8 +405,23 @@ export class MemoryManager {
         createdAt: new Date().toISOString()
       };
     });
-    const lines = records.map((record) => JSON.stringify(record));
-    await appendFile(join(this.memoryDir, "memory_candidates.jsonl"), `${lines.join("\n")}\n`, "utf8");
+    const db = this.open();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      for (const record of records) {
+        upsertCandidateRow(db, record);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Ignore rollback errors; the original failure is more useful.
+      }
+      throw error;
+    } finally {
+      db.close();
+    }
     return records;
   }
 
@@ -441,29 +531,41 @@ export class MemoryManager {
   }
 
   revertPromotion(promotionId: string, reason: string): AutoPromotionRecord {
-    const promotions = this.readPromotionEntries();
-    const promotion = resolvePromotionFromEntries(promotions, promotionId, false);
-    this.archiveMemory(promotion.promotedMemoryId, `Reverted auto promotion ${promotion.id}: ${reason}`);
+    this.ensureQueueStorage();
+    const promotion = resolvePromotionFromEntries(this.readPromotionEntries(), promotionId, false);
     const entries = this.readCandidateEntriesSync();
     const index = this.resolveCandidateIndex(entries, promotion.candidateId);
     const candidate = entries[index].record;
-    if (candidate) {
-      entries[index] = candidateToView({
-        ...candidate,
-        status: "reverted",
-        reviewedAt: new Date().toISOString()
-      }, index + 1);
-      this.writeCandidateEntriesSync(entries);
+    const db = this.open();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      const memory = this.resolveMemoryWithDb(db, promotion.promotedMemoryId, false);
+      archiveMemoryRow(db, memory, `Reverted auto promotion ${promotion.id}: ${reason}`, null);
+      if (candidate) {
+        upsertCandidateRow(db, {
+          ...candidate,
+          status: "reverted",
+          reviewedAt: new Date().toISOString()
+        });
+      }
+      const updated = {
+        ...promotion,
+        revertedAt: new Date().toISOString(),
+        revertReason: reason
+      };
+      upsertPromotionRow(db, updated);
+      db.exec("COMMIT");
+      return updated;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Ignore rollback errors; the original failure is more useful.
+      }
+      throw error;
+    } finally {
+      db.close();
     }
-    const updated = {
-      ...promotion,
-      revertedAt: new Date().toISOString(),
-      revertReason: reason
-    };
-    const promotionIndex = promotions.findIndex((record) => record.id === promotion.id);
-    promotions[promotionIndex] = updated;
-    this.writePromotionEntriesSync(promotions);
-    return updated;
   }
 
   async promoteAllLowRisk(options: { yes?: boolean } = {}): Promise<MemoryReviewSummary> {
@@ -541,7 +643,6 @@ export class MemoryManager {
         policyMode,
         createdAt: new Date().toISOString()
       };
-      this.appendPromotionSync(promotion);
       return {
         result: promotion,
         candidate: {
@@ -605,16 +706,16 @@ export class MemoryManager {
     index: number,
     work: (db: DatabaseSync) => { result: T; candidate: MemoryCandidateRecord }
   ): T {
-    this.ensureSchema();
-    this.ensureMemoryDir();
-    const candidateSnapshot = this.candidateFileTextSync();
-    const promotionSnapshot = this.promotionFileTextSync();
+    this.ensureQueueStorage();
     const db = this.open();
     try {
       db.exec("BEGIN IMMEDIATE");
       const output = work(db);
       entries[index] = candidateToView(output.candidate, index + 1);
-      this.writeCandidateEntriesSync(entries);
+      upsertCandidateRow(db, output.candidate);
+      if (isAutoPromotionRecord(output.result)) {
+        upsertPromotionRow(db, output.result);
+      }
       db.exec("COMMIT");
       return output.result;
     } catch (error) {
@@ -622,12 +723,6 @@ export class MemoryManager {
         db.exec("ROLLBACK");
       } catch {
         // Ignore rollback errors; the original failure is more useful.
-      }
-      try {
-        writeFileSync(this.candidatePath(), candidateSnapshot, "utf8");
-        writeFileSync(this.promotionPath(), promotionSnapshot, "utf8");
-      } catch {
-        // Best-effort restore for the JSONL side of the transaction.
       }
       throw error;
     } finally {
@@ -696,11 +791,26 @@ export class MemoryManager {
   }
 
   private resolveMemory(memoryId: string, includeAll: boolean): MemoryRecord {
+    this.ensureSchema();
+    const db = this.open();
+    try {
+      return this.resolveMemoryWithDb(db, memoryId, includeAll);
+    } finally {
+      db.close();
+    }
+  }
+
+  private resolveMemoryWithDb(db: DatabaseSync, memoryId: string, includeAll: boolean): MemoryRecord {
     const normalized = memoryId.trim();
     if (!normalized) {
       throw new Error("Memory id is required.");
     }
-    const records = this.listMemories(Number.MAX_SAFE_INTEGER, includeAll);
+    const rows = db.prepare(`
+      SELECT * FROM memories
+      ${includeAll ? "" : "WHERE status = 'active'"}
+      ORDER BY updated_at DESC
+    `).all() as MemoryRow[];
+    const records = rows.map(rowToRecord);
     const exact = records.find((record) => record.id === normalized);
     if (exact) {
       return exact;
@@ -726,7 +836,21 @@ export class MemoryManager {
       throw new Error(`Legacy memory candidate cannot be promoted or discarded: ${candidateId}`);
     }
     entries[index] = candidateToView(update(entry.record), index + 1);
-    await this.writeCandidateEntries(entries);
+    const db = this.open();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      upsertCandidateRow(db, entries[index].record as MemoryCandidateRecord);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Ignore rollback errors; the original failure is more useful.
+      }
+      throw error;
+    } finally {
+      db.close();
+    }
   }
 
   private resolveCandidateIndex(entries: CandidateView[], candidateId: string): number {
@@ -752,74 +876,128 @@ export class MemoryManager {
   }
 
   private async readCandidateEntries(): Promise<CandidateView[]> {
-    this.ensureMemoryDir();
-    const path = this.candidatePath();
-    if (!existsSync(path)) {
-      await writeFile(path, "", "utf8");
-      return [];
-    }
-    return parseCandidateEntries(await readFile(path, "utf8"));
+    return this.readCandidateEntriesSync();
   }
 
   private readCandidateEntriesSync(): CandidateView[] {
-    this.ensureMemoryDir();
-    const path = this.candidatePath();
-    if (!existsSync(path)) {
-      writeFileSync(path, "", "utf8");
-      return [];
+    this.ensureQueueStorage();
+    const db = this.open();
+    try {
+      const rows = db.prepare("SELECT id, record_json FROM memory_candidates ORDER BY created_at ASC, rowid ASC").all() as CandidateRow[];
+      return rows.map((row, index) => candidateToView(memoryCandidateRecordSchema.parse(JSON.parse(row.record_json)), index + 1));
+    } finally {
+      db.close();
     }
-    return parseCandidateEntries(readFileSync(path, "utf8"));
-  }
-
-  private async writeCandidateEntries(entries: CandidateView[]): Promise<void> {
-    this.ensureMemoryDir();
-    await writeFile(this.candidatePath(), serializeCandidateEntries(entries), "utf8");
-  }
-
-  private writeCandidateEntriesSync(entries: CandidateView[]): void {
-    this.ensureMemoryDir();
-    writeFileSync(this.candidatePath(), serializeCandidateEntries(entries), "utf8");
-  }
-
-  private candidateFileTextSync(): string {
-    const path = this.candidatePath();
-    return existsSync(path) ? readFileSync(path, "utf8") : "";
   }
 
   private readPromotionEntries(): AutoPromotionRecord[] {
-    this.ensureMemoryDir();
-    const path = this.promotionPath();
-    if (!existsSync(path)) {
-      writeFileSync(path, "", "utf8");
-      return [];
+    this.ensureQueueStorage();
+    const db = this.open();
+    try {
+      const rows = db.prepare("SELECT id, record_json FROM auto_promotions ORDER BY created_at ASC, rowid ASC").all() as PromotionRow[];
+      return rows.map((row) => JSON.parse(row.record_json) as AutoPromotionRecord);
+    } finally {
+      db.close();
     }
-    return readFileSync(path, "utf8")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as AutoPromotionRecord);
   }
 
-  private writePromotionEntriesSync(entries: AutoPromotionRecord[]): void {
-    this.ensureMemoryDir();
-    writeFileSync(this.promotionPath(), entries.length ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "", "utf8");
+  exportCandidatesJsonl(): string {
+    const entries = this.readCandidateEntriesSync().map((entry) => entry.record ?? entry.raw);
+    return entries.length ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
   }
 
-  private appendPromotionSync(record: AutoPromotionRecord): void {
-    this.ensureMemoryDir();
+  exportPromotionsJsonl(): string {
     const entries = this.readPromotionEntries();
-    entries.push(record);
-    this.writePromotionEntriesSync(entries);
-  }
-
-  private promotionFileTextSync(): string {
-    const path = this.promotionPath();
-    return existsSync(path) ? readFileSync(path, "utf8") : "";
+    return entries.length ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
   }
 
   private ensureMemoryDir(): void {
     if (!existsSync(this.memoryDir)) {
       mkdirSync(this.memoryDir, { recursive: true });
+    }
+  }
+
+  private ensureQueueStorage(): void {
+    this.ensureSchema();
+    this.migrateQueueFilesIfNeeded();
+  }
+
+  private migrateQueueFilesIfNeeded(): void {
+    this.ensureMemoryDir();
+    const db = this.open();
+    const reports: QueueMigrationReport["migrations"] = [];
+    try {
+      for (const source of [
+        { fileName: "memory_candidates.jsonl" as const, tableName: "memory_candidates", key: "memory_candidates_jsonl_v1" },
+        { fileName: "auto_promotions.jsonl" as const, tableName: "auto_promotions", key: "auto_promotions_jsonl_v1" }
+      ]) {
+        const sourcePath = join(this.memoryDir, source.fileName);
+        if (!existsSync(sourcePath)) {
+          continue;
+        }
+        const existing = db.prepare("SELECT status FROM queue_migrations WHERE id = ?").get(source.key) as { status: string } | undefined;
+        if (existing?.status === "completed") {
+          backupQueueFile(sourcePath);
+          continue;
+        }
+        const parsed = source.fileName === "memory_candidates.jsonl"
+          ? parseCandidateMigrationEntries(readFileSync(sourcePath, "utf8"))
+          : parsePromotionMigrationEntries(readFileSync(sourcePath, "utf8"));
+        const now = new Date().toISOString();
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          for (const record of parsed.records) {
+            if (source.fileName === "memory_candidates.jsonl") {
+              upsertCandidateRow(db, record as MemoryCandidateRecord);
+            } else {
+              upsertPromotionRow(db, record as AutoPromotionRecord);
+            }
+          }
+          db.prepare(`
+            INSERT INTO queue_migrations (
+              id, source_path, target_table, status, started_at, completed_at, imported_count, skipped_count, report_path
+            ) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              status = excluded.status,
+              completed_at = excluded.completed_at,
+              imported_count = excluded.imported_count,
+              skipped_count = excluded.skipped_count,
+              report_path = excluded.report_path
+          `).run(
+            source.key,
+            sourcePath,
+            source.tableName,
+            now,
+            now,
+            parsed.records.length,
+            parsed.legacyLines.length + parsed.invalidLines.length,
+            this.queueMigrationReportPath()
+          );
+          db.exec("COMMIT");
+        } catch (error) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            // Ignore rollback errors; the original failure is more useful.
+          }
+          throw error;
+        }
+        reports.push({
+          id: source.key,
+          source: source.fileName,
+          imported: parsed.records.length,
+          skippedLegacy: parsed.legacyLines.length,
+          skippedInvalid: parsed.invalidLines.length,
+          legacyLines: parsed.legacyLines,
+          invalidLines: parsed.invalidLines
+        });
+        backupQueueFile(sourcePath);
+      }
+    } finally {
+      db.close();
+    }
+    if (reports.length) {
+      writeQueueMigrationReport(this.queueMigrationReportPath(), reports);
     }
   }
 
@@ -829,6 +1007,10 @@ export class MemoryManager {
 
   private promotionPath(): string {
     return join(this.memoryDir, "auto_promotions.jsonl");
+  }
+
+  private queueMigrationReportPath(): string {
+    return join(this.memoryDir, "queue_migration_report.json");
   }
 
   private open(): DatabaseSync {
@@ -970,6 +1152,204 @@ function parseCandidateEntries(text: string): CandidateView[] {
     }
   });
   return entries;
+}
+
+function parseCandidateMigrationEntries(text: string): {
+  records: MemoryCandidateRecord[];
+  legacyLines: string[];
+  invalidLines: string[];
+} {
+  const records: MemoryCandidateRecord[] = [];
+  const legacyLines: string[] = [];
+  const invalidLines: string[] = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    const lineId = `line:${index + 1}`;
+    try {
+      const raw = JSON.parse(trimmed) as Record<string, unknown>;
+      const parsed = memoryCandidateRecordSchema.safeParse(raw);
+      if (parsed.success) {
+        records.push(parsed.data);
+      } else {
+        legacyLines.push(lineId);
+      }
+    } catch {
+      invalidLines.push(lineId);
+    }
+  });
+  return { records, legacyLines, invalidLines };
+}
+
+function parsePromotionMigrationEntries(text: string): {
+  records: AutoPromotionRecord[];
+  legacyLines: string[];
+  invalidLines: string[];
+} {
+  const records: AutoPromotionRecord[] = [];
+  const invalidLines: string[] = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    try {
+      const raw = JSON.parse(trimmed) as unknown;
+      if (isAutoPromotionRecord(raw)) {
+        records.push(raw);
+      } else {
+        invalidLines.push(`line:${index + 1}`);
+      }
+    } catch {
+      invalidLines.push(`line:${index + 1}`);
+    }
+  });
+  return { records, legacyLines: [], invalidLines };
+}
+
+function upsertCandidateRow(db: DatabaseSync, record: MemoryCandidateRecord): void {
+  const normalized = memoryCandidateRecordSchema.parse(record);
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO memory_candidates (
+      id, status, scope, owner_id, kind, content, importance, confidence,
+      source_session_id, source_agent_id, run_id, created_at, reviewed_at,
+      promoted_memory_id, auto_promotion_id, risk_level, risk_reasons_json,
+      discard_reason, record_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      status = excluded.status,
+      scope = excluded.scope,
+      owner_id = excluded.owner_id,
+      kind = excluded.kind,
+      content = excluded.content,
+      importance = excluded.importance,
+      confidence = excluded.confidence,
+      source_session_id = excluded.source_session_id,
+      source_agent_id = excluded.source_agent_id,
+      run_id = excluded.run_id,
+      created_at = excluded.created_at,
+      reviewed_at = excluded.reviewed_at,
+      promoted_memory_id = excluded.promoted_memory_id,
+      auto_promotion_id = excluded.auto_promotion_id,
+      risk_level = excluded.risk_level,
+      risk_reasons_json = excluded.risk_reasons_json,
+      discard_reason = excluded.discard_reason,
+      record_json = excluded.record_json,
+      updated_at = excluded.updated_at
+  `).run(
+    normalized.id,
+    normalized.status,
+    normalized.scope,
+    normalized.ownerId ?? null,
+    normalized.kind,
+    normalized.content,
+    normalized.importance,
+    normalized.confidence,
+    normalized.sourceSessionId,
+    normalized.sourceAgentId,
+    normalized.runId ?? null,
+    normalized.createdAt,
+    normalized.reviewedAt ?? null,
+    normalized.promotedMemoryId ?? null,
+    normalized.autoPromotionId ?? null,
+    normalized.riskLevel ?? null,
+    normalized.riskReasons ? JSON.stringify(normalized.riskReasons) : null,
+    normalized.discardReason ?? null,
+    JSON.stringify(normalized),
+    now
+  );
+}
+
+function upsertPromotionRow(db: DatabaseSync, record: AutoPromotionRecord): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO auto_promotions (
+      id, candidate_id, promoted_memory_id, run_id, session_id, agent_id,
+      risk_level, reasons_json, policy_mode, created_at, reverted_at,
+      revert_reason, record_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      candidate_id = excluded.candidate_id,
+      promoted_memory_id = excluded.promoted_memory_id,
+      run_id = excluded.run_id,
+      session_id = excluded.session_id,
+      agent_id = excluded.agent_id,
+      risk_level = excluded.risk_level,
+      reasons_json = excluded.reasons_json,
+      policy_mode = excluded.policy_mode,
+      created_at = excluded.created_at,
+      reverted_at = excluded.reverted_at,
+      revert_reason = excluded.revert_reason,
+      record_json = excluded.record_json,
+      updated_at = excluded.updated_at
+  `).run(
+    record.id,
+    record.candidateId,
+    record.promotedMemoryId,
+    record.runId ?? null,
+    record.sessionId,
+    record.agentId,
+    record.riskLevel,
+    JSON.stringify(record.reasons),
+    record.policyMode,
+    record.createdAt,
+    record.revertedAt ?? null,
+    record.revertReason ?? null,
+    JSON.stringify(record),
+    now
+  );
+}
+
+function isAutoPromotionRecord(value: unknown): value is AutoPromotionRecord {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Partial<AutoPromotionRecord>;
+  return typeof record.id === "string"
+    && typeof record.candidateId === "string"
+    && typeof record.promotedMemoryId === "string"
+    && typeof record.sessionId === "string"
+    && typeof record.agentId === "string"
+    && (record.riskLevel === "low" || record.riskLevel === "medium" || record.riskLevel === "high")
+    && Array.isArray(record.reasons)
+    && typeof record.policyMode === "string"
+    && typeof record.createdAt === "string";
+}
+
+function backupQueueFile(sourcePath: string): void {
+  if (!existsSync(sourcePath)) {
+    return;
+  }
+  const backupPath = `${sourcePath}.bak`;
+  const target = existsSync(backupPath)
+    ? `${sourcePath}.${new Date().toISOString().replace(/[:.]/g, "-")}.bak`
+    : backupPath;
+  renameSync(sourcePath, target);
+}
+
+function writeQueueMigrationReport(path: string, migrations: QueueMigrationReport["migrations"]): void {
+  let existing: QueueMigrationReport["migrations"] = [];
+  if (existsSync(path)) {
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as QueueMigrationReport;
+      existing = parsed.migrations ?? [];
+    } catch {
+      existing = [];
+    }
+  }
+  const merged = new Map(existing.map((migration) => [migration.id, migration]));
+  for (const migration of migrations) {
+    merged.set(migration.id, migration);
+  }
+  const report: QueueMigrationReport = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    migrations: [...merged.values()]
+  };
+  writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, "utf8");
 }
 
 export function normalizeMemoryText(value: string): string {

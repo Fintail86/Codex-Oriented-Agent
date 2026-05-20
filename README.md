@@ -136,7 +136,7 @@ cosia session show <session-id>
 - `codex/POLICY.md` mirrors the JSON policy for humans.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.7.
+- Destructive, network, external-send, and shell tools are not registered in v0.8.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -144,16 +144,18 @@ cosia session show <session-id>
 - Codex provider calls have a default per-call timeout of 120000ms.
 - Prompt assembly uses character budgets. Required blocks are `SECURITY.md`, `POLICY.md`, and the current request.
 - `REF_MEMORY.md` is capped by scored top-N items, `CONTEXT_MEMORY.md` is included by tail, and tool results are capped with explicit truncation markers.
-- Memory candidates are written to `memory/memory_candidates.jsonl` and must be explicitly promoted.
+- Memory candidates and auto-promotions are stored in `memory/longterm.sqlite`.
+- Existing JSONL queue files are imported once, then moved to `.bak` files with a migration report.
 - Memory search is scored with deterministic keyword, importance, confidence, and recency signals.
 - Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
 - Low-risk, no-conflict memory candidates can be auto-promoted by runtime policy.
-- Auto-promotions are recorded in `memory/auto_promotions.jsonl` and can be reverted.
+- Auto-promotions can be listed, exported, and reverted.
 - Secret-like candidates are high-risk and remain pending with redacted summaries.
 - Long-term memory archive is explicit CLI-only soft deletion.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
 - Controlled Git/NPM tools are individual read-only tools, not generic shell access.
 - Long tool output is capped with an explicit truncation marker.
+- Session context size warnings appear in status/session/chat output; automatic context summary/archive is deferred.
 
 ## Policy
 
@@ -215,8 +217,10 @@ cosia memory candidate show <candidate-id>
 cosia memory candidate conflicts <candidate-id>
 cosia memory candidate promote <candidate-id> --replace <memory-id>
 cosia memory candidate discard <candidate-id> --reason "Not durable enough"
+cosia memory candidate export --jsonl
 cosia memory promotion list
 cosia memory promotion revert <promotion-id> --reason "Not durable enough"
+cosia memory promotion export --jsonl
 ```
 
 Candidate ids accept unique prefixes:
@@ -253,7 +257,7 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.8: Move memory candidates and auto promotions from JSONL queues into SQLite tables with one-way migration.
 - v0.9: Provider hardening and deterministic agent routing through agent manifest triggers.
 - v1.0+: Skill candidate loop and Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
+- Later context maintenance: automatic session summary/archive after warning thresholds are validated.
