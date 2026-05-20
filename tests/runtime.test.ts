@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager } from "../src/runtime/agent_manager.js";
 import { initProject } from "../src/runtime/init_project.js";
@@ -19,6 +21,7 @@ import type { ModelProvider } from "../src/runtime/types.js";
 import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspace.js";
 
 const tempRoots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   for (const root of tempRoots.splice(0)) {
@@ -46,10 +49,19 @@ describe("runtime setup", () => {
     const sessions = new SessionManager(root);
     const session = await sessions.createSession("architect-agent", "Design the runtime MVP");
 
-    expect(manifest.allowedTools).toEqual(["read_file", "write_file", "search_files"]);
+    expect(manifest.allowedTools).toEqual(expect.arrayContaining([
+      "read_file",
+      "write_file",
+      "search_files",
+      "git_status",
+      "git_diff",
+      "git_log",
+      "npm_test",
+      "npm_typecheck"
+    ]));
     expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
-    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.6.1\"");
+    expect(await readFile(join(root, "codex", "POLICY.json"), "utf8")).toContain("\"version\": \"0.7.0\"");
     expect(await readFile(join(root, "sessions", session.id, "POLICY_AUDIT.jsonl"), "utf8")).toBe("");
     expect(await readFile(join(root, "sessions", session.id, "SESSION_SUMMARY.md"), "utf8")).toContain("SESSION SUMMARY");
     expect(await readFile(join(root, "sessions", session.id, "PROMPT_MANIFEST.jsonl"), "utf8")).toBe("");
@@ -197,6 +209,67 @@ describe("tools and policy", () => {
     expect(combinedPathSearch.ok).toBe(true);
     expect(combinedPathSearch.content).toContain("package.json");
     expect(combinedPathSearch.content).toContain("src/cli.ts");
+  });
+
+  it("runs readonly git tools and blocks git diff paths outside the workspace", async () => {
+    const root = await initializedWorkspace();
+    await execFileAsync("git", ["init"], { cwd: root });
+    await writeFile(join(root, "tracked.txt"), "base\n", "utf8");
+    await execFileAsync("git", ["add", "tracked.txt"], { cwd: root });
+    await writeFile(join(root, "tracked.txt"), `base\n${"changed\n".repeat(2500)}TAIL\n`, "utf8");
+    const registry = new ToolRegistry();
+
+    const status = await registry.execute("git_status", {}, {
+      workspaceRoot: root,
+      allowedTools: ["git_status"]
+    });
+    expect(status.ok).toBe(true);
+    expect(status.content).toContain("tracked.txt");
+
+    const diff = await registry.execute("git_diff", { path: "tracked.txt" }, {
+      workspaceRoot: root,
+      allowedTools: ["git_diff"]
+    });
+    expect(diff.ok).toBe(true);
+    expect(diff.content).toContain("[COSIA: tool output truncated");
+    expect(diff.content).toContain("TAIL");
+
+    const outside = await registry.execute("git_diff", { path: "../outside.txt" }, {
+      workspaceRoot: root,
+      allowedTools: ["git_diff"]
+    });
+    expect(outside.ok).toBe(false);
+    expect(outside.content).toContain("outside workspace");
+
+    const log = await registry.execute("git_log", { maxCount: 99 }, {
+      workspaceRoot: root,
+      allowedTools: ["git_log"]
+    });
+    expect(log.ok).toBe(false);
+    expect(log.content).toContain("Exit code");
+  });
+
+  it("runs npm scripts only when package scripts exist", async () => {
+    const root = await initializedWorkspace();
+    const registry = new ToolRegistry();
+    const missing = await registry.execute("npm_typecheck", {}, {
+      workspaceRoot: root,
+      allowedTools: ["npm_typecheck"]
+    });
+    expect(missing.ok).toBe(false);
+    expect(missing.content).toContain("script not found");
+
+    await writeFile(join(root, "package.json"), JSON.stringify({
+      scripts: {
+        typecheck: "node --version"
+      }
+    }), "utf8");
+    const result = await registry.execute("npm_typecheck", {}, {
+      workspaceRoot: root,
+      allowedTools: ["npm_typecheck"]
+    });
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain("v");
   });
 });
 
@@ -859,13 +932,32 @@ describe("model parsing and run loop", () => {
     const audit = await new PolicyAuditLog(root).list(session.id, 10);
     expect(audit.some((event) => event.ruleId === "runtime.file_inspection.read_file_required")).toBe(true);
   });
+
+  it("runs new readonly tools through the model tool loop and policy audit", async () => {
+    const root = await initializedWorkspace();
+    await execFileAsync("git", ["init"], { cwd: root });
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Inspect git status");
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_TOOL_CALL:git_status]",
+      providerId: "mock"
+    });
+
+    expect(content).toContain(session.id);
+    const audit = await new PolicyAuditLog(root).list(session.id, 10);
+    expect(audit.some((event) => event.eventType === "tool_decision" && event.allowed && event.tool === "git_status")).toBe(true);
+  });
 });
 
 describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.6.1");
+    expect(emptyReport.version).toBe("0.7.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

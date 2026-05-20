@@ -24,7 +24,16 @@ export const toolPermissionSchema = z.enum([
 
 export type ToolPermission = z.infer<typeof toolPermissionSchema>;
 
-export const toolNameSchema = z.enum(["read_file", "write_file", "search_files"]);
+export const toolNameSchema = z.enum([
+  "read_file",
+  "write_file",
+  "search_files",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "npm_test",
+  "npm_typecheck"
+]);
 export type ToolName = z.infer<typeof toolNameSchema>;
 
 export const agentManifestSchema = z.object({

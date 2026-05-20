@@ -1,7 +1,7 @@
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureDir, pathExists, readText, writeTextIfMissing } from "./fs_utils.js";
-import { agentTemplates, architectManifest } from "./templates.js";
+import { agentTemplates, architectAllowedTools, architectManifest } from "./templates.js";
 import { agentManifestSchema, type AgentManifest } from "./types.js";
 
 export class AgentManager {
@@ -27,7 +27,12 @@ export class AgentManager {
   async loadAgent(agentId: string): Promise<AgentManifest> {
     const manifestPath = join(this.agentDir(agentId), "manifest.json");
     const parsed = JSON.parse(await readText(manifestPath));
-    return agentManifestSchema.parse(parsed);
+    const manifest = agentManifestSchema.parse(parsed);
+    const repaired = repairArchitectManifest(manifest);
+    if (repaired !== manifest) {
+      await writeFile(manifestPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
+    }
+    return repaired;
   }
 
   async listAgents(): Promise<AgentManifest[]> {
@@ -57,4 +62,18 @@ export class AgentManager {
   agentDir(agentId: string): string {
     return join(this.workspaceRoot, "agents", agentId);
   }
+}
+
+function repairArchitectManifest(manifest: AgentManifest): AgentManifest {
+  if (manifest.name !== "Architect Agent") {
+    return manifest;
+  }
+  const allowedTools = [...new Set([...manifest.allowedTools, ...architectAllowedTools])];
+  if (allowedTools.length === manifest.allowedTools.length) {
+    return manifest;
+  }
+  return {
+    ...manifest,
+    allowedTools
+  };
 }

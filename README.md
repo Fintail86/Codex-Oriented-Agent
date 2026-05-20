@@ -1,8 +1,8 @@
-# COSIA v0.6.1
+# COSIA v0.7
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -61,6 +61,7 @@ cosia session create --agent architect-agent --goal "Design the COSIA runtime MV
 cosia memory add --scope project --content "COSIA uses Codex / Agent / Session layers." --importance 5 --confidence 0.9
 cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 cosia chat --session <session-id>
+cosia tool git-status
 ```
 
 For runtime-only verification without Codex login:
@@ -116,6 +117,11 @@ cosia policy show
 cosia policy check
 cosia policy sync
 cosia policy audit --session <session-id> --limit <n>
+cosia tool git-status
+cosia tool git-diff --path <path>
+cosia tool git-log --max-count <n>
+cosia tool npm-test
+cosia tool npm-typecheck
 cosia status
 cosia session list
 cosia session show <session-id>
@@ -130,7 +136,7 @@ cosia session show <session-id>
 - `codex/POLICY.md` mirrors the JSON policy for humans.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.6.
+- Destructive, network, external-send, and shell tools are not registered in v0.7.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -146,6 +152,8 @@ cosia session show <session-id>
 - Secret-like candidates are high-risk and remain pending with redacted summaries.
 - Long-term memory archive is explicit CLI-only soft deletion.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
+- Controlled Git/NPM tools are individual read-only tools, not generic shell access.
+- Long tool output is capped with an explicit truncation marker.
 
 ## Policy
 
@@ -231,9 +239,20 @@ Reference memory is written with source hints so model answers can cite durable 
 npm test
 ```
 
+## Controlled Tools
+
+```powershell
+cosia tool git-status
+cosia tool git-diff --path src/runtime/tool_registry.ts
+cosia tool git-log --max-count 20
+cosia tool npm-test
+cosia tool npm-typecheck
+```
+
+These commands execute through the same Tool Registry and Policy Engine used by model tool calls. `git_diff --path` is restricted to workspace paths, `git_log` is capped at 50 commits, and npm tools only run the fixed `test` or `typecheck` package scripts.
+
 ## Roadmap
 
-- v0.7: Controlled capability tools (`git_status`, `git_diff`, `git_log`, `npm_test`, `npm_typecheck`) with output caps and audit.
 - v0.8: Move memory candidates and auto promotions from JSONL queues into SQLite tables with one-way migration.
 - v0.9: Provider hardening and deterministic agent routing through agent manifest triggers.
 - v1.0+: Skill candidate loop and Codex amendment gate.

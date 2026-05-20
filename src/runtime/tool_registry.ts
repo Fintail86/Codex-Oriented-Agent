@@ -24,6 +24,17 @@ const searchFilesArgs = z.object({
   directory: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional())
 });
 
+const gitDiffArgs = z.object({
+  path: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
+  staged: z.boolean().optional()
+});
+
+const gitLogArgs = z.object({
+  maxCount: z.number().int().positive().optional()
+});
+
+const toolOutputMaxChars = 12000;
+
 export class ToolRegistry {
   private readonly tools = new Map<ToolName, ToolDefinition>();
 
@@ -60,6 +71,46 @@ export class ToolRegistry {
         const content = formatSearchResult(contentMatches, pathMatches);
         return { ok: true, content };
       }
+    });
+    this.register({
+      name: "git_status",
+      permission: "read_only",
+      execute: async (_args, ctx) => runWorkspaceCommand("git", ["status", "--short", "--branch"], ctx.workspaceRoot)
+    });
+    this.register({
+      name: "git_diff",
+      permission: "read_only",
+      execute: async (args, ctx) => {
+        const parsed = gitDiffArgs.parse(args);
+        const commandArgs = ["diff"];
+        if (parsed.staged) {
+          commandArgs.push("--staged");
+        }
+        if (parsed.path) {
+          const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
+          commandArgs.push("--", toDisplayPath(resolved, ctx.workspaceRoot));
+        }
+        return runWorkspaceCommand("git", commandArgs, ctx.workspaceRoot);
+      }
+    });
+    this.register({
+      name: "git_log",
+      permission: "read_only",
+      execute: async (args, ctx) => {
+        const parsed = gitLogArgs.parse(args);
+        const maxCount = Math.min(parsed.maxCount ?? 20, 50);
+        return runWorkspaceCommand("git", ["log", `--max-count=${maxCount}`, "--date=short", "--pretty=format:%h %ad %s"], ctx.workspaceRoot);
+      }
+    });
+    this.register({
+      name: "npm_test",
+      permission: "read_only",
+      execute: async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "test", ["test"])
+    });
+    this.register({
+      name: "npm_typecheck",
+      permission: "read_only",
+      execute: async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "typecheck", ["run", "typecheck"])
     });
   }
 
@@ -128,6 +179,55 @@ export class ToolRegistry {
       return { ok: false, content: (error as Error).message };
     }
   }
+}
+
+async function runPackageScript(workspaceRoot: string, scriptName: "test" | "typecheck", npmArgs: string[]): Promise<ToolResult> {
+  let packageJsonPath: string;
+  try {
+    packageJsonPath = await resolveExistingInside(workspaceRoot, "package.json");
+  } catch {
+    return { ok: false, content: `package.json script not found: ${scriptName}` };
+  }
+  const packageJson = JSON.parse(await readText(packageJsonPath)) as { scripts?: Record<string, string> };
+  if (!packageJson.scripts?.[scriptName]) {
+    return { ok: false, content: `package.json script not found: ${scriptName}` };
+  }
+  return runNpmCommand(npmArgs, workspaceRoot);
+}
+
+async function runWorkspaceCommand(command: string, args: string[], cwd: string): Promise<ToolResult> {
+  try {
+    const result = await execFileAsync(command, args, {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return { ok: true, content: truncateToolOutput(formatCommandOutput(result.stdout, result.stderr), toolOutputMaxChars) };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | string };
+    const output = formatCommandOutput(err.stdout ?? "", err.stderr ?? err.message);
+    return {
+      ok: false,
+      content: truncateToolOutput(`Exit code: ${String(err.code ?? "unknown")}\n${output}`, toolOutputMaxChars)
+    };
+  }
+}
+
+function formatCommandOutput(stdout: string, stderr: string): string {
+  const sections: string[] = [];
+  if (stdout.trim()) {
+    sections.push(stdout.trimEnd());
+  }
+  if (stderr.trim()) {
+    sections.push(`stderr:\n${stderr.trimEnd()}`);
+  }
+  return sections.join("\n\n") || "No output.";
+}
+
+function runNpmCommand(args: string[], cwd: string): Promise<ToolResult> {
+  if (process.platform === "win32") {
+    return runWorkspaceCommand("cmd.exe", ["/d", "/s", "/c", "npm", ...args], cwd);
+  }
+  return runWorkspaceCommand("npm", args, cwd);
 }
 
 async function runRipgrep(query: string, directory: string): Promise<{ stdout: string; stderr: string }> {
@@ -220,4 +320,19 @@ function pathQueryTokens(query: string): string[] {
     return [token, ...parts];
   });
   return [...new Set(expanded.filter((token) => token.length >= 2))];
+}
+
+function truncateToolOutput(content: string, maxChars: number): string {
+  if (content.length <= maxChars) {
+    return content;
+  }
+  const marker = `\n[COSIA: tool output truncated, originalChars=${content.length}, retainedChars=${maxChars}, omittedChars=${content.length - maxChars}. Do not infer that omitted output was inspected or problem-free.]`;
+  const middleMarker = "\n[COSIA: omitted middle output]\n";
+  const available = maxChars - marker.length - middleMarker.length;
+  if (available <= 0) {
+    return marker.trimStart();
+  }
+  const headChars = Math.ceil(available / 2);
+  const tailChars = Math.floor(available / 2);
+  return `${content.slice(0, headChars)}${middleMarker}${content.slice(content.length - tailChars)}${marker}`;
 }

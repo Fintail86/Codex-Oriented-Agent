@@ -10,7 +10,9 @@ import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_bu
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
+import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema } from "./runtime/types.js";
+import type { ToolName } from "./runtime/types.js";
 import { COSIA_VERSION } from "./runtime/version.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
 
@@ -524,6 +526,61 @@ policy
     });
   });
 
+const tool = program.command("tool").description("Run policy-gated local tools.");
+
+tool
+  .command("git-status")
+  .description("Show git status through the Tool Registry.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      await runCliTool(workspaceRoot, "git_status", {});
+    });
+  });
+
+tool
+  .command("git-diff")
+  .option("--path <path>", "Workspace path to diff")
+  .option("--staged", "Show staged diff", false)
+  .description("Show git diff through the Tool Registry.")
+  .action(async (options: { path?: string; staged: boolean }) => {
+    await main(async (workspaceRoot) => {
+      await runCliTool(workspaceRoot, "git_diff", {
+        path: options.path,
+        staged: options.staged
+      });
+    });
+  });
+
+tool
+  .command("git-log")
+  .option("--max-count <n>", "Commit count", "20")
+  .description("Show git log through the Tool Registry.")
+  .action(async (options: { maxCount: string }) => {
+    await main(async (workspaceRoot) => {
+      await runCliTool(workspaceRoot, "git_log", {
+        maxCount: parseIntegerOption(options.maxCount, "max-count")
+      });
+    });
+  });
+
+tool
+  .command("npm-test")
+  .description("Run npm test through the Tool Registry.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      await runCliTool(workspaceRoot, "npm_test", {});
+    });
+  });
+
+tool
+  .command("npm-typecheck")
+  .description("Run npm run typecheck through the Tool Registry.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      await runCliTool(workspaceRoot, "npm_typecheck", {});
+    });
+  });
+
 program
   .command("run")
   .requiredOption("--session <session-id>", "Session id")
@@ -677,4 +734,15 @@ function formatPromptManifest(manifest: PromptManifest): string {
     lines.push(`- ${block.title} [${block.source}] ${block.retainedChars}/${block.originalChars} chars${block.truncated ? " truncated" : ""}`);
   }
   return lines.join("\n");
+}
+
+async function runCliTool(workspaceRoot: string, name: ToolName, args: Record<string, unknown>): Promise<void> {
+  const result = await new ToolRegistry().execute(name, args, {
+    workspaceRoot,
+    allowedTools: [name]
+  });
+  console.log(result.content);
+  if (!result.ok) {
+    process.exitCode = 1;
+  }
 }

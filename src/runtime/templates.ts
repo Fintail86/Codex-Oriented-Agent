@@ -1,5 +1,16 @@
 import type { AgentManifest } from "./types.js";
 
+export const architectAllowedTools = [
+  "read_file",
+  "write_file",
+  "search_files",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "npm_test",
+  "npm_typecheck"
+] as const;
+
 export const codexTemplates: Record<string, string> = {
   "SOUL.md": `# SOUL
 
@@ -29,7 +40,7 @@ export function architectManifest(agentId: string): AgentManifest {
     id: agentId,
     name: "Architect Agent",
     description: "Designs systems, implementation plans, and runtime decisions.",
-    allowedTools: ["read_file", "write_file", "search_files"],
+    allowedTools: [...architectAllowedTools],
     skills: [],
     memoryScopes: ["agent", "project", "user", "tool"]
   };

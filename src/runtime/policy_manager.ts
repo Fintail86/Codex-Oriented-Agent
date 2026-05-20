@@ -100,7 +100,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.6.1",
+  version: "0.7.0",
   tools: {
     read_file: {
       permission: "read_only",
@@ -113,6 +113,31 @@ export const defaultPolicy: PolicyConfig = {
       enabled: true
     },
     search_files: {
+      permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
+    git_status: {
+      permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
+    git_diff: {
+      permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
+    git_log: {
+      permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
+    npm_test: {
+      permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
+    npm_typecheck: {
       permission: "read_only",
       workspace: "inside_only",
       enabled: true

@@ -18,7 +18,7 @@ export class MockProvider implements ModelProvider {
       }));
     }
 
-    if (input.prompt.includes("Tool: read_file") || input.prompt.includes("Tool: search_files")) {
+    if (input.prompt.match(/Tool: (read_file|search_files|git_status|git_diff|git_log|npm_test|npm_typecheck)/)) {
       return parseModelOutput(JSON.stringify({
         type: "final",
         content: `Mock response for ${input.sessionId}.`,
@@ -59,14 +59,14 @@ export class MockProvider implements ModelProvider {
       }));
     }
 
-    const match = input.prompt.match(/\[MOCK_TOOL_CALL:([a-z_]+):([^\]]+)\]/);
+    const match = input.prompt.match(/\[MOCK_TOOL_CALL:([a-z_]+)(?::([^\]]+))?\]/);
     if (match && !input.prompt.includes("# TOOL RESULTS")) {
       const tool = match[1];
-      const value = match[2];
+      const value = match[2] ?? "";
       const raw = JSON.stringify({
         type: "tool_call",
         tool,
-        args: tool === "search_files" ? { query: value } : { path: value }
+        args: mockToolArgs(tool, value)
       });
       return parseModelOutput(raw);
     }
@@ -93,4 +93,20 @@ export class MockProvider implements ModelProvider {
         : []
     }));
   }
+}
+
+function mockToolArgs(tool: string, value: string): Record<string, unknown> {
+  if (tool === "search_files") {
+    return { query: value };
+  }
+  if (tool === "git_log") {
+    return value ? { maxCount: Number.parseInt(value, 10) } : {};
+  }
+  if (tool === "git_diff") {
+    return value ? { path: value } : {};
+  }
+  if (tool === "git_status" || tool === "npm_test" || tool === "npm_typecheck") {
+    return {};
+  }
+  return { path: value };
 }

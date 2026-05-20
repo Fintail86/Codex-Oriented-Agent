@@ -4,13 +4,18 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.6.1`
+- Policy version: `0.7.0`
 
 ## Tools
 
 - `read_file`: enabled, permission `read_only`, workspace `inside_only`
 - `write_file`: enabled, permission `write_local`, workspace `inside_only`
 - `search_files`: enabled, permission `read_only`, workspace `inside_only`
+- `git_status`: enabled, permission `read_only`, workspace `inside_only`
+- `git_diff`: enabled, permission `read_only`, workspace `inside_only`
+- `git_log`: enabled, permission `read_only`, workspace `inside_only`
+- `npm_test`: enabled, permission `read_only`, workspace `inside_only`
+- `npm_typecheck`: enabled, permission `read_only`, workspace `inside_only`
 
 ## Disabled Permissions
 
