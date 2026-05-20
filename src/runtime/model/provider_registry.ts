@@ -21,6 +21,7 @@ export type ProviderCheckResult = {
 
 export type ProviderListItem = {
   id: string;
+  type?: string;
   enabled: boolean;
   isDefault: boolean;
   timeoutMs?: number;
@@ -52,7 +53,8 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
     });
   }
   const timeoutMs = options.timeoutMs ?? config.timeoutMs;
-  if (providerId === "codex-cli") {
+  const providerType = config.type ?? (providerId === "codex-cli" ? "codex-cli" : "openai-compatible");
+  if (providerType === "codex-cli") {
     return new CodexCliProvider({
       workspaceRoot,
       timeoutMs,
@@ -61,8 +63,9 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
       maxPromptChars: config.maxPromptChars
     });
   }
-  if (providerId === "openai-compatible") {
+  if (providerType === "openai-compatible") {
     return new OpenAICompatibleProvider({
+      id: providerId,
       enabled: config.enabled,
       baseUrl: config.baseUrl,
       model: config.model,
@@ -71,6 +74,8 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
       timeoutMs,
       structuredRetryCount: config.structuredRetryCount,
       maxPromptChars: config.maxPromptChars,
+      responseFormat: config.responseFormat,
+      extraHeaders: config.extraHeaders,
       fetchImpl: options.fetchImpl
     });
   }
@@ -111,6 +116,7 @@ export async function checkProvider(
 export function listProviders(policy: PolicyConfig): ProviderListItem[] {
   const configured = Object.entries(policy.model.providers).map(([id, config]) => ({
     id,
+    type: config.type,
     enabled: config.enabled,
     isDefault: id === policy.model.defaultProvider,
     timeoutMs: config.timeoutMs,

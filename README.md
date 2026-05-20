@@ -1,10 +1,10 @@
-# COSIA v0.15.0
+# COSIA v0.15.1
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.15 hardens provider handling: `codex-cli` stays the default, `openai-compatible` is implemented but disabled by default, provider failures get explicit reasons, and malformed AgentStep JSON gets a structured retry.
+v0.15.1 adds an OpenRouter preset on top of the `openai-compatible` provider while keeping `codex-cli` as the default.
 
 ## Requirements
 
@@ -66,6 +66,7 @@ cosia chat --session <session-id>
 cosia tool git-status
 cosia provider list
 cosia provider check codex-cli
+cosia provider check openrouter
 ```
 
 For runtime-only verification without Codex login:
@@ -91,9 +92,34 @@ Provider setup:
 - `codex-cli` is the default provider and uses the user's existing Codex CLI login.
 - COSIA never reads or stores Codex token files.
 - `openai-compatible` is available in `codex/POLICY.json` but starts disabled.
+- `openrouter` is available as a disabled `openai-compatible` preset.
 - API keys are read only from the configured environment variable, default `OPENAI_API_KEY`.
 - Use `cosia provider list` and `cosia provider check <provider-id>` to inspect provider status.
 - Common failure reasons include `disabled`, `missing_config`, `missing_api_key`, `auth_failed`, `timeout`, `rate_limited`, `network_error`, `http_error`, `malformed_response`, and `malformed_agent_step`.
+
+OpenRouter setup:
+
+```powershell
+$env:OPENROUTER_API_KEY="..."
+cosia provider check openrouter
+cosia run --session <session-id> --provider openrouter --prompt "간단히 응답해줘"
+```
+
+In `codex/POLICY.json`, enable OpenRouter and set a model id:
+
+```json
+"openrouter": {
+  "type": "openai-compatible",
+  "enabled": true,
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "model": "<openrouter-model-id>",
+  "apiKeyEnv": "OPENROUTER_API_KEY",
+  "endpointPath": "/chat/completions",
+  "responseFormat": "json_object"
+}
+```
+
+If a selected model rejects `response_format`, set `"responseFormat": null`. COSIA keeps `Authorization` and `Content-Type` under runtime control even when provider `extraHeaders` are configured.
 
 ## CLI Commands
 

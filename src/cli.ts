@@ -66,10 +66,11 @@ providerCommand
   .action(async () => {
     await main(async (workspaceRoot) => {
       const policy = await new PolicyManager(workspaceRoot).loadPolicy();
-      console.log("Provider              Default  Enabled  Timeout  Retry  MaxPrompt  Model  BaseUrl  API Key Env");
+      console.log("Provider              Type               Default  Enabled  Timeout  Retry  MaxPrompt  Model  BaseUrl  API Key Env");
       for (const item of listProviders(policy)) {
         console.log([
           item.id.padEnd(21),
+          String(item.type ?? (item.builtIn ? "built-in" : "-")).padEnd(18),
           String(item.isDefault).padEnd(7),
           String(item.enabled).padEnd(7),
           String(item.timeoutMs ?? "-").padEnd(7),

@@ -13,7 +13,10 @@ const policyToolSchema = z.object({
 const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
 const memoryPromotionPathPolicySchema = z.enum(["manual_or_low_risk", "manual_only", "deferred"]);
 const promptOverflowPolicySchema = z.literal("truncate_low_priority");
+const providerTypeSchema = z.enum(["codex-cli", "openai-compatible"]);
+const providerResponseFormatSchema = z.enum(["json_object"]).nullable();
 const providerConfigSchema = z.object({
+  type: providerTypeSchema.optional(),
   enabled: z.boolean(),
   sandbox: z.string().optional(),
   baseUrl: z.string().nullable().default(null),
@@ -22,7 +25,9 @@ const providerConfigSchema = z.object({
   endpointPath: z.string().min(1).default("/chat/completions"),
   timeoutMs: z.number().int().positive().default(120000),
   structuredRetryCount: z.number().int().min(0).max(5).default(1),
-  maxPromptChars: z.number().int().positive().default(60000)
+  maxPromptChars: z.number().int().positive().default(60000),
+  responseFormat: providerResponseFormatSchema.default(null),
+  extraHeaders: z.record(z.string(), z.string()).default({})
 });
 
 export const policyConfigSchema = z.object({
@@ -114,6 +119,7 @@ export const policyConfigSchema = z.object({
     defaultProvider: "codex-cli",
     providers: {
       "codex-cli": {
+        type: "codex-cli",
         enabled: true,
         sandbox: "read-only",
         baseUrl: null,
@@ -122,9 +128,12 @@ export const policyConfigSchema = z.object({
         endpointPath: "/chat/completions",
         timeoutMs: 120000,
         structuredRetryCount: 1,
-        maxPromptChars: 60000
+        maxPromptChars: 60000,
+        responseFormat: null,
+        extraHeaders: {}
       },
       "openai-compatible": {
+        type: "openai-compatible",
         enabled: false,
         baseUrl: null,
         model: null,
@@ -132,7 +141,25 @@ export const policyConfigSchema = z.object({
         endpointPath: "/chat/completions",
         timeoutMs: 120000,
         structuredRetryCount: 1,
-        maxPromptChars: 60000
+        maxPromptChars: 60000,
+        responseFormat: null,
+        extraHeaders: {}
+      },
+      openrouter: {
+        type: "openai-compatible",
+        enabled: false,
+        baseUrl: "https://openrouter.ai/api/v1",
+        model: null,
+        apiKeyEnv: "OPENROUTER_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000,
+        responseFormat: "json_object",
+        extraHeaders: {
+          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
+          "X-OpenRouter-Title": "COSIA"
+        }
       }
     }
   })
@@ -152,7 +179,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.15.0",
+  version: "0.15.1",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -265,6 +292,7 @@ export const defaultPolicy: PolicyConfig = {
     defaultProvider: "codex-cli",
     providers: {
       "codex-cli": {
+        type: "codex-cli",
         enabled: true,
         sandbox: "read-only",
         baseUrl: null,
@@ -273,9 +301,12 @@ export const defaultPolicy: PolicyConfig = {
         endpointPath: "/chat/completions",
         timeoutMs: 120000,
         structuredRetryCount: 1,
-        maxPromptChars: 60000
+        maxPromptChars: 60000,
+        responseFormat: null,
+        extraHeaders: {}
       },
       "openai-compatible": {
+        type: "openai-compatible",
         enabled: false,
         baseUrl: null,
         model: null,
@@ -283,7 +314,25 @@ export const defaultPolicy: PolicyConfig = {
         endpointPath: "/chat/completions",
         timeoutMs: 120000,
         structuredRetryCount: 1,
-        maxPromptChars: 60000
+        maxPromptChars: 60000,
+        responseFormat: null,
+        extraHeaders: {}
+      },
+      openrouter: {
+        type: "openai-compatible",
+        enabled: false,
+        baseUrl: "https://openrouter.ai/api/v1",
+        model: null,
+        apiKeyEnv: "OPENROUTER_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000,
+        responseFormat: "json_object",
+        extraHeaders: {
+          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
+          "X-OpenRouter-Title": "COSIA"
+        }
       }
     }
   }
@@ -310,11 +359,11 @@ export class PolicyManager {
 
   async loadPolicy(): Promise<PolicyConfig> {
     const raw = JSON.parse(await readText(this.policyJsonPath())) as unknown;
-    return policyConfigSchema.parse(raw);
+    return normalizePolicy(policyConfigSchema.parse(raw));
   }
 
   async savePolicy(policy: PolicyConfig): Promise<void> {
-    await writeText(this.policyJsonPath(), `${JSON.stringify(policyConfigSchema.parse(policy), null, 2)}\n`);
+    await writeText(this.policyJsonPath(), `${JSON.stringify(normalizePolicy(policyConfigSchema.parse(policy)), null, 2)}\n`);
   }
 
   async setDefaultAgent(agentId: string | null): Promise<PolicyConfig> {
@@ -433,11 +482,39 @@ export class PolicyManager {
       return;
     }
     const raw = JSON.parse(await readText(this.policyJsonPath())) as unknown;
-    const normalized = policyConfigSchema.parse(raw);
+    const normalized = normalizePolicy(policyConfigSchema.parse(raw));
     if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
       await this.savePolicy(normalized);
     }
   }
+}
+
+export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
+  const providers = {
+    ...policy.model.providers
+  };
+  for (const [id, config] of Object.entries(providers)) {
+    providers[id] = {
+      ...config,
+      type: config.type ?? defaultProviderType(id),
+      responseFormat: config.responseFormat ?? null,
+      extraHeaders: config.extraHeaders ?? {}
+    };
+  }
+  if (!providers.openrouter) {
+    providers.openrouter = defaultPolicy.model.providers.openrouter;
+  }
+  return policyConfigSchema.parse({
+    ...policy,
+    model: {
+      ...policy.model,
+      providers
+    }
+  });
+}
+
+function defaultProviderType(id: string): "codex-cli" | "openai-compatible" {
+  return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
 }
 
 export function renderPolicyMarkdown(policy: PolicyConfig): string {
@@ -508,7 +585,7 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 
 - Default provider: \`${policy.model.defaultProvider}\`
 - Configured providers:
-${Object.entries(policy.model.providers).map(([id, config]) => `  - \`${id}\`: ${config.enabled ? "enabled" : "disabled"}, timeout \`${config.timeoutMs}\`, retry \`${config.structuredRetryCount}\`, max prompt chars \`${config.maxPromptChars}\`, model ${config.model ? `\`${config.model}\`` : "`unset`"}, baseUrl ${config.baseUrl ? "`set`" : "`unset`"}`).join("\n")}
+${Object.entries(policy.model.providers).map(([id, config]) => `  - \`${id}\`: type \`${config.type ?? defaultProviderType(id)}\`, ${config.enabled ? "enabled" : "disabled"}, timeout \`${config.timeoutMs}\`, retry \`${config.structuredRetryCount}\`, max prompt chars \`${config.maxPromptChars}\`, model ${config.model ? `\`${config.model}\`` : "`unset`"}, baseUrl ${config.baseUrl ? "`set`" : "`unset`"}, responseFormat ${config.responseFormat ? `\`${config.responseFormat}\`` : "`none`"}`).join("\n")}
 `;
 }
 

@@ -5,6 +5,7 @@ import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../t
 export type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export type OpenAICompatibleProviderOptions = {
+  id?: string;
   enabled: boolean;
   baseUrl: string | null;
   model: string | null;
@@ -13,14 +14,17 @@ export type OpenAICompatibleProviderOptions = {
   timeoutMs: number;
   structuredRetryCount: number;
   maxPromptChars: number;
+  responseFormat?: "json_object" | null;
+  extraHeaders?: Record<string, string>;
   fetchImpl?: FetchLike;
 };
 
 export class OpenAICompatibleProvider implements ModelProvider {
-  readonly id = "openai-compatible";
+  readonly id: string;
   private readonly fetchImpl: FetchLike;
 
   constructor(private readonly options: OpenAICompatibleProviderOptions) {
+    this.id = options.id ?? "openai-compatible";
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -68,10 +72,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     try {
       response = await this.fetchImpl(this.endpointUrl(), {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey()}`
-        },
+        headers: this.requestHeaders(),
         body: JSON.stringify({
           model: this.options.model,
           messages: [
@@ -80,7 +81,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
               content: prompt
             }
           ],
-          temperature: 0
+          temperature: 0,
+          ...this.responseFormatPayload()
         }),
         signal: controller.signal
       });
@@ -156,6 +158,32 @@ export class OpenAICompatibleProvider implements ModelProvider {
     return `${base.replace(/\/+$/, "")}${endpoint}`;
   }
 
+  private requestHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(this.options.extraHeaders ?? {})) {
+      if (isReservedHeader(key)) {
+        continue;
+      }
+      headers[key] = value;
+    }
+    return {
+      ...headers,
+      "content-type": "application/json",
+      authorization: `Bearer ${this.apiKey()}`
+    };
+  }
+
+  private responseFormatPayload(): Record<string, unknown> {
+    if (!this.options.responseFormat) {
+      return {};
+    }
+    return {
+      response_format: {
+        type: this.options.responseFormat
+      }
+    };
+  }
+
   private async httpError(response: Response): Promise<ProviderError> {
     const body = previewText(await response.text().catch(() => ""));
     if (response.status === 401 || response.status === 403) {
@@ -178,6 +206,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
       hint: providerFailureHint("http_error", this.id)
     });
   }
+}
+
+function isReservedHeader(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return normalized === "authorization" || normalized === "content-type";
 }
 
 function extractChatCompletionContent(json: unknown): string | undefined {

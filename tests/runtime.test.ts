@@ -13,7 +13,7 @@ import { ProviderError } from "../src/runtime/model/provider_errors.js";
 import { checkProvider, createProvider, listProviders } from "../src/runtime/model/provider_registry.js";
 import { OpenAICompatibleProvider, type FetchLike } from "../src/runtime/model/providers/openai_compatible_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
-import { PolicyManager } from "../src/runtime/policy_manager.js";
+import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { runSession } from "../src/runtime/runner.js";
@@ -95,7 +95,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.15.0\"");
+    expect(policyJson).toContain("\"version\": \"0.15.1\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -1506,13 +1506,78 @@ describe("model parsing and run loop", () => {
     expect(() => createProvider("openai-compatible", root, { policy })).toThrow(ProviderError);
     const disabled = await checkProvider("openai-compatible", root, policy);
     expect(disabled).toMatchObject({ ok: false, reason: "disabled" });
+    const openrouterDisabled = await checkProvider("openrouter", root, policy);
+    expect(openrouterDisabled).toMatchObject({ id: "openrouter", ok: false, reason: "disabled" });
 
     const unknown = await checkProvider("missing-provider", root, policy);
     expect(unknown).toMatchObject({ ok: false, reason: "unknown_provider" });
 
     const listed = listProviders(policy);
     expect(listed.some((provider) => provider.id === "codex-cli" && provider.isDefault)).toBe(true);
+    expect(listed.some((provider) => provider.id === "openrouter" && provider.type === "openai-compatible")).toBe(true);
     expect(listed.some((provider) => provider.id === "mock" && provider.enabled)).toBe(true);
+  });
+
+  it("repairs v0.15 provider policy shape with provider types and OpenRouter preset", async () => {
+    const parsed = policyConfigSchema.parse({
+      version: "0.15.0",
+      tools: {
+        read_file: { permission: "read_only", workspace: "inside_only", enabled: true },
+        write_file: { permission: "write_local", workspace: "inside_only", enabled: true },
+        search_files: { permission: "read_only", workspace: "inside_only", enabled: true },
+        git_status: { permission: "read_only", workspace: "inside_only", enabled: true },
+        git_diff: { permission: "read_only", workspace: "inside_only", enabled: true },
+        git_log: { permission: "read_only", workspace: "inside_only", enabled: true },
+        npm_test: { permission: "read_only", workspace: "inside_only", enabled: true },
+        npm_typecheck: { permission: "read_only", workspace: "inside_only", enabled: true }
+      },
+      disabledPermissions: ["destructive", "network", "external_send", "shell"],
+      overwrite: { existingFileRequiresApproval: true },
+      requireTools: { observationTools: ["read_file", "search_files"], writeFileSatisfies: false },
+      fileInspection: { requiresReadFile: true, triggerPhrases: ["read_file"] },
+      memory: {
+        longTermWrite: "candidate_promote_only",
+        candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"]
+      },
+      model: {
+        defaultProvider: "codex-cli",
+        providers: {
+          "codex-cli": { enabled: true, sandbox: "read-only" },
+          "openai-compatible": { enabled: false, baseUrl: null, model: null }
+        }
+      }
+    });
+    const repaired = normalizePolicy(parsed);
+    expect(repaired.model.providers["codex-cli"].type).toBe("codex-cli");
+    expect(repaired.model.providers["openai-compatible"].type).toBe("openai-compatible");
+    expect(repaired.model.providers.openrouter).toMatchObject({
+      type: "openai-compatible",
+      enabled: false,
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKeyEnv: "OPENROUTER_API_KEY",
+      responseFormat: "json_object"
+    });
+  });
+
+  it("checks OpenRouter missing config and missing API key states", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    policy.model.providers.openrouter.enabled = true;
+    policy.model.providers.openrouter.model = null;
+    expect(await checkProvider("openrouter", root, policy)).toMatchObject({ ok: false, reason: "missing_config" });
+
+    policy.model.providers.openrouter.model = "openai/gpt-test";
+    const previous = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      expect(await checkProvider("openrouter", root, policy)).toMatchObject({ ok: false, reason: "missing_api_key" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = previous;
+      }
+    }
   });
 
   it("checks openai-compatible missing config and missing api key distinctly", async () => {
@@ -1561,6 +1626,65 @@ describe("model parsing and run loop", () => {
       choices: [{ message: { content: '{"type":"tool_call","tool":"git_status","args":{}}' } }]
     }));
     expect((await toolProvider.complete({ prompt: "status", sessionId: "s" })).step).toMatchObject({ type: "tool_call", tool: "git_status" });
+  });
+
+  it("uses OpenRouter URL, env key, safe header merge, and json response format", async () => {
+    const previous = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "openrouter-key";
+    let requestUrl = "";
+    let requestHeaders: Record<string, string> = {};
+    let requestBody: Record<string, unknown> = {};
+    try {
+      const provider = configuredOpenAIProvider(async (input, init) => {
+        requestUrl = String(input);
+        requestHeaders = init?.headers as Record<string, string>;
+        requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return jsonResponse({
+          choices: [{ message: { content: '{"type":"final","content":"ok","memoryCandidates":[]}' } }]
+        });
+      }, {
+        id: "openrouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        model: "openai/gpt-test",
+        apiKeyEnv: "OPENROUTER_API_KEY",
+        responseFormat: "json_object",
+        extraHeaders: {
+          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
+          "X-OpenRouter-Title": "COSIA",
+          Authorization: "Bearer wrong",
+          "Content-Type": "text/plain"
+        }
+      });
+      await provider.complete({ prompt: "hello", sessionId: "s" });
+      expect(requestUrl).toBe("https://openrouter.ai/api/v1/chat/completions");
+      expect(requestHeaders.authorization).toBe("Bearer openrouter-key");
+      expect(requestHeaders["content-type"]).toBe("application/json");
+      expect(requestHeaders["HTTP-Referer"]).toBe("https://github.com/Fintail86/Codex-Oriented-Agent");
+      expect(requestHeaders["X-OpenRouter-Title"]).toBe("COSIA");
+      expect(requestHeaders.Authorization).toBeUndefined();
+      expect(requestHeaders["Content-Type"]).toBeUndefined();
+      expect(requestBody.response_format).toEqual({ type: "json_object" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = previous;
+      }
+    }
+  });
+
+  it("omits response_format when responseFormat is null", async () => {
+    let requestBody: Record<string, unknown> = {};
+    const provider = configuredOpenAIProvider(async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return jsonResponse({
+        choices: [{ message: { content: '{"type":"final","content":"ok","memoryCandidates":[]}' } }]
+      });
+    }, {
+      responseFormat: null
+    });
+    await provider.complete({ prompt: "hello", sessionId: "s" });
+    expect(requestBody.response_format).toBeUndefined();
   });
 
   it("retries malformed AgentStep JSON using provider retry count", async () => {
@@ -1975,7 +2099,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.15.0");
+    expect(emptyReport.version).toBe("0.15.1");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

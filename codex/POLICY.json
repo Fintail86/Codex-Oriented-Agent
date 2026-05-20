@@ -1,5 +1,5 @@
 {
-  "version": "0.15.0",
+  "version": "0.15.1",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -154,6 +154,7 @@
     "defaultProvider": "codex-cli",
     "providers": {
       "codex-cli": {
+        "type": "codex-cli",
         "enabled": true,
         "sandbox": "read-only",
         "baseUrl": null,
@@ -162,9 +163,12 @@
         "endpointPath": "/chat/completions",
         "timeoutMs": 120000,
         "structuredRetryCount": 1,
-        "maxPromptChars": 60000
+        "maxPromptChars": 60000,
+        "responseFormat": null,
+        "extraHeaders": {}
       },
       "openai-compatible": {
+        "type": "openai-compatible",
         "enabled": false,
         "baseUrl": null,
         "model": null,
@@ -172,7 +176,25 @@
         "endpointPath": "/chat/completions",
         "timeoutMs": 120000,
         "structuredRetryCount": 1,
-        "maxPromptChars": 60000
+        "maxPromptChars": 60000,
+        "responseFormat": null,
+        "extraHeaders": {}
+      },
+      "openrouter": {
+        "type": "openai-compatible",
+        "enabled": false,
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "model": null,
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000,
+        "responseFormat": "json_object",
+        "extraHeaders": {
+          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
+          "X-OpenRouter-Title": "COSIA"
+        }
       }
     }
   }
