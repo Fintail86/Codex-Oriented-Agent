@@ -1,5 +1,5 @@
 {
-  "version": "0.15.1",
+  "version": "0.16.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -182,9 +182,9 @@
       },
       "openrouter": {
         "type": "openai-compatible",
-        "enabled": false,
+        "enabled": true,
         "baseUrl": "https://openrouter.ai/api/v1",
-        "model": null,
+        "model": "google/gemini-3.5-flash",
         "apiKeyEnv": "OPENROUTER_API_KEY",
         "endpointPath": "/chat/completions",
         "timeoutMs": 120000,

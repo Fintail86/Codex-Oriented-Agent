@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.15.1`
+- Policy version: `0.16.0`
 
 ## Agents
 
@@ -73,4 +73,4 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Configured providers:
   - `codex-cli`: type `codex-cli`, enabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `unset`, responseFormat `none`
   - `openai-compatible`: type `openai-compatible`, disabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `unset`, responseFormat `none`
-  - `openrouter`: type `openai-compatible`, disabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `set`, responseFormat `json_object`
+  - `openrouter`: type `openai-compatible`, enabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `google/gemini-3.5-flash`, baseUrl `set`, responseFormat `json_object`

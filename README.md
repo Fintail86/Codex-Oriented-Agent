@@ -1,10 +1,10 @@
-# COSIA v0.15.1
+# COSIA v0.16.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.15.1 adds an OpenRouter preset on top of the `openai-compatible` provider while keeping `codex-cli` as the default.
+v0.16.0 adds explicit session context maintenance: status, model-assisted summary preview, and safe run-block compaction into `CONTEXT_ARCHIVE.md`.
 
 ## Requirements
 
@@ -143,7 +143,10 @@ cosia session unassign <session-id>
 cosia session archive <session-id> --reason "<reason>"
 cosia session list --agent <agent-id>
 cosia session summarize <session-id> --content "<summary>"
+cosia session summarize <session-id> --from-context --provider <provider>
 cosia session prompt <session-id> --latest
+cosia session context status <session-id>
+cosia session context compact <session-id> --keep-last <n> --reason "<reason>" --yes
 cosia session context undo-last <session-id> --reason "<reason>"
 cosia run --session <session-id> --prompt "<prompt>" --agent <agent-id>
 cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
@@ -216,7 +219,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.15.
+- Destructive, network, external-send, and shell tools are not registered in v0.16.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `openai-compatible` is implemented but disabled by default. Its API key is read only from the configured environment variable.
@@ -244,7 +247,7 @@ cosia session show <session-id>
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
 - Controlled Git/NPM tools are individual read-only tools, not generic shell access.
 - Long tool output is capped with an explicit truncation marker.
-- Session context size warnings appear in status/session/chat output; automatic context summary/archive is deferred.
+- Session context size warnings appear in status/session/chat output; context summary and compaction are explicit CLI/REPL actions.
 - Skill candidates are stored in SQLite and remain pending until explicit promotion.
 - Promoted skills live in the global toolbox: `skills/<skill-id>.md` plus `skills/<skill-id>.json`.
 - `skills/SKILLS.md` is a generated global mirror; agent `SKILLS.md` files are generated preference views.
@@ -298,12 +301,20 @@ cosia agent sessions architect-agent
 ```powershell
 cosia chat --session <session-id> --provider mock
 cosia session summarize <session-id> --content "Short compact summary of the session so far."
+cosia session summarize <session-id> --from-context --provider openrouter
+cosia session context status <session-id>
+cosia session context compact <session-id> --keep-last 5 --reason "Summary captured older turns" --yes
 ```
 
 `chat` starts a simple REPL over the existing session runtime. Use `--agent <agent-id>` to run the chat with a different executing agent without changing the session assignment. Supported commands:
 
 ```text
 /status
+/context status
+/context compact --keep-last <n> --reason "<reason>"
+/context compact --keep-last <n> --reason "<reason>" --yes
+/summary show
+/summary update <summary>
 /memory refresh
 /skills list
 /skills use <skill-id>
@@ -312,7 +323,9 @@ cosia session summarize <session-id> --content "Short compact summary of the ses
 /exit
 ```
 
-Chat history is durable through `CONTEXT_MEMORY.md`; the in-process REPL history is only a display/cache aid. `REF_MEMORY.md` is generated once when chat starts, then refreshed by `/memory refresh` or after memory auto-promotion. `SESSION_SUMMARY.md` is included in prompt assembly but is manually updated in v0.6.
+Chat history is durable through `CONTEXT_MEMORY.md`; the in-process REPL history is only a display/cache aid. `REF_MEMORY.md` is generated once when chat starts, then refreshed by `/memory refresh` or after memory auto-promotion. `SESSION_SUMMARY.md` is included in prompt assembly and can be updated manually or by explicit `--from-context` summary preview/apply.
+
+`context compact` is preview-first. It splits `CONTEXT_MEMORY.md` only on `## Run ...` headings, keeps the newest run blocks, and moves older whole run blocks into `CONTEXT_ARCHIVE.md`. Use `--yes` to apply. By default, compaction is blocked while `SESSION_SUMMARY.md` is still the placeholder; pass `--allow-empty-summary` only when intentionally archiving without a summary.
 
 Manual skills selected with `--skill` or `/skills use` are included even when they have no triggers. Trigger-matched skills are selected automatically from the global skill toolbox, then biased by the current agent's preferences and capped by the prompt budget.
 
@@ -365,10 +378,13 @@ Readable prompt budget summaries and safe context undo are available through:
 ```powershell
 cosia session prompt <session-id> --latest
 cosia session prompt <session-id> --limit 2
+cosia session context status <session-id>
+cosia session summarize <session-id> --from-context --provider openrouter --yes
+cosia session context compact <session-id> --keep-last 5 --reason "Summary captured older turns" --yes
 cosia session context undo-last <session-id> --reason "Mistyped chat command"
 ```
 
-`undo-last` archives the last `CONTEXT_MEMORY.md` run entry into `CONTEXT_ARCHIVE.md`; it does not delete the entry without a trace.
+`undo-last` archives only the latest `CONTEXT_MEMORY.md` run entry into `CONTEXT_ARCHIVE.md`; it does not delete the entry without a trace. `compact` archives older whole run blocks in batches after a summary has captured their useful context.
 
 ## Memory Candidate Review
 
@@ -431,6 +447,7 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 ## Roadmap
 
 - v0.16: Context maintenance workflow.
+- v0.17: MVP acceptance polish and release checklist.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
-- Later context maintenance: automatic session summary/archive after warning thresholds are validated.
+- Later context maintenance: optional automatic summary/archive after explicit workflows are validated.

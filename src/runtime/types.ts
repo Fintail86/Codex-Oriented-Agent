@@ -125,11 +125,13 @@ export type ModelInput = {
   retryInstruction?: string;
 };
 
+const nullableOptional = <T extends z.ZodType>(schema: T) => z.preprocess((value) => value === null ? undefined : value, schema.optional());
+
 export const memoryCandidateSchema = z.object({
-  tier: memoryTierSchema.optional(),
-  scope: memoryScopeSchema.optional(),
-  legacyScope: memoryScopeSchema.optional(),
-  ownerId: z.string().optional(),
+  tier: nullableOptional(memoryTierSchema),
+  scope: nullableOptional(memoryScopeSchema),
+  legacyScope: nullableOptional(memoryScopeSchema),
+  ownerId: nullableOptional(z.string()),
   kind: z.string().min(1),
   content: z.string().min(1),
   importance: z.number().int().min(1).max(5),

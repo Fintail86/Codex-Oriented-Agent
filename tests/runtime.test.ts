@@ -95,7 +95,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.15.1\"");
+    expect(policyJson).toContain("\"version\": \"0.16.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -222,6 +222,88 @@ describe("runtime setup", () => {
 
     const emptySession = await sessions.createSession("architect-agent", "No context");
     await expect(sessions.undoLastContextEntry(emptySession.id, "nothing")).resolves.toMatchObject({ moved: false });
+  });
+
+  it("reports context status and compacts run blocks into archive", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Context maintenance");
+
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:00:00.000Z\n\nPrompt:\nfirst\n\nFinal:\none\n");
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:01:00.000Z\n\nPrompt:\nsecond\n\nFinal:\ntwo\n");
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:02:00.000Z\n\nPrompt:\nthird\n\nFinal:\nthree\n");
+
+    const status = await sessions.contextStatus(session.id, { warningChars: 1, criticalChars: 100000 });
+    expect(status.level).toBe("warning");
+    expect(status.runEntryCount).toBe(3);
+    expect(status.summaryIsPlaceholder).toBe(true);
+    expect(status.compactRecommended).toBe(true);
+
+    const blocked = await sessions.compactContext(session.id, {
+      keepLast: 1,
+      reason: "needs summary",
+      apply: true
+    });
+    expect(blocked.blocked).toBe(true);
+
+    await sessions.updateSummary(session.id, "The session tested context compaction.");
+    const preview = await sessions.compactContext(session.id, {
+      keepLast: 1,
+      reason: "manual compact",
+      apply: false
+    });
+    expect(preview.applied).toBe(false);
+    expect(preview.archivedRuns).toBe(2);
+    expect(await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8")).toContain("first");
+
+    const applied = await sessions.compactContext(session.id, {
+      keepLast: 1,
+      reason: "manual compact",
+      apply: true
+    });
+    expect(applied.applied).toBe(true);
+    expect(applied.archivedRuns).toBe(2);
+
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    const archive = await readFile(join(root, "sessions", session.id, "CONTEXT_ARCHIVE.md"), "utf8");
+    expect(context).toContain("# CONTEXT MEMORY");
+    expect(context).not.toContain("Prompt:\nfirst");
+    expect(context).not.toContain("Prompt:\nsecond");
+    expect(context).toContain("Prompt:\nthird");
+    expect(archive).toContain("Reason: manual compact");
+    expect(archive).toContain("Archived runs: 2");
+    expect(archive).toContain("Prompt:\nfirst");
+    expect(archive).toContain("Prompt:\nsecond");
+  });
+
+  it("records context health metadata in prompt manifests", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    const agent = await agents.loadAgent("cosia-agent");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Context manifest");
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:00:00.000Z\n\nPrompt:\nfirst\n");
+    await sessions.appendContext(session.id, "## Run 2026-01-01T00:01:00.000Z\n\nPrompt:\nsecond\n");
+    const policy = await new PolicyManager(root).loadPolicy();
+    policy.promptBudget = {
+      ...policy.promptBudget,
+      contextWarningChars: 1,
+      contextCriticalChars: 100000
+    };
+
+    const result = await buildPromptBundle({
+      workspaceRoot: root,
+      agent,
+      session,
+      userPrompt: "summarize context",
+      policy
+    });
+
+    expect(result.manifest.context).toMatchObject({
+      healthLevel: "warning",
+      summaryIsPlaceholder: true,
+      compactRecommended: true
+    });
   });
 });
 
@@ -2099,7 +2181,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.15.1");
+    expect(emptyReport.version).toBe("0.16.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

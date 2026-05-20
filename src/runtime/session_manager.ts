@@ -21,6 +21,13 @@ export type ContextHealth = {
   level: ContextHealthLevel;
 };
 
+export type ContextStatus = ContextHealth & {
+  runEntryCount: number;
+  archiveEntryCount: number;
+  summaryIsPlaceholder: boolean;
+  compactRecommended: boolean;
+};
+
 export class SessionManager {
   constructor(private readonly workspaceRoot: string) {}
 
@@ -132,9 +139,26 @@ export class SessionManager {
   }
 
   async contextHealth(sessionId: string, thresholds: { warningChars: number; criticalChars: number }): Promise<ContextHealth> {
+    const status = await this.contextStatus(sessionId, thresholds);
+    return {
+      sessionId: status.sessionId,
+      chars: status.chars,
+      warningChars: status.warningChars,
+      criticalChars: status.criticalChars,
+      level: status.level
+    };
+  }
+
+  async contextStatus(sessionId: string, thresholds: { warningChars: number; criticalChars: number }): Promise<ContextStatus> {
     await this.ensureSessionSupportFiles(sessionId);
-    const path = join(this.sessionDir(sessionId), "CONTEXT_MEMORY.md");
-    const chars = (await pathExists(path)) ? (await readText(path)).length : 0;
+    const sessionDir = this.sessionDir(sessionId);
+    const contextPath = join(sessionDir, "CONTEXT_MEMORY.md");
+    const archivePath = join(sessionDir, "CONTEXT_ARCHIVE.md");
+    const summaryPath = join(sessionDir, "SESSION_SUMMARY.md");
+    const context = (await pathExists(contextPath)) ? await readText(contextPath) : "";
+    const archive = (await pathExists(archivePath)) ? await readText(archivePath) : "";
+    const summary = (await pathExists(summaryPath)) ? await readText(summaryPath) : "";
+    const chars = context.length;
     const level: ContextHealthLevel = chars >= thresholds.criticalChars
       ? "critical"
       : chars >= thresholds.warningChars
@@ -145,7 +169,11 @@ export class SessionManager {
       chars,
       warningChars: thresholds.warningChars,
       criticalChars: thresholds.criticalChars,
-      level
+      level,
+      runEntryCount: splitContextRuns(context).runs.length,
+      archiveEntryCount: countArchivedContextEntries(archive),
+      summaryIsPlaceholder: isPlaceholderSessionSummary(summary),
+      compactRecommended: level !== "ok" && splitContextRuns(context).runs.length > 1
     };
   }
 
@@ -210,6 +238,89 @@ export class SessionManager {
     };
   }
 
+  async compactContext(sessionId: string, options: {
+    keepLast: number;
+    reason: string;
+    apply?: boolean;
+    allowEmptySummary?: boolean;
+  }): Promise<ContextCompactResult> {
+    await this.ensureSessionSupportFiles(sessionId);
+    if (options.keepLast < 0) {
+      throw new Error("--keep-last must be 0 or greater.");
+    }
+    const contextPath = join(this.sessionDir(sessionId), "CONTEXT_MEMORY.md");
+    const archivePath = join(this.sessionDir(sessionId), "CONTEXT_ARCHIVE.md");
+    const summaryPath = join(this.sessionDir(sessionId), "SESSION_SUMMARY.md");
+    const content = await readText(contextPath);
+    const summary = await readText(summaryPath);
+    const parsed = splitContextRuns(content);
+    const archiveRuns = parsed.runs.slice(0, Math.max(0, parsed.runs.length - options.keepLast));
+    const keptRuns = parsed.runs.slice(Math.max(0, parsed.runs.length - options.keepLast));
+    const summaryIsPlaceholder = isPlaceholderSessionSummary(summary);
+    const blocked = archiveRuns.length > 0 && summaryIsPlaceholder && !options.allowEmptySummary;
+    const nextContext = renderContextMemory(parsed.preamble, keptRuns);
+    if (!options.apply || blocked || archiveRuns.length === 0) {
+      return {
+        applied: false,
+        blocked,
+        movedAt: undefined,
+        message: blocked
+          ? "SESSION_SUMMARY.md is still a placeholder. Write a summary first or pass --allow-empty-summary."
+          : archiveRuns.length === 0
+            ? "No old context run entries to compact."
+            : "Context compact preview. Re-run with --yes to apply.",
+        contextCharsBefore: content.length,
+        contextCharsAfter: nextContext.length,
+        keptRuns: keptRuns.length,
+        archivedRuns: archiveRuns.length,
+        summaryIsPlaceholder
+      };
+    }
+
+    const movedAt = new Date().toISOString();
+    const archive = await readText(archivePath);
+    const archiveEntry = [
+      `## Archived Context ${movedAt}`,
+      "",
+      `Reason: ${options.reason}`,
+      `Kept runs: ${keptRuns.length}`,
+      `Archived runs: ${archiveRuns.length}`,
+      "",
+      "Original Run Blocks:",
+      "",
+      archiveRuns.join("\n\n"),
+      ""
+    ].join("\n");
+    await writeText(contextPath, nextContext);
+    await writeText(archivePath, `${archive.trimEnd()}\n\n${archiveEntry}`);
+    return {
+      applied: true,
+      blocked: false,
+      movedAt,
+      message: "Compacted context run entries.",
+      contextCharsBefore: content.length,
+      contextCharsAfter: nextContext.length,
+      keptRuns: keptRuns.length,
+      archivedRuns: archiveRuns.length,
+      summaryIsPlaceholder
+    };
+  }
+
+  async summarySource(sessionId: string, maxContextChars: number): Promise<ContextSummarySource> {
+    await this.ensureSessionSupportFiles(sessionId);
+    const sessionDir = this.sessionDir(sessionId);
+    const context = await readText(join(sessionDir, "CONTEXT_MEMORY.md"));
+    const summary = await readText(join(sessionDir, "SESSION_SUMMARY.md"));
+    return {
+      existingSummary: summary.trim(),
+      summaryIsPlaceholder: isPlaceholderSessionSummary(summary),
+      contextTail: context.length > maxContextChars ? context.slice(context.length - maxContextChars) : context,
+      contextChars: context.length,
+      retainedContextChars: Math.min(context.length, maxContextChars),
+      runEntryCount: splitContextRuns(context).runs.length
+    };
+  }
+
   sessionDir(sessionId: string): string {
     return join(this.sessionsDir(), sessionId);
   }
@@ -244,4 +355,62 @@ function lastRunEntryIndex(content: string): number {
     return -1;
   }
   return matches[matches.length - 1].index ?? -1;
+}
+
+export type ContextCompactResult = {
+  applied: boolean;
+  blocked: boolean;
+  movedAt?: string;
+  message: string;
+  contextCharsBefore: number;
+  contextCharsAfter: number;
+  keptRuns: number;
+  archivedRuns: number;
+  summaryIsPlaceholder: boolean;
+};
+
+export type ContextSummarySource = {
+  existingSummary: string;
+  summaryIsPlaceholder: boolean;
+  contextTail: string;
+  contextChars: number;
+  retainedContextChars: number;
+  runEntryCount: number;
+};
+
+export function splitContextRuns(content: string): { preamble: string; runs: string[] } {
+  const matches = [...content.matchAll(/^## Run .+$/gm)];
+  if (!matches.length) {
+    return {
+      preamble: content.trimEnd() || "# CONTEXT MEMORY",
+      runs: []
+    };
+  }
+  const firstRunStart = matches[0].index ?? 0;
+  const preamble = content.slice(0, firstRunStart).trimEnd() || "# CONTEXT MEMORY";
+  const runs = matches.map((match, index) => {
+    const start = match.index ?? 0;
+    const end = index + 1 < matches.length ? matches[index + 1].index ?? content.length : content.length;
+    return content.slice(start, end).trim();
+  });
+  return { preamble, runs };
+}
+
+export function isPlaceholderSessionSummary(content: string): boolean {
+  const normalized = content
+    .replace(/^# SESSION SUMMARY\s*/i, "")
+    .trim();
+  return normalized.length === 0 || normalized === "No compact session summary yet.";
+}
+
+function renderContextMemory(preamble: string, runs: string[]): string {
+  const header = preamble.trimEnd() || "# CONTEXT MEMORY";
+  if (!runs.length) {
+    return `${header}\n\n`;
+  }
+  return `${header}\n\n${runs.join("\n\n")}\n`;
+}
+
+function countArchivedContextEntries(content: string): number {
+  return [...content.matchAll(/^## Archived Context .+$/gm)].length;
 }

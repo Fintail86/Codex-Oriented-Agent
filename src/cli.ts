@@ -8,7 +8,8 @@ import {
 } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
-import { checkProvider, listProviders } from "./runtime/model/provider_registry.js";
+import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
+import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_builder.js";
@@ -377,15 +378,15 @@ session
       const sessions = new SessionManager(workspaceRoot);
       const metadata = await sessions.loadSession(sessionId);
       const policy = await new PolicyManager(workspaceRoot).loadPolicy();
-      const contextHealth = await sessions.contextHealth(sessionId, {
+      const contextStatus = await sessions.contextStatus(sessionId, {
         warningChars: policy.promptBudget.contextWarningChars,
         criticalChars: policy.promptBudget.contextCriticalChars
       });
       console.log(JSON.stringify(metadata, null, 2));
       console.log(`\n# CONTEXT STATUS\n`);
-      console.log(formatContextHealth(contextHealth));
-      if (contextHealth.level === "critical") {
-        console.log(contextCriticalHint(sessionId));
+      console.log(formatContextStatus(contextStatus));
+      if (contextStatus.level !== "ok" || contextStatus.compactRecommended) {
+        console.log(contextMaintenanceHint(sessionId));
       }
       const tail = await sessions.contextTail(sessionId, Number.parseInt(options.tail, 10));
       console.log("\n# CONTEXT TAIL\n");
@@ -396,13 +397,40 @@ session
 session
   .command("summarize")
   .argument("<session-id>")
-  .requiredOption("--content <summary>", "Compact session summary")
+  .option("--content <summary>", "Compact session summary")
+  .option("--from-context", "Generate a summary proposal from budgeted context.", false)
+  .option("--provider <provider>", "Model provider for --from-context")
+  .option("--provider-timeout-ms <ms>", "Override provider timeout for --from-context")
+  .option("--yes", "Write generated summary instead of previewing it.", false)
   .description("Write SESSION_SUMMARY.md for a session.")
-  .action(async (sessionId: string, options: { content: string }) => {
+  .action(async (sessionId: string, options: { content?: string; fromContext: boolean; provider?: string; providerTimeoutMs?: string; yes: boolean }) => {
     await main(async (workspaceRoot) => {
       const sessions = new SessionManager(workspaceRoot);
-      await sessions.loadSession(sessionId);
-      await sessions.updateSummary(sessionId, options.content);
+      const session = await sessions.loadSession(sessionId);
+      if (options.content && options.fromContext) {
+        throw new Error("Use either --content or --from-context, not both.");
+      }
+      if (!options.content && !options.fromContext) {
+        throw new Error("Provide --content <summary> or --from-context.");
+      }
+      if (options.content) {
+        await sessions.updateSummary(sessionId, options.content);
+        console.log(`Updated ${sessionId} SESSION_SUMMARY.md`);
+        return;
+      }
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const providerId = options.provider ?? policy.model.defaultProvider;
+      const summary = await generateSessionSummary(workspaceRoot, session, providerId, {
+        timeoutMs: options.providerTimeoutMs ? parseIntegerOption(options.providerTimeoutMs, "provider-timeout-ms") : undefined,
+        contextChars: policy.promptBudget.contextTailChars
+      });
+      if (!options.yes) {
+        console.log("# SESSION SUMMARY PREVIEW\n");
+        console.log(summary);
+        console.log(`\nRe-run with --yes to update sessions/${sessionId}/SESSION_SUMMARY.md.`);
+        return;
+      }
+      await sessions.updateSummary(sessionId, summary);
       console.log(`Updated ${sessionId} SESSION_SUMMARY.md`);
     });
   });
@@ -430,6 +458,26 @@ session
 const sessionContext = session.command("context").description("Manage session context memory.");
 
 sessionContext
+  .command("status")
+  .argument("<session-id>")
+  .description("Show session context maintenance status.")
+  .action(async (sessionId: string) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      await sessions.loadSession(sessionId);
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const status = await sessions.contextStatus(sessionId, {
+        warningChars: policy.promptBudget.contextWarningChars,
+        criticalChars: policy.promptBudget.contextCriticalChars
+      });
+      console.log(formatContextStatus(status));
+      if (status.level !== "ok" || status.compactRecommended) {
+        console.log(contextMaintenanceHint(sessionId));
+      }
+    });
+  });
+
+sessionContext
   .command("undo-last")
   .argument("<session-id>")
   .requiredOption("--reason <reason>", "Archive reason")
@@ -443,6 +491,33 @@ sessionContext
       if (result.moved) {
         console.log(`Moved at: ${result.movedAt}`);
         console.log("Archive: CONTEXT_ARCHIVE.md");
+      }
+    });
+  });
+
+sessionContext
+  .command("compact")
+  .argument("<session-id>")
+  .requiredOption("--keep-last <n>", "Number of latest run entries to keep in CONTEXT_MEMORY.md.")
+  .requiredOption("--reason <reason>", "Compaction reason.")
+  .option("--yes", "Apply compaction. Without this, only preview.", false)
+  .option("--allow-empty-summary", "Allow compaction while SESSION_SUMMARY.md is still placeholder.", false)
+  .description("Move old context run blocks into CONTEXT_ARCHIVE.md.")
+  .action(async (sessionId: string, options: { keepLast: string; reason: string; yes: boolean; allowEmptySummary: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      await sessions.loadSession(sessionId);
+      const result = await sessions.compactContext(sessionId, {
+        keepLast: parseIntegerOption(options.keepLast, "keep-last"),
+        reason: options.reason,
+        apply: options.yes,
+        allowEmptySummary: options.allowEmptySummary
+      });
+      console.log(formatContextCompactResult(result));
+      if (result.blocked) {
+        console.log(contextMaintenanceHint(sessionId));
+      } else if (!result.applied && result.archivedRuns > 0) {
+        console.log(`Re-run with --yes to apply compaction for ${sessionId}.`);
       }
     });
   });
@@ -1309,7 +1384,7 @@ program
       const manualSkills = new Set(options.skill ?? []);
 
       console.error(`[cosia] chat started: ${session.id}`);
-      console.error("[cosia] commands: /status, /memory refresh, /skills list, /skills use <id>, /skills drop <id>, /skills clear, /exit");
+      console.error("[cosia] commands: /status, /context status, /context compact --keep-last <n> --reason \"<reason>\" [--yes], /summary show, /summary update <summary>, /memory refresh, /skills list, /skills use <id>, /skills drop <id>, /skills clear, /exit");
       const rl = createInterface({ input: process.stdin, output: process.stdout });
       try {
         while (true) {
@@ -1320,7 +1395,16 @@ program
           }
           if (prompt === "/exit") {
             console.error(`[cosia] chat ended after ${history.length} turn(s).`);
-            console.error(`[cosia] summary hint: cosia session summarize ${session.id} --content "<summary>"`);
+            const status = await sessions.contextStatus(session.id, {
+              warningChars: policy.promptBudget.contextWarningChars,
+              criticalChars: policy.promptBudget.contextCriticalChars
+            });
+            if (status.level !== "ok" || status.summaryIsPlaceholder) {
+              console.error(`[cosia] summary hint: cosia session summarize ${session.id} --content "<summary>"`);
+            }
+            if (status.level !== "ok" || status.compactRecommended) {
+              console.error(`[cosia] context hint: cosia session context compact ${session.id} --keep-last 5 --reason "<reason>"`);
+            }
             break;
           }
           if (prompt === "/status") {
@@ -1331,15 +1415,63 @@ program
             console.log(`Prompt budget: ${policy.promptBudget.maxPromptChars} chars`);
             console.log(`Context tail: ${policy.promptBudget.contextTailChars} chars`);
             console.log(`Manual skills: ${manualSkills.size ? [...manualSkills].join(", ") : "none"}`);
-            const health = await sessions.contextHealth(session.id, {
+            const health = await sessions.contextStatus(session.id, {
               warningChars: policy.promptBudget.contextWarningChars,
               criticalChars: policy.promptBudget.contextCriticalChars
             });
-            console.log(`Context status: ${formatContextHealth(health)}`);
-            if (health.level === "critical") {
-              console.log(contextCriticalHint(session.id));
+            console.log("Context status:");
+            console.log(formatContextStatus(health));
+            if (health.level !== "ok" || health.compactRecommended) {
+              console.log(contextMaintenanceHint(session.id));
             }
             console.log(`Turns in this REPL: ${history.length}`);
+            continue;
+          }
+          if (prompt === "/context status") {
+            const status = await sessions.contextStatus(session.id, {
+              warningChars: policy.promptBudget.contextWarningChars,
+              criticalChars: policy.promptBudget.contextCriticalChars
+            });
+            console.log(formatContextStatus(status));
+            if (status.level !== "ok" || status.compactRecommended) {
+              console.log(contextMaintenanceHint(session.id));
+            }
+            continue;
+          }
+          if (prompt.startsWith("/context compact ")) {
+            const args = parseCommandLineArgs(prompt.slice("/context compact ".length));
+            const flags = parseFlagArgs(args);
+            const keepLast = flags["keep-last"];
+            const reason = flags.reason;
+            if (!keepLast || !reason) {
+              throw new Error("Usage: /context compact --keep-last <n> --reason \"<reason>\" [--yes] [--allow-empty-summary]");
+            }
+            const result = await sessions.compactContext(session.id, {
+              keepLast: parseIntegerOption(keepLast, "keep-last"),
+              reason,
+              apply: flags.yes === "true",
+              allowEmptySummary: flags["allow-empty-summary"] === "true"
+            });
+            console.log(formatContextCompactResult(result));
+            if (result.blocked) {
+              console.log(contextMaintenanceHint(session.id));
+            } else if (!result.applied && result.archivedRuns > 0) {
+              console.log("Re-run the same /context compact command with --yes to apply.");
+            }
+            continue;
+          }
+          if (prompt === "/summary show") {
+            const source = await sessions.summarySource(session.id, policy.promptBudget.contextTailChars);
+            console.log(source.existingSummary || "# SESSION SUMMARY\n\nNo compact session summary yet.");
+            continue;
+          }
+          if (prompt.startsWith("/summary update ")) {
+            const summary = prompt.slice("/summary update ".length).trim();
+            if (!summary) {
+              throw new Error("Usage: /summary update <summary>");
+            }
+            await sessions.updateSummary(session.id, summary);
+            console.error(`[cosia] updated SESSION_SUMMARY.md for ${session.id}`);
             continue;
           }
           if (prompt === "/memory refresh") {
@@ -1568,6 +1700,10 @@ function formatPromptManifest(manifest: PromptManifest): string {
       lines.push(`- ${skill.skillId} ${skill.selected ? "selected" : "omitted"} by:${skill.selectedBy} score:${skill.finalScore} trigger:${skill.triggerScore} pref:${skill.preferredBonus} weight:${skill.weightBonus} triggers:${skill.matchedTriggers.join(",") || "none"} ${skill.retainedChars}/${skill.originalChars} chars${skill.truncated ? " truncated" : ""}${skill.omittedReason ? ` reason:${skill.omittedReason}` : ""}`);
     }
   }
+  if (manifest.context) {
+    lines.push("Context:");
+    lines.push(`- chars:${manifest.context.chars} health:${manifest.context.healthLevel} summaryPlaceholder:${manifest.context.summaryIsPlaceholder} compactRecommended:${manifest.context.compactRecommended}`);
+  }
   return lines.join("\n");
 }
 
@@ -1589,13 +1725,169 @@ function formatContextHealth(health: { sessionId: string; chars: number; warning
   return `${health.sessionId} ${health.level} ${health.chars} chars (warning:${health.warningChars}, critical:${health.criticalChars})`;
 }
 
-function contextCriticalHint(sessionId: string): string {
+function formatContextStatus(status: {
+  sessionId: string;
+  chars: number;
+  warningChars: number;
+  criticalChars: number;
+  level: string;
+  runEntryCount: number;
+  archiveEntryCount: number;
+  summaryIsPlaceholder: boolean;
+  compactRecommended: boolean;
+}): string {
   return [
-    "Context is critical. Suggested next steps:",
+    `Session: ${status.sessionId}`,
+    `Context: ${status.level} ${status.chars} chars (warning:${status.warningChars}, critical:${status.criticalChars})`,
+    `Run entries: ${status.runEntryCount}`,
+    `Archived entries: ${status.archiveEntryCount}`,
+    `Summary placeholder: ${status.summaryIsPlaceholder}`,
+    `Compact recommended: ${status.compactRecommended}`
+  ].join("\n");
+}
+
+function formatContextCompactResult(result: {
+  applied: boolean;
+  blocked: boolean;
+  movedAt?: string;
+  message: string;
+  contextCharsBefore: number;
+  contextCharsAfter: number;
+  keptRuns: number;
+  archivedRuns: number;
+  summaryIsPlaceholder: boolean;
+}): string {
+  const lines = [
+    result.message,
+    `Applied: ${result.applied}`,
+    `Blocked: ${result.blocked}`,
+    `Kept runs: ${result.keptRuns}`,
+    `Archived runs: ${result.archivedRuns}`,
+    `Context chars: ${result.contextCharsBefore} -> ${result.contextCharsAfter}`,
+    `Summary placeholder: ${result.summaryIsPlaceholder}`
+  ];
+  if (result.movedAt) {
+    lines.push(`Moved at: ${result.movedAt}`);
+  }
+  return lines.join("\n");
+}
+
+function contextCriticalHint(sessionId: string): string {
+  return contextMaintenanceHint(sessionId);
+}
+
+function contextMaintenanceHint(sessionId: string): string {
+  return [
+    "Suggested context maintenance:",
+    `- cosia session context status ${sessionId}`,
     `- cosia session prompt ${sessionId} --latest`,
     `- cosia session summarize ${sessionId} --content \"<summary>\"`,
+    `- cosia session summarize ${sessionId} --from-context --provider <provider>`,
+    `- cosia session context compact ${sessionId} --keep-last 5 --reason \"<reason>\"`,
     `- cosia session context undo-last ${sessionId} --reason \"<reason>\"`
   ].join("\n");
+}
+
+async function generateSessionSummary(
+  workspaceRoot: string,
+  session: SessionMetadata,
+  providerId: string,
+  options: { timeoutMs?: number; contextChars: number }
+): Promise<string> {
+  const sessions = new SessionManager(workspaceRoot);
+  const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const source = await sessions.summarySource(session.id, options.contextChars);
+  let providerIdForFailure = providerId;
+  try {
+    const provider = createProvider(providerId, workspaceRoot, {
+      policy,
+      timeoutMs: options.timeoutMs
+    });
+    providerIdForFailure = provider.id;
+    if (provider.id !== "mock") {
+      const auth = await provider.checkAuth();
+      if (!auth.ok) {
+        throw new ProviderError(auth.reason ?? "auth_failed", `Model provider auth failed: ${auth.message}`, {
+          hint: auth.hint
+        });
+      }
+    }
+    const output = await provider.complete({
+      sessionId: session.id,
+      prompt: buildSessionSummaryPrompt(session, source)
+    });
+    if (output.step.type !== "final") {
+      throw new ProviderError("malformed_agent_step", "Summary provider returned a tool_call; expected final.");
+    }
+    return output.step.content.trim();
+  } catch (error) {
+    throw new Error(formatProviderFailure(error, providerIdForFailure));
+  }
+}
+
+function buildSessionSummaryPrompt(
+  session: SessionMetadata,
+  source: {
+    existingSummary: string;
+    summaryIsPlaceholder: boolean;
+    contextTail: string;
+    contextChars: number;
+    retainedContextChars: number;
+    runEntryCount: number;
+  }
+): string {
+  return `Return only one valid JSON object. Do not wrap it in Markdown.
+
+You are updating COSIA's SESSION_SUMMARY.md for a single session.
+Return a concise durable summary of the session so far.
+Preserve goals, important decisions, current state, blockers, and next actions.
+Do not invent facts outside the provided context.
+Do not call tools.
+
+AgentStep final schema:
+{"type":"final","content":"...","memoryCandidates":[],"skillCandidates":[]}
+
+Session:
+- id: ${session.id}
+- goal: ${session.goal}
+- status: ${session.status}
+- assigned agent: ${session.assignedAgentId ?? "none"}
+
+Existing summary (${source.summaryIsPlaceholder ? "placeholder" : "user-written"}):
+${source.existingSummary}
+
+Context source:
+- total chars: ${source.contextChars}
+- retained chars: ${source.retainedContextChars}
+- run entries: ${source.runEntryCount}
+
+Context tail:
+${source.contextTail}
+`;
+}
+
+function parseCommandLineArgs(value: string): string[] {
+  const matches = value.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g);
+  return [...matches].map((match) => match[1] ?? match[2] ?? match[3]);
+}
+
+function parseFlagArgs(tokens: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token.startsWith("--")) {
+      continue;
+    }
+    const key = token.slice(2);
+    const next = tokens[index + 1];
+    if (!next || next.startsWith("--")) {
+      result[key] = "true";
+      continue;
+    }
+    result[key] = next;
+    index += 1;
+  }
+  return result;
 }
 
 async function runCliTool(workspaceRoot: string, name: ToolName, args: Record<string, unknown>): Promise<void> {

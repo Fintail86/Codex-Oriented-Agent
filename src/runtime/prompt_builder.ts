@@ -54,6 +54,14 @@ export type PromptManifest = {
   overflowed: boolean;
   blocks: PromptManifestBlock[];
   skillSelections?: SkillSelectionManifest[];
+  context?: PromptContextManifest;
+};
+
+export type PromptContextManifest = {
+  chars: number;
+  healthLevel: "ok" | "warning" | "critical";
+  summaryIsPlaceholder: boolean;
+  compactRecommended: boolean;
 };
 
 export type PromptBuildResult = {
@@ -61,7 +69,10 @@ export type PromptBuildResult = {
   manifest: PromptManifest;
 };
 
-type DynamicPromptBlocks = PromptBlock[] & { skillSelections?: SkillSelectionManifest[] };
+type DynamicPromptBlocks = PromptBlock[] & {
+  skillSelections?: SkillSelectionManifest[];
+  context?: PromptContextManifest;
+};
 
 const codexFiles = ["SECURITY.md", "POLICY.md", "RULES.md", "SOUL.md", "USER.md"] as const;
 const safetyMarginRatio = 0.15;
@@ -146,7 +157,8 @@ export async function buildPromptBundle(input: PromptInput): Promise<PromptBuild
     maxPromptChars: budget.maxPromptChars,
     safetyMarginChars,
     targetPromptChars,
-    skillSelections: dynamicBlocks.skillSelections
+    skillSelections: dynamicBlocks.skillSelections,
+    context: dynamicBlocks.context
   });
 }
 
@@ -172,7 +184,8 @@ async function loadDynamicBlocks(
   });
   const sessionSummary = await readText(join(sessionDir, "SESSION_SUMMARY.md"));
   const refMemory = limitReferenceMemory(await readText(join(sessionDir, "REF_MEMORY.md")), budget.refMemoryMaxItems);
-  const contextMemory = tailText(await readText(join(sessionDir, "CONTEXT_MEMORY.md")), budget.contextTailChars, "CONTEXT_MEMORY.md");
+  const contextMemoryRaw = await readText(join(sessionDir, "CONTEXT_MEMORY.md"));
+  const contextMemory = tailText(contextMemoryRaw, budget.contextTailChars, "CONTEXT_MEMORY.md");
   const blocks: PromptBlock[] = [
     ...(skillBlock ? [{
       title: skillBlock.title,
@@ -198,6 +211,12 @@ async function loadDynamicBlocks(
   ];
   const filtered = blocks.filter((block) => block.content.trim().length > 0) as DynamicPromptBlocks;
   filtered.skillSelections = skillBlock?.manifest ?? [];
+  filtered.context = {
+    chars: contextMemoryRaw.length,
+    healthLevel: contextHealthLevel(contextMemoryRaw.length, budget.contextWarningChars, budget.contextCriticalChars),
+    summaryIsPlaceholder: isPlaceholderSessionSummary(sessionSummary),
+    compactRecommended: contextMemoryRaw.length >= budget.contextWarningChars && countContextRuns(contextMemoryRaw) > 1
+  };
   return filtered;
 }
 
@@ -255,7 +274,7 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
 
 function assembleWithBudget(
   blocks: PromptBlock[],
-  input: Pick<PromptManifest, "sessionId" | "agentId" | "runId" | "modelStep" | "maxPromptChars" | "safetyMarginChars" | "targetPromptChars" | "skillSelections">
+  input: Pick<PromptManifest, "sessionId" | "agentId" | "runId" | "modelStep" | "maxPromptChars" | "safetyMarginChars" | "targetPromptChars" | "skillSelections" | "context">
 ): PromptBuildResult {
   const working = blocks.map((block) => ({
     ...block,
@@ -298,6 +317,7 @@ function assembleWithBudget(
     estimatedTokens: estimateTokens(prompt.length),
     overflowed: prompt.length > input.targetPromptChars,
     skillSelections: input.skillSelections,
+    context: input.context,
     blocks: working.map((block) => ({
       title: block.title,
       source: block.source,
@@ -389,4 +409,25 @@ function estimateTokens(chars: number): number {
 function observationToolsText(policy: PolicyConfig | undefined): string {
   const tools = policy?.requireTools.observationTools ?? ["read_file", "search_files"];
   return tools.map((tool) => `\`${tool}\``).join(", ");
+}
+
+function contextHealthLevel(chars: number, warningChars: number, criticalChars: number): PromptContextManifest["healthLevel"] {
+  if (chars >= criticalChars) {
+    return "critical";
+  }
+  if (chars >= warningChars) {
+    return "warning";
+  }
+  return "ok";
+}
+
+function isPlaceholderSessionSummary(content: string): boolean {
+  const normalized = content
+    .replace(/^# SESSION SUMMARY\s*/i, "")
+    .trim();
+  return normalized.length === 0 || normalized === "No compact session summary yet.";
+}
+
+function countContextRuns(content: string): number {
+  return [...content.matchAll(/^## Run .+$/gm)].length;
 }
