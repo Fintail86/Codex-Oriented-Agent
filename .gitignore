@@ -5,3 +5,4 @@ coverage/
 memory/*
 sessions/*
 *.log
+Docs/
