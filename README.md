@@ -1,10 +1,10 @@
-# COSIA v0.11.0
+# COSIA v0.12.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.11 adds agent identity, default agent management, guided agent bootstrap, and deterministic agent recommendation.
+v0.12 separates sessions from agent ownership and records the actual executing agent for each run.
 
 ## Requirements
 
@@ -98,14 +98,18 @@ cosia agent bootstrap
 cosia agent bootstrap --id <agent-id> --name "<name>" --role "<role>" --voice "<voice>"
 cosia agent delete <agent-id> --yes --force --allow-empty
 cosia agent recommend --prompt "<prompt>" --explain
+cosia agent sessions <agent-id>
 cosia session create --goal "<goal>"
 cosia session create --agent <agent-id> --goal "<goal>"
+cosia session assign <session-id> --agent <agent-id>
+cosia session unassign <session-id>
+cosia session list --agent <agent-id>
 cosia session summarize <session-id> --content "<summary>"
 cosia session prompt <session-id> --latest
 cosia session context undo-last <session-id> --reason "<reason>"
-cosia run --session <session-id> --prompt "<prompt>"
+cosia run --session <session-id> --prompt "<prompt>" --agent <agent-id>
 cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
-cosia chat --session <session-id>
+cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
 cosia memory add --scope <scope> --content "<content>"
 cosia memory search --query "<query>" --show-score
@@ -171,7 +175,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.11.
+- Destructive, network, external-send, and shell tools are not registered in v0.12.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -204,6 +208,10 @@ cosia session show <session-id>
 - Agent identity comes from `manifest.json`; `AGENT.md`, `STYLE.md`, and `LOCAL_RULES.md` remain prompt/human supplements.
 - Agent recommendation is deterministic and does not change existing sessions automatically.
 - If no usable default agent exists, run `cosia agent bootstrap`.
+- Sessions are global work instances and store `assignedAgentId`; agents do not own sessions.
+- `run --agent` and `chat --agent` override the executing agent for that run/chat without changing the session assignment.
+- Policy audit, prompt manifests, context entries, and generated candidates record the actual executing agent.
+- Sessions assigned to missing agents are treated as orphaned and can be repaired with `cosia session assign`.
 
 ## Policy
 
@@ -230,9 +238,10 @@ cosia agent default show
 cosia agent bootstrap --id helper-agent --name "Helper Agent" --role "General COSIA helper" --voice "Friendly and brief"
 cosia agent default set helper-agent
 cosia agent delete cosia-agent
+cosia agent sessions architect-agent
 ```
 
-`agent delete` previews by default. Use `--yes` to delete, `--force` for session-referenced agents, and `--allow-empty` only when deliberately leaving the workspace without a default or last agent.
+`agent delete` previews by default. Use `--yes` to delete, `--force` for session-referenced agents, and `--allow-empty` only when deliberately leaving the workspace without a default or last agent. Deleting an agent does not delete sessions; affected sessions become orphaned until reassigned.
 
 ## Prompt Budget and Chat
 
@@ -241,7 +250,7 @@ cosia chat --session <session-id> --provider mock
 cosia session summarize <session-id> --content "Short compact summary of the session so far."
 ```
 
-`chat` starts a simple REPL over the existing session runtime. Supported commands:
+`chat` starts a simple REPL over the existing session runtime. Use `--agent <agent-id>` to run the chat with a different executing agent without changing the session assignment. Supported commands:
 
 ```text
 /status
@@ -364,9 +373,6 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.12: Session assignment and run lineage.
-  - Treat sessions as global work instances, not agent-owned records.
-  - Add `assignedAgentId`, session assignment commands, orphan session visibility, and per-run executing agent lineage.
 - v0.13: Memory ownership and lifecycle.
   - Move from broad memory scopes toward `tier + kind`: `core`, `agent`, and `session` memory.
   - Keep `kind` for search, display, and risk classification while `tier` controls ownership and lifecycle.

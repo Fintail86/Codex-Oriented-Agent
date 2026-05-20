@@ -388,9 +388,13 @@ export class MemoryManager {
     return results;
   }
 
-  async appendCandidates(candidates: MemoryCandidate[] | undefined, session: SessionMetadata, runId?: string): Promise<MemoryCandidateRecord[]> {
+  async appendCandidates(candidates: MemoryCandidate[] | undefined, session: SessionMetadata, runId?: string, sourceAgentId?: string): Promise<MemoryCandidateRecord[]> {
     if (!candidates?.length) {
       return [];
+    }
+    const agentId = sourceAgentId ?? session.assignedAgentId;
+    if (!agentId) {
+      throw new Error("Cannot append memory candidates without an executing or assigned agent.");
     }
     this.ensureQueueStorage();
     const records: MemoryCandidateRecord[] = candidates.map((candidate) => {
@@ -400,7 +404,7 @@ export class MemoryManager {
         status: "pending" as const,
         ...parsed,
         sourceSessionId: session.id,
-        sourceAgentId: session.agentId,
+        sourceAgentId: agentId,
         runId,
         createdAt: new Date().toISOString()
       };

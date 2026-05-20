@@ -60,10 +60,14 @@ describe("runtime setup", () => {
       "npm_test",
       "npm_typecheck"
     ]));
-    expect(session.id).toMatch(/^session_\d{8}_architect-agent_001$/);
+    expect(session.id).toMatch(/^session_\d{8}_001$/);
+    expect(session.assignedAgentId).toBe("architect-agent");
+    const sessionJson = JSON.parse(await readFile(join(root, "sessions", session.id, "session.json"), "utf8")) as Record<string, unknown>;
+    expect(sessionJson.assignedAgentId).toBe("architect-agent");
+    expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.11.0\"");
+    expect(policyJson).toContain("\"version\": \"0.12.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -104,6 +108,38 @@ describe("runtime setup", () => {
       expect(next).toBeGreaterThan(cursor);
       cursor = next;
     }
+  });
+
+  it("repairs legacy session agentId and supports assignment filters", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Repair legacy session");
+    const sessionPath = join(root, "sessions", session.id, "session.json");
+    const legacy = {
+      id: session.id,
+      agentId: "architect-agent",
+      status: "active",
+      goal: session.goal,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt
+    };
+    await writeFile(sessionPath, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
+
+    const repaired = await sessions.loadSession(session.id);
+    expect(repaired.assignedAgentId).toBe("architect-agent");
+    const repairedJson = JSON.parse(await readFile(sessionPath, "utf8")) as Record<string, unknown>;
+    expect(repairedJson.assignedAgentId).toBe("architect-agent");
+    expect(repairedJson.agentId).toBeUndefined();
+
+    await sessions.assignAgent(session.id, null);
+    expect((await sessions.loadSession(session.id)).assignedAgentId).toBeNull();
+    expect(await sessions.listSessions({ agentId: "architect-agent" })).toHaveLength(0);
+
+    await sessions.assignAgent(session.id, "cosia-agent");
+    const filtered = await sessions.listSessions({ agentId: "cosia-agent" });
+    expect(filtered.map((item) => item.id)).toEqual([session.id]);
   });
 
   it("applies prompt budget metadata and context tailing", async () => {
@@ -605,7 +641,7 @@ describe("memory", () => {
     expect(pending[0].record?.id).toBeTruthy();
     expect(pending[0].record?.status).toBe("pending");
     expect(pending[0].record?.sourceSessionId).toBe(session.id);
-    expect(pending[0].record?.sourceAgentId).toBe(session.agentId);
+    expect(pending[0].record?.sourceAgentId).toBe(session.assignedAgentId);
 
     const candidatePrefix = pending[0].displayId.slice(0, 12);
     expect((await memory.getCandidate(candidatePrefix)).displayId).toBe(pending[0].displayId);
@@ -1156,6 +1192,38 @@ describe("model parsing and run loop", () => {
     expect(readable[0]).toMatchObject({ sessionId: session.id, modelStep: 1 });
   });
 
+  it("records run lineage when execution agent overrides session assignment", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Run lineage handoff");
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      agentId: "architect-agent",
+      prompt: "[MOCK_TOOL_CALL:search_files:COSIA] [MOCK_CANDIDATE] [MOCK_SKILL_CANDIDATE]",
+      providerId: "mock"
+    });
+    expect(content).toContain(session.id);
+
+    expect((await sessions.loadSession(session.id)).assignedAgentId).toBe("cosia-agent");
+    const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
+    expect(context).toContain("Agent:\narchitect-agent");
+
+    const [manifest] = await sessions.listPromptManifests(session.id, 1);
+    expect(manifest.agentId).toBe("architect-agent");
+
+    const audit = await new PolicyAuditLog(root).list(session.id, 10);
+    expect(audit.some((event) => event.agentId === "architect-agent" && event.tool === "search_files")).toBe(true);
+
+    const memoryCandidates = await new MemoryManager(root).listCandidates(true);
+    expect(memoryCandidates.some((candidate) => candidate.record?.sourceAgentId === "architect-agent")).toBe(true);
+
+    const skillCandidates = new SkillManager(root).listCandidates();
+    expect(skillCandidates.some((candidate) => candidate.record.sourceAgentId === "architect-agent")).toBe(true);
+  });
+
   it("requires an observation tool before final when requireTools is enabled", async () => {
     const root = await initializedWorkspace();
     const agents = new AgentManager(root);
@@ -1452,7 +1520,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.11.0");
+    expect(emptyReport.version).toBe("0.12.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

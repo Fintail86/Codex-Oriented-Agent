@@ -73,12 +73,20 @@ export type AgentManifest = z.infer<typeof agentManifestSchema>;
 
 export const sessionMetadataSchema = z.object({
   id: z.string().min(1),
-  agentId: z.string().min(1),
+  assignedAgentId: z.string().min(1).nullable().optional(),
+  agentId: z.string().min(1).optional(),
   status: z.enum(["active", "completed", "archived"]),
   goal: z.string().min(1),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1)
-});
+}).transform((session) => ({
+  id: session.id,
+  assignedAgentId: session.assignedAgentId ?? session.agentId ?? null,
+  status: session.status,
+  goal: session.goal,
+  createdAt: session.createdAt,
+  updatedAt: session.updatedAt
+}));
 
 export type SessionMetadata = z.infer<typeof sessionMetadataSchema>;
 

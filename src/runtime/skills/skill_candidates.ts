@@ -83,15 +83,19 @@ export class SkillCandidateStore {
     }
   }
 
-  appendCandidates(candidates: SkillCandidate[] | undefined, session: SessionMetadata, runId?: string): SkillCandidateRecord[] {
+  appendCandidates(candidates: SkillCandidate[] | undefined, session: SessionMetadata, runId?: string, sourceAgentId?: string): SkillCandidateRecord[] {
     if (!candidates?.length) {
       return [];
+    }
+    const executingAgentId = sourceAgentId ?? session.assignedAgentId;
+    if (!executingAgentId) {
+      throw new Error("Cannot append skill candidates without an executing or assigned agent.");
     }
     this.ensureSchema();
     const now = new Date().toISOString();
     const records = candidates.map((candidate) => {
       const id = randomUUID();
-      const suggestedByAgentId = candidate.agentId || session.agentId;
+      const suggestedByAgentId = candidate.agentId || executingAgentId;
       const triggers = normalizeTriggers(candidate.triggers ?? []);
       const record: SkillCandidateRecord = {
         id,
@@ -105,7 +109,7 @@ export class SkillCandidateStore {
         riskLevel: classifySkillRisk(candidate),
         suggestedByAgentId,
         sourceSessionId: session.id,
-        sourceAgentId: session.agentId,
+        sourceAgentId: executingAgentId,
         runId,
         createdAt: now
       };

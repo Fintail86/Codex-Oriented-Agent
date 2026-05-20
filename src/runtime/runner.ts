@@ -28,6 +28,7 @@ type RunOptions = {
   onEvent?: (message: string) => void;
   onMemoryReview?: (summary: MemoryReviewSummary) => void;
   manualSkillIds?: string[];
+  agentId?: string;
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
@@ -38,7 +39,11 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const tools = new ToolRegistry();
   const session = await sessions.loadSession(options.sessionId);
   await sessions.ensureSessionSupportFiles(session.id);
-  const agent = await agents.loadAgent(session.agentId);
+  const executingAgentId = options.agentId ?? session.assignedAgentId;
+  if (!executingAgentId) {
+    throw new Error(`Session has no assigned agent. Run \`cosia session assign ${session.id} --agent <agent-id>\` or pass --agent <agent-id>.`);
+  }
+  const agent = await agents.loadAgent(executingAgentId);
   const policyManager = new PolicyManager(workspaceRoot);
   const policy = await policyManager.loadPolicy();
   if (await policyManager.ensureMarkdownCurrent()) {
@@ -47,7 +52,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const policyEngine = new PolicyEngine(policy);
   const audit = new PolicyAuditLog(workspaceRoot);
   const runId = randomUUID();
-  const recordPolicyEvent = (event: Parameters<PolicyAuditLog["append"]>[1]) => audit.append(session, event, runId);
+  const recordPolicyEvent = (event: Parameters<PolicyAuditLog["append"]>[2]) => audit.append(session, agent.id, event, runId);
   if (options.refreshReferenceMemory ?? true) {
     await memory.writeReferenceMemory(session, options.prompt);
   }
@@ -115,7 +120,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         continue;
       }
       finalContent = output.step.content;
-      const candidates = await memory.appendCandidates(output.step.memoryCandidates, session, runId);
+      const candidates = await memory.appendCandidates(output.step.memoryCandidates, session, runId, agent.id);
       if (candidates.length) {
         const summary = await memory.reviewCandidates(candidates, policy.memory.autoPromotion);
         options.onMemoryReview?.(summary);
@@ -124,7 +129,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
           options.onEvent?.(line);
         }
       }
-      const skillCandidates = skills.appendCandidates(output.step.skillCandidates, session, runId);
+      const skillCandidates = skills.appendCandidates(output.step.skillCandidates, session, runId, agent.id);
       if (skillCandidates.length) {
         options.onEvent?.(`skill review: ${skillCandidates.length} candidates pending`);
         for (const candidate of skillCandidates) {
@@ -156,7 +161,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     throw new Error(`Run did not produce a final answer after ${maxToolCalls} tool calls. Last step: ${JSON.stringify(lastStep)}`);
   }
 
-  await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames));
+  await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames, agent.id));
   if (options.refreshReferenceMemoryAfterRun ?? options.refreshReferenceMemory ?? true) {
     await memory.writeReferenceMemory(session, options.prompt);
   }
@@ -167,8 +172,11 @@ async function complete(provider: ModelProvider, prompt: string, sessionId: stri
   return provider.complete({ prompt, sessionId });
 }
 
-function contextEntry(prompt: string, finalContent: string, toolNames: string[]): string {
+function contextEntry(prompt: string, finalContent: string, toolNames: string[], agentId: string): string {
   return `## Run ${new Date().toISOString()}
+
+Agent:
+${agentId}
 
 Prompt:
 ${prompt}

@@ -45,6 +45,7 @@ export type PromptManifest = {
   modelStep?: number;
   timestamp: string;
   sessionId: string;
+  agentId?: string;
   maxPromptChars: number;
   safetyMarginChars: number;
   targetPromptChars: number;
@@ -139,6 +140,7 @@ export async function buildPromptBundle(input: PromptInput): Promise<PromptBuild
   const targetPromptChars = Math.max(1, budget.maxPromptChars - safetyMarginChars);
   return assembleWithBudget(blocks, {
     sessionId: input.session.id,
+    agentId: input.agent.id,
     runId: input.runId,
     modelStep: input.modelStep,
     maxPromptChars: budget.maxPromptChars,
@@ -253,7 +255,7 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
 
 function assembleWithBudget(
   blocks: PromptBlock[],
-  input: Pick<PromptManifest, "sessionId" | "runId" | "modelStep" | "maxPromptChars" | "safetyMarginChars" | "targetPromptChars" | "skillSelections">
+  input: Pick<PromptManifest, "sessionId" | "agentId" | "runId" | "modelStep" | "maxPromptChars" | "safetyMarginChars" | "targetPromptChars" | "skillSelections">
 ): PromptBuildResult {
   const working = blocks.map((block) => ({
     ...block,
@@ -288,6 +290,7 @@ function assembleWithBudget(
     modelStep: input.modelStep,
     timestamp: new Date().toISOString(),
     sessionId: input.sessionId,
+    agentId: input.agentId,
     maxPromptChars: input.maxPromptChars,
     safetyMarginChars: input.safetyMarginChars,
     targetPromptChars: input.targetPromptChars,

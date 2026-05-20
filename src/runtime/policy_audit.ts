@@ -14,13 +14,13 @@ export type PolicyAuditListOptions = {
 export class PolicyAuditLog {
   constructor(private readonly workspaceRoot: string) {}
 
-  async append(session: SessionMetadata, input: PolicyAuditEventInput, runId?: string): Promise<void> {
+  async append(session: SessionMetadata, agentId: string, input: PolicyAuditEventInput, runId?: string): Promise<void> {
     const event: PolicyAuditEvent = {
       id: randomUUID(),
       runId,
       timestamp: new Date().toISOString(),
       sessionId: session.id,
-      agentId: session.agentId,
+      agentId,
       ...input
     };
     await ensureDir(this.sessionDir(session.id));

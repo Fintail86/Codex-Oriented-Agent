@@ -24,22 +24,22 @@ export type ContextHealth = {
 export class SessionManager {
   constructor(private readonly workspaceRoot: string) {}
 
-  async createSession(agentId: string, goal: string): Promise<SessionMetadata> {
+  async createSession(assignedAgentId: string | null, goal: string): Promise<SessionMetadata> {
     await ensureDir(this.sessionsDir());
-    const id = await this.nextSessionId(agentId);
+    const id = await this.nextSessionId();
     const sessionDir = this.sessionDir(id);
     await ensureDir(sessionDir);
     const now = new Date().toISOString();
     const metadata: SessionMetadata = {
       id,
-      agentId,
+      assignedAgentId,
       status: "active",
       goal,
       createdAt: now,
       updatedAt: now
     };
-    await writeFile(join(sessionDir, "session.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-    await writeText(join(sessionDir, "SESSION.md"), `# SESSION\n\n- id: ${id}\n- agent: ${agentId}\n- status: active\n- goal: ${goal}\n`);
+    await this.writeSessionMetadata(metadata);
+    await this.writeSessionMarkdown(metadata);
     await writeTextIfMissing(join(sessionDir, "SESSION_RULES.md"), "# SESSION RULES\n\nNo session-only rules yet.\n");
     await writeTextIfMissing(join(sessionDir, "SESSION_SUMMARY.md"), "# SESSION SUMMARY\n\nNo compact session summary yet.\n");
     await writeTextIfMissing(join(sessionDir, "CONTEXT_MEMORY.md"), "# CONTEXT MEMORY\n\n");
@@ -54,10 +54,14 @@ export class SessionManager {
   async loadSession(sessionId: string): Promise<SessionMetadata> {
     const sessionPath = join(this.sessionDir(sessionId), "session.json");
     const parsed = JSON.parse(await readText(sessionPath));
-    return sessionMetadataSchema.parse(parsed);
+    const session = sessionMetadataSchema.parse(parsed);
+    if (parsed.agentId !== undefined || parsed.assignedAgentId !== session.assignedAgentId) {
+      await this.writeSessionMetadata(session);
+    }
+    return session;
   }
 
-  async listSessions(): Promise<SessionMetadata[]> {
+  async listSessions(options: { agentId?: string } = {}): Promise<SessionMetadata[]> {
     if (!(await pathExists(this.sessionsDir()))) {
       return [];
     }
@@ -68,12 +72,27 @@ export class SessionManager {
         continue;
       }
       try {
-        sessions.push(await this.loadSession(entry.name));
+        const session = await this.loadSession(entry.name);
+        if (!options.agentId || session.assignedAgentId === options.agentId) {
+          sessions.push(session);
+        }
       } catch {
         // Ignore incomplete session folders in status/list output.
       }
     }
     return sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  async assignAgent(sessionId: string, agentId: string | null): Promise<SessionMetadata> {
+    const session = await this.loadSession(sessionId);
+    const next: SessionMetadata = {
+      ...session,
+      assignedAgentId: agentId,
+      updatedAt: new Date().toISOString()
+    };
+    await this.writeSessionMetadata(next);
+    await this.writeSessionMarkdown(next);
+    return next;
   }
 
   async ensureSessionSupportFiles(sessionId: string): Promise<void> {
@@ -187,13 +206,23 @@ export class SessionManager {
     return join(this.workspaceRoot, "sessions");
   }
 
-  private async nextSessionId(agentId: string): Promise<string> {
+  private async nextSessionId(): Promise<string> {
     const date = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-    const safeAgent = agentId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const prefix = `session_${date}_${safeAgent}_`;
+    const prefix = `session_${date}_`;
     const entries = (await pathExists(this.sessionsDir())) ? await readdir(this.sessionsDir()) : [];
     const next = entries.filter((entry) => entry.startsWith(prefix)).length + 1;
     return `${prefix}${String(next).padStart(3, "0")}`;
+  }
+
+  private async writeSessionMetadata(metadata: SessionMetadata): Promise<void> {
+    await writeFile(join(this.sessionDir(metadata.id), "session.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  }
+
+  private async writeSessionMarkdown(metadata: SessionMetadata): Promise<void> {
+    await writeText(
+      join(this.sessionDir(metadata.id), "SESSION.md"),
+      `# SESSION\n\n- id: ${metadata.id}\n- assigned agent: ${metadata.assignedAgentId ?? "none"}\n- status: ${metadata.status}\n- goal: ${metadata.goal}\n`
+    );
   }
 }
 

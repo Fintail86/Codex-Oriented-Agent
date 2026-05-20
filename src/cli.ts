@@ -17,7 +17,7 @@ import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResul
 import { getStatusReport } from "./runtime/status_report.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema } from "./runtime/types.js";
-import type { ToolName } from "./runtime/types.js";
+import type { SessionMetadata, ToolName } from "./runtime/types.js";
 import { COSIA_VERSION } from "./runtime/version.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
 
@@ -216,6 +216,22 @@ agent
     });
   });
 
+agent
+  .command("sessions")
+  .argument("<agent-id>")
+  .description("List sessions currently assigned to an agent.")
+  .action(async (agentId: string) => {
+    await main(async (workspaceRoot) => {
+      await new AgentManager(workspaceRoot).loadAgent(agentId);
+      const sessions = await new SessionManager(workspaceRoot).listSessions({ agentId });
+      if (!sessions.length) {
+        console.log(`No sessions assigned to ${agentId}.`);
+        return;
+      }
+      await printSessionList(workspaceRoot, sessions);
+    });
+  });
+
 const session = program.command("session").description("Manage sessions.");
 
 session
@@ -240,17 +256,40 @@ session
 
 session
   .command("list")
+  .option("--agent <agent-id>", "Only show sessions assigned to this agent.")
   .description("List sessions.")
-  .action(async () => {
+  .action(async (options: { agent?: string }) => {
     await main(async (workspaceRoot) => {
-      const sessions = await new SessionManager(workspaceRoot).listSessions();
+      const sessions = await new SessionManager(workspaceRoot).listSessions({ agentId: options.agent });
       if (!sessions.length) {
         console.log("No sessions.");
         return;
       }
-      for (const item of sessions) {
-        console.log(`${item.id}\t${item.agentId}\t${item.status}\t${item.updatedAt}\t${item.goal}`);
-      }
+      await printSessionList(workspaceRoot, sessions);
+    });
+  });
+
+session
+  .command("assign")
+  .argument("<session-id>")
+  .requiredOption("--agent <agent-id>", "Agent id to assign.")
+  .description("Assign a session to an existing agent.")
+  .action(async (sessionId: string, options: { agent: string }) => {
+    await main(async (workspaceRoot) => {
+      await new AgentManager(workspaceRoot).loadAgent(options.agent);
+      const metadata = await new SessionManager(workspaceRoot).assignAgent(sessionId, options.agent);
+      console.log(`Assigned ${metadata.id} to ${metadata.assignedAgentId}`);
+    });
+  });
+
+session
+  .command("unassign")
+  .argument("<session-id>")
+  .description("Remove a session's assigned agent.")
+  .action(async (sessionId: string) => {
+    await main(async (workspaceRoot) => {
+      const metadata = await new SessionManager(workspaceRoot).assignAgent(sessionId, null);
+      console.log(`Unassigned ${metadata.id}`);
     });
   });
 
@@ -1018,17 +1057,19 @@ program
   .command("run")
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
+  .option("--agent <agent-id>", "Agent id for this run. Overrides the session assignment without changing it.")
   .option("--provider <provider>", "Model provider: codex-cli or mock")
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .option("--skill <skill-id...>", "Manually include one or more global skills.")
   .description("Run a session turn.")
-  .action(async (options: { session: string; prompt: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
+  .action(async (options: { session: string; prompt: string; agent?: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
       const content = await runSession(workspaceRoot, {
         sessionId: options.session,
         prompt: options.prompt,
+        agentId: options.agent,
         providerId: options.provider,
         providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
         approveOverwriteFiles: options.approveOverwrite,
@@ -1043,18 +1084,23 @@ program
 program
   .command("chat")
   .requiredOption("--session <session-id>", "Session id")
+  .option("--agent <agent-id>", "Agent id for this chat. Overrides the session assignment without changing it.")
   .option("--provider <provider>", "Model provider: codex-cli or mock")
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
   .option("--skill <skill-id...>", "Manually include one or more global skills.")
   .description("Enter a simple session REPL.")
-  .action(async (options: { session: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
+  .action(async (options: { session: string; agent?: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
       const sessions = new SessionManager(workspaceRoot);
       const session = await sessions.loadSession(options.session);
       await sessions.ensureSessionSupportFiles(session.id);
-      const agent = await new AgentManager(workspaceRoot).loadAgent(session.agentId);
+      const executingAgentId = options.agent ?? session.assignedAgentId;
+      if (!executingAgentId) {
+        throw new Error(`Session has no assigned agent. Run \`cosia session assign ${session.id} --agent <agent-id>\` or pass --agent <agent-id>.`);
+      }
+      const agent = await new AgentManager(workspaceRoot).loadAgent(executingAgentId);
       const policyManager = new PolicyManager(workspaceRoot);
       const policy = await policyManager.loadPolicy();
       if (await policyManager.ensureMarkdownCurrent()) {
@@ -1085,7 +1131,8 @@ program
           }
           if (prompt === "/status") {
             console.log(`Session: ${session.id}`);
-            console.log(`Agent: ${session.agentId}`);
+            console.log(`Assigned agent: ${session.assignedAgentId ?? "none"}`);
+            console.log(`Executing agent: ${agent.id}`);
             console.log(`Provider: ${options.provider ?? policy.model.defaultProvider}`);
             console.log(`Prompt budget: ${policy.promptBudget.maxPromptChars} chars`);
             console.log(`Context tail: ${policy.promptBudget.contextTailChars} chars`);
@@ -1152,6 +1199,7 @@ program
           const content = await runSession(workspaceRoot, {
             sessionId: session.id,
             prompt,
+            agentId: agent.id,
             providerId: options.provider,
             providerTimeoutMs: Number.parseInt(options.providerTimeoutMs, 10),
             approveOverwriteFiles: options.approveOverwrite,
@@ -1264,6 +1312,7 @@ function splitList(value: string | undefined): string[] {
 function formatPromptManifest(manifest: PromptManifest): string {
   const lines = [
     `Run: ${manifest.runId ?? "legacy/no-run-id"}`,
+    `Agent: ${manifest.agentId ?? "legacy/unknown"}`,
     `Model step: ${manifest.modelStep ?? "unknown"}`,
     `Timestamp: ${manifest.timestamp}`,
     `Prompt chars: ${manifest.promptChars}/${manifest.maxPromptChars}`,
@@ -1282,6 +1331,20 @@ function formatPromptManifest(manifest: PromptManifest): string {
     }
   }
   return lines.join("\n");
+}
+
+async function printSessionList(workspaceRoot: string, sessions: SessionMetadata[]): Promise<void> {
+  const agents = await new AgentManager(workspaceRoot).listAgents();
+  const knownAgentIds = new Set(agents.map((agent) => agent.id));
+  for (const item of sessions) {
+    const assigned = item.assignedAgentId ?? "none";
+    const assignmentStatus = item.assignedAgentId
+      ? knownAgentIds.has(item.assignedAgentId)
+        ? "assigned"
+        : "orphan"
+      : "unassigned";
+    console.log(`${item.id}\t${assigned}\t${assignmentStatus}\t${item.status}\t${item.updatedAt}\t${item.goal}`);
+  }
 }
 
 function formatContextHealth(health: { sessionId: string; chars: number; warningChars: number; criticalChars: number; level: string }): string {

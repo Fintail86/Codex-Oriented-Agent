@@ -77,8 +77,8 @@ export class SkillManager {
     this.mirror.ensureGlobalMirror();
   }
 
-  appendCandidates(candidates: SkillCandidate[] | undefined, session: SessionMetadata, runId?: string): SkillCandidateRecord[] {
-    return this.candidates.appendCandidates(candidates, session, runId);
+  appendCandidates(candidates: SkillCandidate[] | undefined, session: SessionMetadata, runId?: string, sourceAgentId?: string): SkillCandidateRecord[] {
+    return this.candidates.appendCandidates(candidates, session, runId, sourceAgentId);
   }
 
   listCandidates(includeAll = false): SkillCandidateView[] {
