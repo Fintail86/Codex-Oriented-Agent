@@ -1,10 +1,10 @@
-# COSIA v0.16.0
+# COSIA v0.17.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.16.0 adds explicit session context maintenance: status, model-assisted summary preview, and safe run-block compaction into `CONTEXT_ARCHIVE.md`.
+v0.17.0 fixes the MVP acceptance line: `codex-cli` OAuth is the required manual acceptance provider, while `mock` remains a regression-only provider.
 
 ## Requirements
 
@@ -67,13 +67,16 @@ cosia tool git-status
 cosia provider list
 cosia provider check codex-cli
 cosia provider check openrouter
+cosia mvp checklist
 ```
 
-For runtime-only verification without Codex login:
+For runtime-only regression checks without Codex login:
 
 ```powershell
 cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
+
+`mock` is not an MVP readiness signal. Manual MVP acceptance must pass with `codex-cli`.
 
 To force COSIA to inspect files before answering:
 
@@ -91,6 +94,7 @@ Provider setup:
 
 - `codex-cli` is the default provider and uses the user's existing Codex CLI login.
 - COSIA never reads or stores Codex token files.
+- `mock` is for deterministic regression tests only.
 - `openai-compatible` is available in `codex/POLICY.json` but starts disabled.
 - `openrouter` is available as a disabled `openai-compatible` preset.
 - API keys are read only from the configured environment variable, default `OPENAI_API_KEY`.
@@ -154,6 +158,7 @@ cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
 cosia provider list
 cosia provider check <provider-id>
+cosia mvp checklist
 cosia memory add --tier <tier> --owner-id <owner-id> --content "<content>"
 cosia memory add --scope <scope> --content "<content>"
 cosia memory search --query "<query>" --tier <tier> --owner-id <owner-id> --show-score
@@ -223,6 +228,7 @@ cosia session show <session-id>
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `openai-compatible` is implemented but disabled by default. Its API key is read only from the configured environment variable.
+- `mock` provider success proves regression safety only; MVP acceptance requires `codex-cli`.
 - Provider failures are reported with reason codes and short next-action hints.
 - Invalid AgentStep JSON triggers a bounded structured retry that includes the parse error and a short malformed-output preview.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -280,6 +286,19 @@ cosia policy audit --session <session-id> --latest-run --json
 
 `policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source. Use `policy check --repair` to regenerate a stale or missing Markdown mirror without changing the JSON source.
 Policy audit logs are append-only per session. Each new `run` writes a `runId`, so `--latest-run` or `--run-id <id>` can focus the output. The default audit output is a readable summary; use `--json` for raw events. Clear/archive commands are intentionally deferred to a later maintenance pass.
+
+## MVP Acceptance
+
+```powershell
+cosia mvp checklist
+```
+
+Detailed manual acceptance steps live in [MVP_ACCEPTANCE.md](MVP_ACCEPTANCE.md). The short version is:
+
+- `mock` is allowed for unit/integration regression only.
+- `codex-cli` through Codex OAuth is required for MVP acceptance.
+- OpenRouter/openai-compatible providers are optional acceptance paths.
+- Every acceptance step has a command, expected outcome, and failure hint.
 
 ## Agent Lifecycle
 
@@ -446,7 +465,6 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.16: Context maintenance workflow.
 - v0.17: MVP acceptance polish and release checklist.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.

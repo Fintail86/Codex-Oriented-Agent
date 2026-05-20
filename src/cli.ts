@@ -8,6 +8,7 @@ import {
 } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
+import { formatMvpChecklist } from "./runtime/mvp_checklist.js";
 import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
@@ -103,6 +104,15 @@ providerCommand
         console.log(`Hint: ${result.hint}`);
       }
     });
+  });
+
+const mvp = program.command("mvp").description("MVP acceptance helpers.");
+
+mvp
+  .command("checklist")
+  .description("Print the manual COSIA MVP acceptance checklist.")
+  .action(() => {
+    console.log(formatMvpChecklist());
   });
 
 program

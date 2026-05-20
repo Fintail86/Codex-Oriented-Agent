@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager, formatAgentRecommendation } from "../src/runtime/agent_manager.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMemoryText } from "../src/runtime/memory_manager.js";
+import { formatMvpChecklist } from "../src/runtime/mvp_checklist.js";
 import { modelInstructionForRetry, parseModelOutput } from "../src/runtime/model/model_provider.js";
 import { ProviderError } from "../src/runtime/model/provider_errors.js";
 import { checkProvider, createProvider, listProviders } from "../src/runtime/model/provider_registry.js";
@@ -95,7 +96,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.16.0\"");
+    expect(policyJson).toContain("\"version\": \"0.17.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -2181,7 +2182,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.16.0");
+    expect(emptyReport.version).toBe("0.17.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -2208,5 +2209,20 @@ describe("status and listing", () => {
     expect(report.largestContext?.sessionId).toBe(session.id);
     expect(await sessions.listSessions()).toHaveLength(1);
     expect(memory.listMemories()).toHaveLength(1);
+  });
+
+  it("prints MVP acceptance checklist and documents expected outcomes", async () => {
+    const checklist = formatMvpChecklist();
+    expect(checklist).toContain("COSIA MVP Acceptance Checklist");
+    expect(checklist).toContain("[ ] 1. Environment and build");
+    expect(checklist).toContain("mock: regression only");
+    expect(checklist).toContain("codex-cli: required MVP acceptance provider");
+    expect(checklist).toContain("Command:");
+    expect(checklist).toContain("Expected:");
+
+    const acceptance = await readFile(join(process.cwd(), "MVP_ACCEPTANCE.md"), "utf8");
+    expect(acceptance).toContain("codex-cli");
+    expect(acceptance).toContain("mock");
+    expect((acceptance.match(/Expected Outcome:/g) ?? []).length).toBeGreaterThanOrEqual(10);
   });
 });
