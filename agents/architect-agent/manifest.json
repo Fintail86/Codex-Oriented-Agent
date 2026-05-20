@@ -12,8 +12,13 @@
     "npm_test",
     "npm_typecheck"
   ],
-  "skills": [],
-  "skillTriggers": {},
+  "preferredSkills": [
+    "git-commit-convention"
+  ],
+  "blockedSkills": [],
+  "skillWeights": {
+    "git-commit-convention": 2
+  },
   "memoryScopes": [
     "agent",
     "project",

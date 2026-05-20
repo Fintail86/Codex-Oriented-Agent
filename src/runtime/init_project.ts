@@ -7,7 +7,7 @@ import { SkillManager } from "./skill_manager.js";
 
 export async function initProject(workspaceRoot: string): Promise<string[]> {
   const created: string[] = [];
-  for (const dir of ["codex", "agents", "sessions", "memory"]) {
+  for (const dir of ["codex", "agents", "sessions", "memory", "skills"]) {
     await ensureDir(join(workspaceRoot, dir));
     created.push(`${dir}/`);
   }

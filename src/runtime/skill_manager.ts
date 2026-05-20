@@ -1,9 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { dirname, join, relative } from "node:path";
+import { join, relative } from "node:path";
 import { detectSecrets } from "./risk_classifier.js";
-import { agentManifestSchema, type AgentManifest, type RiskLevel, type SessionMetadata, type SkillCandidate, skillCandidateRecordSchema, type SkillCandidateRecord } from "./types.js";
+import {
+  agentManifestSchema,
+  skillCandidateRecordSchema,
+  skillMetadataSchema,
+  type AgentManifest,
+  type RiskLevel,
+  type SessionMetadata,
+  type SkillCandidate,
+  type SkillCandidateRecord,
+  type SkillMetadata
+} from "./types.js";
 
 type SkillCandidateRow = {
   id: string;
@@ -15,24 +25,26 @@ export type SkillCandidateView = {
   record: SkillCandidateRecord;
 };
 
-export type SkillRecord = {
-  id: string;
-  agentId: string;
+export type SkillRecord = SkillMetadata & {
   path: string;
+  metadataPath: string;
   content: string;
-  triggers: string[];
   manualOnly: boolean;
 };
 
 export type SkillCheckResult = {
   ok: boolean;
-  agentId: string;
+  scope: "global" | "agent";
+  agentId?: string;
   mirrorExists: boolean;
   mirrorMatches: boolean;
   repaired: boolean;
   missingSkillFiles: string[];
+  missingMetadataFiles: string[];
   orphanSkillFiles: string[];
   manualOnlySkills: string[];
+  missingPreferredSkills: string[];
+  missingBlockedSkills: string[];
 };
 
 export type SkillTriggerMatch = {
@@ -42,17 +54,38 @@ export type SkillTriggerMatch = {
   matchedFrom: Array<"current_request" | "session_goal">;
 };
 
+export type SkillSelectionStatus = "SELECTED" | "OMITTED" | "BLOCKED";
+
 export type SkillSelectionManifest = {
   skillId: string;
   selected: boolean;
   selectedBy: "manual" | "trigger";
   triggerScore: number;
+  preferredBonus: number;
+  weightBonus: number;
+  finalScore: number;
   matchedTriggers: string[];
   matchedFrom: Array<"current_request" | "session_goal">;
   originalChars: number;
   retainedChars: number;
   truncated: boolean;
   omittedReason?: string;
+};
+
+export type SkillSelectionExplainRow = {
+  skillId: string;
+  status: SkillSelectionStatus;
+  selectedBy: "manual" | "trigger" | "none";
+  triggerScore: number;
+  preferredBonus: number;
+  weightBonus: number;
+  finalScore: number;
+  matchedTriggers: string[];
+  matchedFrom: Array<"current_request" | "session_goal">;
+  reason: string;
+  originalChars: number;
+  retainedChars: number;
+  truncated: boolean;
 };
 
 export type SkillPromptBlock = {
@@ -70,24 +103,44 @@ export type SkillBudget = {
 type PromoteSkillOptions = {
   yes?: boolean;
   confirmHighRisk?: string;
+  preferFor?: string;
 };
 
 export type PromoteSkillResult = {
   changed: boolean;
   record: SkillCandidateRecord;
   skillPath: string;
-  manifestPath: string;
+  metadataPath: string;
   skillsIndexPath: string;
+  preferredAgentId?: string;
   warning?: string;
 };
 
+export type SkillMigrationResult = {
+  agentId: string;
+  changed: boolean;
+  migrated: string[];
+  skipped: Array<{ skillId: string; reason: string }>;
+};
+
+type RankedSkill = {
+  skill: SkillRecord;
+  selectedBy: "manual" | "trigger";
+  match: SkillTriggerMatch;
+  preferredBonus: number;
+  weightBonus: number;
+  finalScore: number;
+};
+
 const highRiskConfirmPhrase = "PROMOTE HIGH RISK SKILL";
+const preferredSkillBonus = 3;
 
 export class SkillManager {
   constructor(private readonly workspaceRoot: string) {}
 
   ensureSchema(): void {
     this.ensureMemoryDir();
+    this.ensureSkillFiles();
     const db = this.open();
     try {
       db.exec(`
@@ -117,6 +170,14 @@ export class SkillManager {
     }
   }
 
+  ensureSkillFiles(): void {
+    this.ensureSkillsDir();
+    const indexPath = this.globalSkillsIndexPath();
+    if (!existsSync(indexPath)) {
+      writeFileSync(indexPath, renderGlobalSkillsIndex(this.readSkillRecords()), "utf8");
+    }
+  }
+
   appendCandidates(candidates: SkillCandidate[] | undefined, session: SessionMetadata, runId?: string): SkillCandidateRecord[] {
     if (!candidates?.length) {
       return [];
@@ -125,17 +186,19 @@ export class SkillManager {
     const now = new Date().toISOString();
     const records = candidates.map((candidate) => {
       const id = randomUUID();
+      const suggestedByAgentId = candidate.agentId || session.agentId;
       const triggers = normalizeTriggers(candidate.triggers ?? []);
       const record: SkillCandidateRecord = {
         id,
         status: "pending",
-        agentId: candidate.agentId || session.agentId,
+        agentId: suggestedByAgentId,
         skillName: candidate.skillName,
         skillId: slugifySkillId(candidate.skillName, id),
         reason: candidate.reason,
         content: candidate.content,
         triggers,
         riskLevel: classifySkillRisk(candidate),
+        suggestedByAgentId,
         sourceSessionId: session.id,
         sourceAgentId: session.agentId,
         runId,
@@ -204,42 +267,53 @@ export class SkillManager {
     if (record.status !== "pending") {
       throw new Error(`Skill candidate is not pending: ${candidateId}`);
     }
-    const agentDir = this.agentDir(record.agentId);
-    const skillPath = this.skillPath(record.agentId, record.skillId);
-    const manifestPath = join(agentDir, "manifest.json");
-    const skillsIndexPath = join(agentDir, "SKILLS.md");
+    this.ensureSkillFiles();
+    const skillPath = this.skillPath(record.skillId);
+    const metadataPath = this.skillMetadataPath(record.skillId);
+    const skillsIndexPath = this.globalSkillsIndexPath();
     const warning = record.triggers.length
       ? undefined
       : "Warning: this skill has no triggers and will be manual-only unless selected with --skill or /skills use.";
 
-    if (existsSync(skillPath)) {
+    if (existsSync(skillPath) || existsSync(metadataPath)) {
       throw new Error(`Skill already exists: ${record.skillId}`);
     }
+    if (options.preferFor) {
+      const manifest = this.readAgentManifest(options.preferFor);
+      if (manifest.blockedSkills.includes(record.skillId)) {
+        throw new Error(`Cannot prefer a blocked skill for ${options.preferFor}: ${record.skillId}`);
+      }
+    }
     if (!options.yes) {
-      return { changed: false, record, skillPath, manifestPath, skillsIndexPath, warning };
+      return { changed: false, record, skillPath, metadataPath, skillsIndexPath, preferredAgentId: options.preferFor, warning };
     }
     if (record.riskLevel === "high" && options.confirmHighRisk !== highRiskConfirmPhrase) {
       throw new Error(`High-risk skill promotion requires --confirm-high-risk "${highRiskConfirmPhrase}"`);
     }
 
-    mkdirSync(dirname(skillPath), { recursive: true });
+    const now = new Date().toISOString();
+    const metadata: SkillMetadata = skillMetadataSchema.parse({
+      id: record.skillId,
+      name: record.skillName,
+      description: record.reason,
+      triggers: record.triggers,
+      riskLevel: record.riskLevel,
+      createdAt: now,
+      updatedAt: now,
+      sourceCandidateId: record.id,
+      suggestedByAgentId: record.suggestedByAgentId ?? record.agentId
+    });
     writeFileSync(skillPath, renderSkillFile(record), "utf8");
-    const manifest = this.readAgentManifest(record.agentId);
-    const nextManifest: AgentManifest = {
-      ...manifest,
-      skills: [...new Set([...manifest.skills, record.skillId])],
-      skillTriggers: {
-        ...(manifest.skillTriggers ?? {}),
-        [record.skillId]: record.triggers
-      }
-    };
-    this.writeAgentManifest(record.agentId, nextManifest);
-    this.writeSkillsIndex(record.agentId, nextManifest);
+    writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+    this.writeGlobalSkillsIndex();
+    if (options.preferFor) {
+      this.preferSkill(record.skillId, options.preferFor);
+    }
 
     const updated = {
       ...record,
       status: "promoted" as const,
-      reviewedAt: new Date().toISOString(),
+      reviewedAt: now,
       promotedSkillId: record.skillId
     };
     const db = this.open();
@@ -248,72 +322,188 @@ export class SkillManager {
     } finally {
       db.close();
     }
-    return { changed: true, record: updated, skillPath, manifestPath, skillsIndexPath, warning };
+    return { changed: true, record: updated, skillPath, metadataPath, skillsIndexPath, preferredAgentId: options.preferFor, warning };
   }
 
-  listSkills(agentId: string): SkillRecord[] {
-    const manifest = this.readAgentManifest(agentId);
-    return manifest.skills.map((skillId) => this.getSkill(agentId, skillId));
+  listSkills(): SkillRecord[] {
+    this.ensureSkillFiles();
+    return this.readSkillRecords();
   }
 
-  getSkill(agentId: string, skillId: string): SkillRecord {
-    const manifest = this.readAgentManifest(agentId);
-    const resolvedSkillId = resolveSkillId(manifest.skills, skillId);
-    const skillPath = this.skillPath(agentId, resolvedSkillId);
-    if (!existsSync(skillPath)) {
+  getSkill(skillId: string): SkillRecord {
+    const resolvedSkillId = this.resolveSkillId(skillId);
+    const skill = this.readSkillRecord(resolvedSkillId);
+    if (!existsSync(skill.path)) {
       throw new Error(`Skill file not found: ${resolvedSkillId}`);
     }
-    const content = readFileSync(skillPath, "utf8");
-    const triggers = manifest.skillTriggers?.[resolvedSkillId] ?? [];
-    return {
-      id: resolvedSkillId,
-      agentId,
-      path: skillPath,
-      content,
-      triggers,
-      manualOnly: triggers.length === 0
-    };
+    return skill;
   }
 
-  syncSkillsIndex(agentId: string): string {
-    const manifest = this.readAgentManifest(agentId);
-    this.writeSkillsIndex(agentId, manifest);
-    return join(this.agentDir(agentId), "SKILLS.md");
+  resolveSkillId(skillId: string): string {
+    return resolveSkillId(this.readSkillRecords().map((skill) => skill.id), skillId);
   }
 
-  checkSkills(agentId: string, repair = false): SkillCheckResult {
-    const manifest = this.readAgentManifest(agentId);
-    const skillsDir = join(this.agentDir(agentId), "skills");
-    if (!existsSync(skillsDir)) {
-      mkdirSync(skillsDir, { recursive: true });
+  syncSkillsIndex(agentId?: string): string {
+    if (agentId) {
+      const manifest = this.readAgentManifest(agentId);
+      const path = this.agentSkillsIndexPath(agentId);
+      writeFileSync(path, renderAgentSkillsIndex(agentId, manifest, this.readSkillRecords()), "utf8");
+      return path;
     }
-    const mirrorPath = join(this.agentDir(agentId), "SKILLS.md");
-    const expectedMirror = renderSkillsIndex(agentId, manifest);
+    this.writeGlobalSkillsIndex();
+    return this.globalSkillsIndexPath();
+  }
+
+  checkSkills(agentId?: string, repair = false): SkillCheckResult {
+    this.ensureSkillsDir();
+    const skills = this.readSkillRecords();
+    const metadataIds = new Set(skills.map((skill) => skill.id));
+    const mdIds = new Set(this.readSkillMarkdownIds());
+    const missingSkillFiles = skills.filter((skill) => !mdIds.has(skill.id)).map((skill) => skill.id);
+    const orphanSkillFiles = [...mdIds].filter((skillId) => !metadataIds.has(skillId)).sort();
+    const missingMetadataFiles = orphanSkillFiles;
+    const manualOnlySkills = skills.filter((skill) => skill.triggers.length === 0).map((skill) => skill.id);
+    const manifest = agentId ? this.readAgentManifest(agentId) : undefined;
+    const missingPreferredSkills = manifest ? manifest.preferredSkills.filter((skillId) => !metadataIds.has(skillId)).sort() : [];
+    const missingBlockedSkills = manifest ? manifest.blockedSkills.filter((skillId) => !metadataIds.has(skillId)).sort() : [];
+    const mirrorPath = agentId ? this.agentSkillsIndexPath(agentId) : this.globalSkillsIndexPath();
+    const expectedMirror = agentId
+      ? renderAgentSkillsIndex(agentId, manifest!, skills)
+      : renderGlobalSkillsIndex(skills);
     const mirrorExists = existsSync(mirrorPath);
-    let mirrorMatches = mirrorExists && readFileSync(mirrorPath, "utf8").replace(/\r\n/g, "\n") === expectedMirror.replace(/\r\n/g, "\n");
+    let mirrorMatches = mirrorExists && normalizeNewlines(readFileSync(mirrorPath, "utf8")) === normalizeNewlines(expectedMirror);
     let repaired = false;
-    const missingSkillFiles = manifest.skills.filter((skillId) => !existsSync(this.skillPath(agentId, skillId)));
-    const skillSet = new Set(manifest.skills);
-    const orphanSkillFiles = readdirSync(skillsDir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-      .map((entry) => entry.name.slice(0, -3))
-      .filter((skillId) => !skillSet.has(skillId));
-    const manualOnlySkills = manifest.skills.filter((skillId) => (manifest.skillTriggers?.[skillId] ?? []).length === 0);
     if (repair && !mirrorMatches) {
-      this.writeSkillsIndex(agentId, manifest);
+      writeFileSync(mirrorPath, expectedMirror, "utf8");
       mirrorMatches = true;
       repaired = true;
     }
     return {
-      ok: mirrorMatches && missingSkillFiles.length === 0,
+      ok: mirrorMatches && missingSkillFiles.length === 0 && missingPreferredSkills.length === 0 && missingBlockedSkills.length === 0,
+      scope: agentId ? "agent" : "global",
       agentId,
       mirrorExists,
       mirrorMatches,
       repaired,
       missingSkillFiles,
+      missingMetadataFiles,
       orphanSkillFiles,
-      manualOnlySkills
+      manualOnlySkills,
+      missingPreferredSkills,
+      missingBlockedSkills
     };
+  }
+
+  preferSkill(skillId: string, agentId: string, weight?: number): AgentManifest {
+    const resolvedSkillId = this.resolveSkillId(skillId);
+    const manifest = this.readAgentManifest(agentId);
+    if (manifest.blockedSkills.includes(resolvedSkillId)) {
+      throw new Error(`Cannot prefer a blocked skill: ${resolvedSkillId}`);
+    }
+    const next: AgentManifest = {
+      ...manifest,
+      preferredSkills: [...new Set([...manifest.preferredSkills, resolvedSkillId])],
+      skillWeights: weight === undefined
+        ? manifest.skillWeights
+        : { ...manifest.skillWeights, [resolvedSkillId]: clampSkillWeight(weight) }
+    };
+    this.writeAgentManifest(agentId, next);
+    this.syncSkillsIndex(agentId);
+    return next;
+  }
+
+  unpreferSkill(skillId: string, agentId: string): AgentManifest {
+    const resolvedSkillId = this.resolveSkillId(skillId);
+    const manifest = this.readAgentManifest(agentId);
+    const next: AgentManifest = {
+      ...manifest,
+      preferredSkills: manifest.preferredSkills.filter((id) => id !== resolvedSkillId),
+      skillWeights: Object.fromEntries(Object.entries(manifest.skillWeights).filter(([id]) => id !== resolvedSkillId))
+    };
+    this.writeAgentManifest(agentId, next);
+    this.syncSkillsIndex(agentId);
+    return next;
+  }
+
+  blockSkill(skillId: string, agentId: string): AgentManifest {
+    const resolvedSkillId = this.resolveSkillId(skillId);
+    const manifest = this.readAgentManifest(agentId);
+    const next: AgentManifest = {
+      ...manifest,
+      blockedSkills: [...new Set([...manifest.blockedSkills, resolvedSkillId])],
+      preferredSkills: manifest.preferredSkills.filter((id) => id !== resolvedSkillId),
+      skillWeights: Object.fromEntries(Object.entries(manifest.skillWeights).filter(([id]) => id !== resolvedSkillId))
+    };
+    this.writeAgentManifest(agentId, next);
+    this.syncSkillsIndex(agentId);
+    return next;
+  }
+
+  unblockSkill(skillId: string, agentId: string): AgentManifest {
+    const resolvedSkillId = this.resolveSkillId(skillId);
+    const manifest = this.readAgentManifest(agentId);
+    const next: AgentManifest = {
+      ...manifest,
+      blockedSkills: manifest.blockedSkills.filter((id) => id !== resolvedSkillId)
+    };
+    this.writeAgentManifest(agentId, next);
+    this.syncSkillsIndex(agentId);
+    return next;
+  }
+
+  migrateAgentSkills(agentId: string, yes = false): SkillMigrationResult {
+    const manifest = this.readAgentManifest(agentId);
+    const legacyDir = join(this.agentDir(agentId), "skills");
+    const result: SkillMigrationResult = {
+      agentId,
+      changed: false,
+      migrated: [],
+      skipped: []
+    };
+    if (!existsSync(legacyDir)) {
+      return result;
+    }
+    const legacyFiles = readdirSync(legacyDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
+      .map((entry) => entry.name.slice(0, -3))
+      .sort((left, right) => left.localeCompare(right));
+    const now = new Date().toISOString();
+    const preferred = new Set(manifest.preferredSkills);
+    for (const skillId of legacyFiles) {
+      if (existsSync(this.skillPath(skillId)) || existsSync(this.skillMetadataPath(skillId))) {
+        result.skipped.push({ skillId, reason: "global skill already exists" });
+        continue;
+      }
+      result.migrated.push(skillId);
+      if (!yes) {
+        continue;
+      }
+      const legacyPath = join(legacyDir, `${skillId}.md`);
+      const content = readFileSync(legacyPath, "utf8");
+      const metadata: SkillMetadata = {
+        id: skillId,
+        name: titleFromMarkdown(content) ?? skillId,
+        triggers: normalizeTriggers(manifest.skillTriggers?.[skillId] ?? []),
+        riskLevel: "low",
+        createdAt: now,
+        updatedAt: now,
+        suggestedByAgentId: agentId
+      };
+      writeFileSync(this.skillPath(skillId), content, "utf8");
+      writeFileSync(this.skillMetadataPath(skillId), `${JSON.stringify(skillMetadataSchema.parse(metadata), null, 2)}\n`, "utf8");
+      preferred.add(skillId);
+    }
+    if (yes && result.migrated.length) {
+      const nextManifest: AgentManifest = {
+        ...manifest,
+        preferredSkills: [...preferred].sort((left, right) => left.localeCompare(right))
+      };
+      this.writeAgentManifest(agentId, nextManifest);
+      this.writeGlobalSkillsIndex();
+      this.syncSkillsIndex(agentId);
+      result.changed = true;
+    }
+    return result;
   }
 
   selectSkillPromptBlock(input: {
@@ -323,64 +513,108 @@ export class SkillManager {
     manualSkillIds?: string[];
     budget: SkillBudget;
   }): SkillPromptBlock | undefined {
-    const skills = input.agent.skills;
-    const manualSkillIds = [...new Set(input.manualSkillIds ?? [])].map((skillId) => resolveSkillId(skills, skillId));
-    const manifestOrder = new Map(skills.map((skillId, index) => [skillId, index]));
-    const matches = skills.map((skillId) => calculateSkillTriggerMatch({
-      skillId,
-      triggers: input.agent.skillTriggers?.[skillId] ?? [],
-      sessionGoal: input.sessionGoal,
-      currentRequest: input.currentRequest
-    }));
-    const candidates = matches
-      .map((match) => ({
-        match,
-        selectedBy: manualSkillIds.includes(match.skillId) ? "manual" as const : "trigger" as const
-      }))
-      .filter((item) => item.selectedBy === "manual" || item.match.score > 0)
-      .sort((left, right) => {
-        if (left.selectedBy !== right.selectedBy) {
-          return left.selectedBy === "manual" ? -1 : 1;
-        }
-        if (right.match.score !== left.match.score) {
-          return right.match.score - left.match.score;
-        }
-        return (manifestOrder.get(left.match.skillId) ?? 0) - (manifestOrder.get(right.match.skillId) ?? 0);
-      });
+    const selection = this.buildSkillSelection(input, false);
+    if (!selection.renderedSkills.length && !selection.manifest.length) {
+      return undefined;
+    }
+    return {
+      title: "SELECTED SKILLS",
+      content: `<available_skills>\n${selection.renderedSkills.join("\n")}\n</available_skills>`,
+      manifest: selection.manifest
+    };
+  }
 
-    const manifest: SkillSelectionManifest[] = [];
+  explainSkillSelection(input: {
+    agent: AgentManifest;
+    sessionGoal: string;
+    currentRequest: string;
+    manualSkillIds?: string[];
+    budget: SkillBudget;
+  }): SkillSelectionExplainRow[] {
+    return this.buildSkillSelection(input, true).explainRows;
+  }
+
+  private buildSkillSelection(input: {
+    agent: AgentManifest;
+    sessionGoal: string;
+    currentRequest: string;
+    manualSkillIds?: string[];
+    budget: SkillBudget;
+  }, includeAllRows: boolean): {
+    renderedSkills: string[];
+    manifest: SkillSelectionManifest[];
+    explainRows: SkillSelectionExplainRow[];
+  } {
+    const skills = this.readSkillRecords();
+    const blockedSkills = new Set(input.agent.blockedSkills);
+    const preferredSkills = new Set(input.agent.preferredSkills);
+    const manualSkillIds = [...new Set(input.manualSkillIds ?? [])].map((skillId) => this.resolveSkillId(skillId));
+    const manualSet = new Set(manualSkillIds);
+    for (const skillId of manualSet) {
+      if (blockedSkills.has(skillId)) {
+        throw new Error(`Skill is blocked for ${input.agent.id}: ${skillId}`);
+      }
+    }
+    const explainRows = new Map<string, SkillSelectionExplainRow>();
+    const ranked: RankedSkill[] = [];
+    for (const skill of skills) {
+      const match = calculateSkillTriggerMatch({
+        skillId: skill.id,
+        triggers: skill.triggers,
+        sessionGoal: input.sessionGoal,
+        currentRequest: input.currentRequest
+      });
+      const preferredBonus = preferredSkills.has(skill.id) ? preferredSkillBonus : 0;
+      const weightBonus = clampSkillWeight(input.agent.skillWeights?.[skill.id] ?? 0);
+      const finalScore = match.score + preferredBonus + weightBonus;
+      if (blockedSkills.has(skill.id)) {
+        explainRows.set(skill.id, selectionExplainRow(skill, "BLOCKED", "none", match, 0, 0, 0, "blockedByAgent"));
+        continue;
+      }
+      const selectedBy = manualSet.has(skill.id) ? "manual" as const : "trigger" as const;
+      if (selectedBy === "manual" || match.score > 0) {
+        ranked.push({ skill, selectedBy, match, preferredBonus, weightBonus, finalScore });
+        continue;
+      }
+      if (includeAllRows) {
+        explainRows.set(skill.id, selectionExplainRow(skill, "OMITTED", "none", match, preferredBonus, weightBonus, finalScore, "noTriggerMatch"));
+      }
+    }
+    ranked.sort(compareRankedSkills(input.agent));
+
     const renderedSkills: string[] = [];
+    const manifest: SkillSelectionManifest[] = [];
     let retainedTotal = 0;
-    for (const item of candidates) {
-      const skill = this.getSkill(input.agent.id, item.match.skillId);
-      const original = skill.content;
+    for (const item of ranked) {
+      const original = item.skill.content;
       let content = neutralizeXmlBoundaries(original);
       let truncated = false;
       if (content.length > input.budget.skillItemMaxChars) {
-        content = truncateSkillContent(content, input.budget.skillItemMaxChars, skill.id);
+        content = truncateSkillContent(content, input.budget.skillItemMaxChars, item.skill.id);
         truncated = true;
       }
-      const rendered = renderSkillPromptItem(skill, item.match, item.selectedBy, content);
+      const rendered = renderSkillPromptItem(item.skill, item, content);
       if (renderedSkills.length >= input.budget.skillMaxItems) {
+        const row = selectionExplainRow(item.skill, "OMITTED", item.selectedBy, item.match, item.preferredBonus, item.weightBonus, item.finalScore, "skillMaxItems", original.length, 0, false);
+        explainRows.set(item.skill.id, row);
         manifest.push(selectionManifest(item, original.length, 0, false, "skillMaxItems"));
         continue;
       }
       if (retainedTotal + rendered.length > input.budget.skillMaxChars) {
+        const row = selectionExplainRow(item.skill, "OMITTED", item.selectedBy, item.match, item.preferredBonus, item.weightBonus, item.finalScore, "skillMaxChars", original.length, 0, false);
+        explainRows.set(item.skill.id, row);
         manifest.push(selectionManifest(item, original.length, 0, false, "skillMaxChars"));
         continue;
       }
       renderedSkills.push(rendered);
       retainedTotal += rendered.length;
+      explainRows.set(item.skill.id, selectionExplainRow(item.skill, "SELECTED", item.selectedBy, item.match, item.preferredBonus, item.weightBonus, item.finalScore, "selected", original.length, content.length, truncated));
       manifest.push(selectionManifest(item, original.length, content.length, truncated));
     }
-    if (!renderedSkills.length && !manifest.length) {
-      return undefined;
-    }
-    return {
-      title: "SELECTED SKILLS",
-      content: `<available_skills>\n${renderedSkills.join("\n")}\n</available_skills>`,
-      manifest
-    };
+    const rows = includeAllRows
+      ? [...explainRows.values()].sort(compareExplainRows)
+      : [...explainRows.values()].filter((row) => row.status !== "OMITTED" || row.reason !== "noTriggerMatch").sort(compareExplainRows);
+    return { renderedSkills, manifest, explainRows: rows };
   }
 
   private readCandidateEntries(): SkillCandidateView[] {
@@ -403,19 +637,75 @@ export class SkillManager {
   }
 
   private writeAgentManifest(agentId: string, manifest: AgentManifest): void {
-    writeFileSync(join(this.agentDir(agentId), "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    writeFileSync(join(this.agentDir(agentId), "manifest.json"), `${JSON.stringify(serializeAgentManifest(agentManifestSchema.parse(manifest)), null, 2)}\n`, "utf8");
   }
 
-  private writeSkillsIndex(agentId: string, manifest: AgentManifest): void {
-    writeFileSync(join(this.agentDir(agentId), "SKILLS.md"), renderSkillsIndex(agentId, manifest), "utf8");
+  private readSkillRecords(): SkillRecord[] {
+    this.ensureSkillsDir();
+    return readdirSync(this.skillsDir(), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map((entry) => entry.name.slice(0, -5))
+      .map((skillId) => this.readSkillRecord(skillId))
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  private readSkillRecord(skillId: string): SkillRecord {
+    const metadataPath = this.skillMetadataPath(skillId);
+    if (!existsSync(metadataPath)) {
+      throw new Error(`Skill metadata not found: ${skillId}`);
+    }
+    const metadata = skillMetadataSchema.parse(JSON.parse(readFileSync(metadataPath, "utf8")));
+    const path = this.skillPath(metadata.id);
+    const content = existsSync(path) ? readFileSync(path, "utf8") : "";
+    return {
+      ...metadata,
+      path,
+      metadataPath,
+      content,
+      manualOnly: metadata.triggers.length === 0
+    };
+  }
+
+  private readSkillMarkdownIds(): string[] {
+    this.ensureSkillsDir();
+    return readdirSync(this.skillsDir(), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "SKILLS.md")
+      .map((entry) => entry.name.slice(0, -3));
+  }
+
+  private writeGlobalSkillsIndex(): void {
+    this.ensureSkillsDir();
+    writeFileSync(this.globalSkillsIndexPath(), renderGlobalSkillsIndex(this.readSkillRecords()), "utf8");
   }
 
   private agentDir(agentId: string): string {
     return join(this.workspaceRoot, "agents", agentId);
   }
 
-  private skillPath(agentId: string, skillId: string): string {
-    return join(this.agentDir(agentId), "skills", `${skillId}.md`);
+  private skillsDir(): string {
+    return join(this.workspaceRoot, "skills");
+  }
+
+  private skillPath(skillId: string): string {
+    return join(this.skillsDir(), `${skillId}.md`);
+  }
+
+  private skillMetadataPath(skillId: string): string {
+    return join(this.skillsDir(), `${skillId}.json`);
+  }
+
+  private globalSkillsIndexPath(): string {
+    return join(this.skillsDir(), "SKILLS.md");
+  }
+
+  private agentSkillsIndexPath(agentId: string): string {
+    return join(this.agentDir(agentId), "SKILLS.md");
+  }
+
+  private ensureSkillsDir(): void {
+    if (!existsSync(this.skillsDir())) {
+      mkdirSync(this.skillsDir(), { recursive: true });
+    }
   }
 
   private ensureMemoryDir(): void {
@@ -471,7 +761,8 @@ export function formatSkillCandidate(record: SkillCandidateRecord): string {
   const secret = detectSecrets(record.content);
   const content = secret.matched ? secret.redactedPreview : preview(record.content);
   const triggerText = record.triggers.length ? record.triggers.join(", ") : "manual-only";
-  return `${record.id}\t${record.status}\t${record.riskLevel}\t${record.agentId}/${record.skillId}\ttriggers:${triggerText}\t${content}`;
+  const suggestedBy = record.suggestedByAgentId ?? record.agentId;
+  return `${record.id}\t${record.status}\t${record.riskLevel}\t${record.skillId}\tsuggestedBy:${suggestedBy}\ttriggers:${triggerText}\t${content}`;
 }
 
 export function formatSkillPromotionPreview(result: PromoteSkillResult): string {
@@ -480,13 +771,14 @@ export function formatSkillPromotionPreview(result: PromoteSkillResult): string 
   const lines = [
     result.changed ? "Promoted skill candidate." : "Skill promotion preview. No changes made.",
     `Candidate: ${result.record.id}`,
-    `Agent: ${result.record.agentId}`,
+    `Suggested by: ${result.record.suggestedByAgentId ?? result.record.agentId}`,
     `Skill: ${result.record.skillId}`,
     `Risk: ${result.record.riskLevel}`,
     `Triggers: ${result.record.triggers.length ? result.record.triggers.join(", ") : "manual-only"}`,
     `Skill file: ${relative(process.cwd(), result.skillPath)}`,
-    `Manifest: ${relative(process.cwd(), result.manifestPath)}`,
+    `Metadata: ${relative(process.cwd(), result.metadataPath)}`,
     `SKILLS mirror: ${relative(process.cwd(), result.skillsIndexPath)}`,
+    `Prefer for: ${result.preferredAgentId ?? "none"}`,
     `Content: ${content}`
   ];
   if (result.warning) {
@@ -503,9 +795,10 @@ export function formatSkillPromotionPreview(result: PromoteSkillResult): string 
 
 export function formatSkillCheckResult(result: SkillCheckResult): string {
   const lines = [
-    `Agent: ${result.agentId}`,
+    `Scope: ${result.scope}${result.agentId ? ` ${result.agentId}` : ""}`,
     `SKILLS.md: ${result.mirrorMatches ? "ok" : "stale/missing"}`,
-    `Skill files: ${result.missingSkillFiles.length ? "missing files" : "ok"}`
+    `Skill files: ${result.missingSkillFiles.length ? "missing files" : "ok"}`,
+    `Skill metadata: ${result.missingMetadataFiles.length ? "missing metadata" : "ok"}`
   ];
   if (result.repaired) {
     lines.push("Repaired: SKILLS.md");
@@ -514,10 +807,56 @@ export function formatSkillCheckResult(result: SkillCheckResult): string {
     lines.push(`Warning: ${skillId} is manual-only because it has no triggers.`);
   }
   for (const skillId of result.orphanSkillFiles) {
-    lines.push(`Warning: orphan skill file is not listed in manifest: ${skillId}.md`);
+    lines.push(`Warning: orphan skill file is not listed in global metadata: ${skillId}.md`);
   }
   for (const skillId of result.missingSkillFiles) {
-    lines.push(`Error: manifest skill is missing its file: ${skillId}.md`);
+    lines.push(`Error: skill metadata is missing its file: ${skillId}.md`);
+  }
+  for (const skillId of result.missingPreferredSkills) {
+    lines.push(`Error: preferred skill does not exist: ${skillId}`);
+  }
+  for (const skillId of result.missingBlockedSkills) {
+    lines.push(`Error: blocked skill does not exist: ${skillId}`);
+  }
+  return lines.join("\n");
+}
+
+export function formatSkillSelectionExplanation(rows: SkillSelectionExplainRow[]): string {
+  if (!rows.length) {
+    return "No skills.";
+  }
+  const header = [
+    pad("Skill", 28),
+    pad("Status", 8),
+    pad("Total", 5),
+    pad("Trigger", 7),
+    pad("Pref", 4),
+    pad("Weight", 6),
+    "Reason"
+  ].join("  ");
+  const body = rows.map((row) => [
+    pad(row.skillId, 28),
+    pad(row.status, 8),
+    pad(String(row.finalScore), 5),
+    pad(String(row.triggerScore), 7),
+    pad(String(row.preferredBonus), 4),
+    pad(String(row.weightBonus), 6),
+    row.reason
+  ].join("  "));
+  return [header, ...body].join("\n");
+}
+
+export function formatSkillMigrationResult(result: SkillMigrationResult): string {
+  const lines = [
+    result.changed ? "Migrated legacy agent skills." : "Skill migration preview. No changes made.",
+    `Agent: ${result.agentId}`,
+    `Migratable: ${result.migrated.length ? result.migrated.join(", ") : "none"}`
+  ];
+  for (const skipped of result.skipped) {
+    lines.push(`Skipped: ${skipped.skillId} (${skipped.reason})`);
+  }
+  if (!result.changed && result.migrated.length) {
+    lines.push("Re-run with --yes to migrate these skills.");
   }
   return lines.join("\n");
 }
@@ -636,15 +975,11 @@ function isAsciiCodeLike(trigger: string): boolean {
 function renderSkillFile(record: SkillCandidateRecord): string {
   return `# ${record.skillName}
 
-<!-- COSIA skill id: ${record.skillId} -->
+<!-- COSIA global skill id: ${record.skillId} -->
 
-## Reason
+## Purpose
 
 ${record.reason}
-
-## Triggers
-
-${record.triggers.length ? record.triggers.map((trigger) => `- ${trigger}`).join("\n") : "- manual-only"}
 
 ## Instructions
 
@@ -652,25 +987,64 @@ ${record.content.trim()}
 `;
 }
 
-function renderSkillsIndex(agentId: string, manifest: AgentManifest): string {
-  const skills = manifest.skills.length
-    ? manifest.skills.map((skillId) => {
-        const triggers = manifest.skillTriggers?.[skillId] ?? [];
-        return `- ${skillId} (${triggers.length ? `triggers: ${triggers.join(", ")}` : "manual-only"})`;
+function renderGlobalSkillsIndex(skills: SkillRecord[]): string {
+  const body = skills.length
+    ? skills.map((skill) => {
+        const triggers = skill.triggers.length ? skill.triggers.join(", ") : "manual-only";
+        return `- ${skill.id} (${skill.riskLevel}; triggers: ${triggers}) - ${skill.name}`;
       }).join("\n")
     : "No promoted skills.";
   return `# SKILLS
 
-This file is generated by COSIA from \`agents/${agentId}/skills/*.md\` and \`manifest.json\`.
-Do not manually edit sections here; update skill files or run \`cosia skill sync ${agentId}\`.
+This file is generated by COSIA from \`skills/*.json\` and \`skills/*.md\`.
+Do not manually edit sections here; update skill files or run \`cosia skill sync\`.
 
-${skills}
+${body}
 `;
 }
 
-function renderSkillPromptItem(skill: SkillRecord, match: SkillTriggerMatch, selectedBy: "manual" | "trigger", content: string): string {
-  const source = `agents/${skill.agentId}/skills/${skill.id}.md`;
-  return `  <skill id="${escapeXmlAttribute(skill.id)}" trigger_score="${match.score}" selected_by="${selectedBy}" source="${escapeXmlAttribute(source)}">
+function renderAgentSkillsIndex(agentId: string, manifest: AgentManifest, skills: SkillRecord[]): string {
+  const skillMap = new Map(skills.map((skill) => [skill.id, skill]));
+  const preferred = manifest.preferredSkills.length
+    ? manifest.preferredSkills.map((skillId) => `- ${skillId}${manifest.skillWeights?.[skillId] ? ` (weight: ${manifest.skillWeights[skillId]})` : ""}`).join("\n")
+    : "No preferred skills.";
+  const blocked = manifest.blockedSkills.length
+    ? manifest.blockedSkills.map((skillId) => `- ${skillId}`).join("\n")
+    : "No blocked skills.";
+  const available = skills.length
+    ? skills.map((skill) => {
+        const state = manifest.blockedSkills.includes(skill.id)
+          ? "blocked"
+          : manifest.preferredSkills.includes(skill.id)
+            ? "preferred"
+            : "available";
+        const triggers = skill.triggers.length ? skill.triggers.join(", ") : "manual-only";
+        return `- ${skill.id} [${state}] triggers: ${triggers}`;
+      }).join("\n")
+    : "No global skills.";
+  const missingPreferred = manifest.preferredSkills.filter((skillId) => !skillMap.has(skillId));
+  const missing = missingPreferred.length ? `\n\n## Missing References\n\n${missingPreferred.map((skillId) => `- ${skillId}`).join("\n")}\n` : "";
+  return `# SKILLS
+
+This file is generated by COSIA as an agent preference view over the global skill toolbox.
+Agent: ${agentId}
+
+## Preferred Skills
+
+${preferred}
+
+## Blocked Skills
+
+${blocked}
+
+## Global Skills
+
+${available}${missing}`;
+}
+
+function renderSkillPromptItem(skill: SkillRecord, item: RankedSkill, content: string): string {
+  const source = `skills/${skill.id}.md`;
+  return `  <skill id="${escapeXmlAttribute(skill.id)}" trigger_score="${item.match.score}" final_score="${item.finalScore}" selected_by="${item.selectedBy}" source="${escapeXmlAttribute(source)}">
     <skill_markdown>
 ${indentXmlText(content, "      ")}
     </skill_markdown>
@@ -678,17 +1052,20 @@ ${indentXmlText(content, "      ")}
 }
 
 function selectionManifest(
-  item: { match: SkillTriggerMatch; selectedBy: "manual" | "trigger" },
+  item: RankedSkill,
   originalChars: number,
   retainedChars: number,
   truncated: boolean,
   omittedReason?: string
 ): SkillSelectionManifest {
   return {
-    skillId: item.match.skillId,
+    skillId: item.skill.id,
     selected: !omittedReason,
     selectedBy: item.selectedBy,
     triggerScore: item.match.score,
+    preferredBonus: item.preferredBonus,
+    weightBonus: item.weightBonus,
+    finalScore: item.finalScore,
     matchedTriggers: item.match.matchedTriggers,
     matchedFrom: item.match.matchedFrom,
     originalChars,
@@ -696,6 +1073,71 @@ function selectionManifest(
     truncated,
     omittedReason
   };
+}
+
+function selectionExplainRow(
+  skill: SkillRecord,
+  status: SkillSelectionStatus,
+  selectedBy: "manual" | "trigger" | "none",
+  match: SkillTriggerMatch,
+  preferredBonus: number,
+  weightBonus: number,
+  finalScore: number,
+  reason: string,
+  originalChars = skill.content.length,
+  retainedChars = 0,
+  truncated = false
+): SkillSelectionExplainRow {
+  return {
+    skillId: skill.id,
+    status,
+    selectedBy,
+    triggerScore: match.score,
+    preferredBonus,
+    weightBonus,
+    finalScore,
+    matchedTriggers: match.matchedTriggers,
+    matchedFrom: match.matchedFrom,
+    reason,
+    originalChars,
+    retainedChars,
+    truncated
+  };
+}
+
+function compareRankedSkills(agent: AgentManifest): (left: RankedSkill, right: RankedSkill) => number {
+  const preferred = new Set(agent.preferredSkills);
+  return (left, right) => {
+    if (left.selectedBy !== right.selectedBy) {
+      return left.selectedBy === "manual" ? -1 : 1;
+    }
+    if (right.finalScore !== left.finalScore) {
+      return right.finalScore - left.finalScore;
+    }
+    if (preferred.has(left.skill.id) !== preferred.has(right.skill.id)) {
+      return preferred.has(left.skill.id) ? -1 : 1;
+    }
+    const created = left.skill.createdAt.localeCompare(right.skill.createdAt);
+    if (created !== 0) {
+      return created;
+    }
+    return left.skill.id.localeCompare(right.skill.id);
+  };
+}
+
+function compareExplainRows(left: SkillSelectionExplainRow, right: SkillSelectionExplainRow): number {
+  const statusRank: Record<SkillSelectionStatus, number> = {
+    SELECTED: 0,
+    OMITTED: 1,
+    BLOCKED: 2
+  };
+  if (statusRank[left.status] !== statusRank[right.status]) {
+    return statusRank[left.status] - statusRank[right.status];
+  }
+  if (right.finalScore !== left.finalScore) {
+    return right.finalScore - left.finalScore;
+  }
+  return left.skillId.localeCompare(right.skillId);
 }
 
 function neutralizeXmlBoundaries(content: string): string {
@@ -720,4 +1162,35 @@ function indentXmlText(value: string, prefix: string): string {
 function preview(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+}
+
+function pad(value: string, length: number): string {
+  return value.length >= length ? value : `${value}${" ".repeat(length - value.length)}`;
+}
+
+function clampSkillWeight(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(5, Math.max(0, Math.round(value)));
+}
+
+function normalizeNewlines(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}
+
+function titleFromMarkdown(content: string): string | undefined {
+  const match = /^#\s+(.+)$/m.exec(content);
+  return match?.[1]?.trim();
+}
+
+function serializeAgentManifest(manifest: AgentManifest): Record<string, unknown> {
+  const output: Record<string, unknown> = { ...manifest };
+  if (!manifest.skills.length) {
+    delete output.skills;
+  }
+  if (!Object.keys(manifest.skillTriggers ?? {}).length) {
+    delete output.skillTriggers;
+  }
+  return output;
 }

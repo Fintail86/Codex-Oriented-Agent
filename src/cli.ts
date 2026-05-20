@@ -9,7 +9,7 @@ import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js"
 import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_builder.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
-import { formatSkillCandidate, formatSkillCheckResult, formatSkillPromotionPreview, SkillManager } from "./runtime/skill_manager.js";
+import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema } from "./runtime/types.js";
@@ -497,7 +497,7 @@ promotion
     });
   });
 
-const skill = program.command("skill").description("Manage agent-local skills.");
+const skill = program.command("skill").description("Manage global skills and agent skill preferences.");
 
 const skillCandidate = skill.command("candidate").description("Review skill candidates.");
 
@@ -533,12 +533,14 @@ skillCandidate
   .command("promote")
   .argument("<candidate-id>")
   .option("--yes", "Apply the promotion after preview.", false)
+  .option("--prefer-for <agent-id>", "Add the promoted global skill to one agent's preferredSkills.")
   .option("--confirm-high-risk <phrase>", "Required phrase for high-risk skill promotion.")
-  .description("Preview or promote a skill candidate into an agent-local skill.")
-  .action(async (candidateId: string, options: { yes: boolean; confirmHighRisk?: string }) => {
+  .description("Preview or promote a skill candidate into the global skill toolbox.")
+  .action(async (candidateId: string, options: { yes: boolean; preferFor?: string; confirmHighRisk?: string }) => {
     await main(async (workspaceRoot) => {
       const result = new SkillManager(workspaceRoot).promoteCandidate(candidateId, {
         yes: options.yes,
+        preferFor: options.preferFor,
         confirmHighRisk: options.confirmHighRisk
       });
       console.log(formatSkillPromotionPreview(result));
@@ -572,17 +574,25 @@ skillCandidate
 
 skill
   .command("list")
-  .requiredOption("--agent <agent-id>", "Agent id")
-  .description("List promoted skills for an agent.")
-  .action(async (options: { agent: string }) => {
+  .option("--agent <agent-id>", "Show one agent's preference view over global skills.")
+  .description("List global skills.")
+  .action(async (options: { agent?: string }) => {
     await main(async (workspaceRoot) => {
-      const skills = new SkillManager(workspaceRoot).listSkills(options.agent);
+      const manager = new SkillManager(workspaceRoot);
+      const skills = manager.listSkills();
       if (!skills.length) {
-        console.log("No promoted skills.");
+        console.log("No global skills.");
         return;
       }
+      const agent = options.agent ? await new AgentManager(workspaceRoot).loadAgent(options.agent) : undefined;
       for (const item of skills) {
-        console.log(`${item.id}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}\t${item.path}`);
+        const state = agent?.blockedSkills.includes(item.id)
+          ? "blocked"
+          : agent?.preferredSkills.includes(item.id)
+            ? "preferred"
+            : "available";
+        const weight = agent?.skillWeights?.[item.id] ? ` weight:${agent.skillWeights[item.id]}` : "";
+        console.log(`${item.id}\t${options.agent ? state : item.riskLevel}${weight}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}\t${item.path}`);
       }
     });
   });
@@ -590,21 +600,30 @@ skill
 skill
   .command("show")
   .argument("<skill-id>")
-  .requiredOption("--agent <agent-id>", "Agent id")
-  .description("Show one promoted skill.")
-  .action(async (skillId: string, options: { agent: string }) => {
+  .option("--agent <agent-id>", "Include one agent's preference state.")
+  .description("Show one global skill.")
+  .action(async (skillId: string, options: { agent?: string }) => {
     await main(async (workspaceRoot) => {
-      const skill = new SkillManager(workspaceRoot).getSkill(options.agent, skillId);
-      console.log(`# ${skill.id}\n\nAgent: ${skill.agentId}\nTriggers: ${skill.triggers.length ? skill.triggers.join(", ") : "manual-only"}\nPath: ${skill.path}\n\n${skill.content}`);
+      const manager = new SkillManager(workspaceRoot);
+      const skill = manager.getSkill(skillId);
+      const agent = options.agent ? await new AgentManager(workspaceRoot).loadAgent(options.agent) : undefined;
+      const state = agent
+        ? agent.blockedSkills.includes(skill.id)
+          ? "blocked"
+          : agent.preferredSkills.includes(skill.id)
+            ? "preferred"
+            : "available"
+        : "global";
+      console.log(`# ${skill.id}\n\nName: ${skill.name}\nRisk: ${skill.riskLevel}\nTriggers: ${skill.triggers.length ? skill.triggers.join(", ") : "manual-only"}\nState: ${state}\nPath: ${skill.path}\nMetadata: ${skill.metadataPath}\n\n${skill.content}`);
     });
   });
 
 skill
   .command("check")
-  .requiredOption("--agent <agent-id>", "Agent id")
+  .option("--agent <agent-id>", "Check one agent's generated skill preference view.")
   .option("--repair", "Regenerate SKILLS.md when it is missing or stale.", false)
-  .description("Validate an agent skill mirror and skill files.")
-  .action(async (options: { agent: string; repair: boolean }) => {
+  .description("Validate the global skill mirror and optional agent skill view.")
+  .action(async (options: { agent?: string; repair: boolean }) => {
     await main(async (workspaceRoot) => {
       const result = new SkillManager(workspaceRoot).checkSkills(options.agent, options.repair);
       console.log(formatSkillCheckResult(result));
@@ -616,12 +635,104 @@ skill
 
 skill
   .command("sync")
-  .argument("<agent-id>")
-  .description("Regenerate an agent SKILLS.md mirror from manifest skills.")
-  .action(async (agentId: string) => {
+  .argument("[agent-id]")
+  .description("Regenerate global SKILLS.md, or an agent skill preference view when agent-id is provided.")
+  .action(async (agentId: string | undefined) => {
     await main(async (workspaceRoot) => {
       const path = new SkillManager(workspaceRoot).syncSkillsIndex(agentId);
       console.log(`Synced ${path}`);
+    });
+  });
+
+skill
+  .command("prefer")
+  .argument("<skill-id>")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .option("--weight <0-5>", "Optional agent-specific skill weight.")
+  .description("Mark a global skill as preferred by an agent.")
+  .action(async (skillId: string, options: { agent: string; weight?: string }) => {
+    await main(async (workspaceRoot) => {
+      new SkillManager(workspaceRoot).preferSkill(
+        skillId,
+        options.agent,
+        options.weight === undefined ? undefined : parseIntegerOption(options.weight, "weight")
+      );
+      console.log(`Preferred ${skillId} for ${options.agent}`);
+    });
+  });
+
+skill
+  .command("unprefer")
+  .argument("<skill-id>")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .description("Remove one agent's preference for a global skill.")
+  .action(async (skillId: string, options: { agent: string }) => {
+    await main(async (workspaceRoot) => {
+      new SkillManager(workspaceRoot).unpreferSkill(skillId, options.agent);
+      console.log(`Unpreferred ${skillId} for ${options.agent}`);
+    });
+  });
+
+skill
+  .command("block")
+  .argument("<skill-id>")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .description("Block a global skill for one agent.")
+  .action(async (skillId: string, options: { agent: string }) => {
+    await main(async (workspaceRoot) => {
+      new SkillManager(workspaceRoot).blockSkill(skillId, options.agent);
+      console.log(`Blocked ${skillId} for ${options.agent}`);
+    });
+  });
+
+skill
+  .command("unblock")
+  .argument("<skill-id>")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .description("Unblock a global skill for one agent.")
+  .action(async (skillId: string, options: { agent: string }) => {
+    await main(async (workspaceRoot) => {
+      new SkillManager(workspaceRoot).unblockSkill(skillId, options.agent);
+      console.log(`Unblocked ${skillId} for ${options.agent}`);
+    });
+  });
+
+skill
+  .command("select")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .requiredOption("--prompt <prompt>", "Current request to score.")
+  .option("--goal <goal>", "Session goal for trigger scoring.", "")
+  .option("--skill <skill-id...>", "Manually selected skills.")
+  .option("--explain", "Print compact selection score table.", false)
+  .description("Explain deterministic skill selection for a prompt.")
+  .action(async (options: { agent: string; prompt: string; goal: string; skill?: string[]; explain: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const agent = await new AgentManager(workspaceRoot).loadAgent(options.agent);
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const rows = new SkillManager(workspaceRoot).explainSkillSelection({
+        agent,
+        sessionGoal: options.goal,
+        currentRequest: options.prompt,
+        manualSkillIds: options.skill,
+        budget: {
+          skillMaxItems: policy.promptBudget.skillMaxItems,
+          skillMaxChars: policy.promptBudget.skillMaxChars,
+          skillItemMaxChars: policy.promptBudget.skillItemMaxChars
+        }
+      });
+      console.log(formatSkillSelectionExplanation(rows));
+    });
+  });
+
+skill
+  .command("migrate")
+  .requiredOption("--agent <agent-id>", "Agent id")
+  .option("--yes", "Apply the migration after preview.", false)
+  .description("Preview or migrate legacy agent-local skills into the global skill toolbox.")
+  .action(async (options: { agent: string; yes: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const result = new SkillManager(workspaceRoot).migrateAgentSkills(options.agent, options.yes);
+      console.log(formatSkillMigrationResult(result));
     });
   });
 
@@ -763,7 +874,7 @@ program
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
-  .option("--skill <skill-id...>", "Manually include one or more agent-local skills.")
+  .option("--skill <skill-id...>", "Manually include one or more global skills.")
   .description("Run a session turn.")
   .action(async (options: { session: string; prompt: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
@@ -788,7 +899,7 @@ program
   .option("--provider-timeout-ms <ms>", "Per Codex CLI provider call timeout in milliseconds", "120000")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
-  .option("--skill <skill-id...>", "Manually include one or more agent-local skills.")
+  .option("--skill <skill-id...>", "Manually include one or more global skills.")
   .description("Enter a simple session REPL.")
   .action(async (options: { session: string; provider?: string; providerTimeoutMs: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
@@ -848,27 +959,37 @@ program
             continue;
           }
           if (prompt === "/skills list") {
-            const agentSkills = skills.listSkills(agent.id);
-            if (!agentSkills.length) {
-              console.log("No promoted skills.");
+            const globalSkills = skills.listSkills();
+            if (!globalSkills.length) {
+              console.log("No global skills.");
             } else {
-              for (const item of agentSkills) {
-                const selected = manualSkills.has(item.id) ? "selected" : "available";
-                console.log(`${item.id}\t${selected}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}`);
+              for (const item of globalSkills) {
+                const state = agent.blockedSkills.includes(item.id)
+                  ? "blocked"
+                  : manualSkills.has(item.id)
+                    ? "selected"
+                    : agent.preferredSkills.includes(item.id)
+                      ? "preferred"
+                      : "available";
+                const weight = agent.skillWeights?.[item.id] ? ` weight:${agent.skillWeights[item.id]}` : "";
+                console.log(`${item.id}\t${state}${weight}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}`);
               }
             }
             continue;
           }
           if (prompt.startsWith("/skills use ")) {
             const skillId = prompt.slice("/skills use ".length).trim();
-            const skill = skills.getSkill(agent.id, skillId);
+            const skill = skills.getSkill(skillId);
+            if (agent.blockedSkills.includes(skill.id)) {
+              throw new Error(`Skill is blocked for ${agent.id}: ${skill.id}`);
+            }
             manualSkills.add(skill.id);
             console.error(`[cosia] selected skill ${skill.id}`);
             continue;
           }
           if (prompt.startsWith("/skills drop ")) {
             const skillId = prompt.slice("/skills drop ".length).trim();
-            const skill = skills.getSkill(agent.id, skillId);
+            const skill = skills.getSkill(skillId);
             manualSkills.delete(skill.id);
             console.error(`[cosia] dropped skill ${skill.id}`);
             continue;
@@ -960,7 +1081,7 @@ function formatPromptManifest(manifest: PromptManifest): string {
   if (manifest.skillSelections?.length) {
     lines.push("Skills:");
     for (const skill of manifest.skillSelections) {
-      lines.push(`- ${skill.skillId} ${skill.selected ? "selected" : "omitted"} by:${skill.selectedBy} score:${skill.triggerScore} triggers:${skill.matchedTriggers.join(",") || "none"} ${skill.retainedChars}/${skill.originalChars} chars${skill.truncated ? " truncated" : ""}${skill.omittedReason ? ` reason:${skill.omittedReason}` : ""}`);
+      lines.push(`- ${skill.skillId} ${skill.selected ? "selected" : "omitted"} by:${skill.selectedBy} score:${skill.finalScore} trigger:${skill.triggerScore} pref:${skill.preferredBonus} weight:${skill.weightBonus} triggers:${skill.matchedTriggers.join(",") || "none"} ${skill.retainedChars}/${skill.originalChars} chars${skill.truncated ? " truncated" : ""}${skill.omittedReason ? ` reason:${skill.omittedReason}` : ""}`);
     }
   }
   return lines.join("\n");

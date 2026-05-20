@@ -19,9 +19,8 @@ export class AgentManager {
     for (const [fileName, content] of Object.entries(agentTemplates)) {
       await writeTextIfMissing(join(agentDir, fileName), content);
     }
-    await mkdir(join(agentDir, "skills"), { recursive: true });
     const manifest = architectManifest(agentId);
-    await writeFile(join(agentDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await writeFile(join(agentDir, "manifest.json"), `${JSON.stringify(serializeAgentManifest(manifest), null, 2)}\n`, "utf8");
     return manifest;
   }
 
@@ -30,9 +29,13 @@ export class AgentManager {
     const parsed = JSON.parse(await readText(manifestPath));
     const manifest = agentManifestSchema.parse(parsed);
     const repaired = repairArchitectManifest(manifest);
-    await mkdir(join(this.agentDir(agentId), "skills"), { recursive: true });
-    if (repaired !== manifest || !("skillTriggers" in parsed)) {
-      await writeFile(manifestPath, `${JSON.stringify(repaired, null, 2)}\n`, "utf8");
+    if (
+      repaired !== manifest ||
+      !("preferredSkills" in parsed) ||
+      !("blockedSkills" in parsed) ||
+      !("skillWeights" in parsed)
+    ) {
+      await writeFile(manifestPath, `${JSON.stringify(serializeAgentManifest(repaired), null, 2)}\n`, "utf8");
     }
     return repaired;
   }
@@ -66,18 +69,38 @@ export class AgentManager {
   }
 }
 
+function serializeAgentManifest(manifest: AgentManifest): Record<string, unknown> {
+  const output: Record<string, unknown> = { ...manifest };
+  if (!manifest.skills.length) {
+    delete output.skills;
+  }
+  if (!Object.keys(manifest.skillTriggers ?? {}).length) {
+    delete output.skillTriggers;
+  }
+  return output;
+}
+
 function repairArchitectManifest(manifest: AgentManifest): AgentManifest {
   if (manifest.name !== "Architect Agent") {
     return manifest;
   }
   const allowedTools = [...new Set([...manifest.allowedTools, ...architectAllowedTools])];
-  const skillTriggers = manifest.skillTriggers ?? {};
-  if (allowedTools.length === manifest.allowedTools.length && manifest.skillTriggers === skillTriggers) {
+  const preferredSkills = manifest.preferredSkills ?? [];
+  const blockedSkills = manifest.blockedSkills ?? [];
+  const skillWeights = manifest.skillWeights ?? {};
+  if (
+    allowedTools.length === manifest.allowedTools.length &&
+    manifest.preferredSkills === preferredSkills &&
+    manifest.blockedSkills === blockedSkills &&
+    manifest.skillWeights === skillWeights
+  ) {
     return manifest;
   }
   return {
     ...manifest,
     allowedTools,
-    skillTriggers
+    preferredSkills,
+    blockedSkills,
+    skillWeights
   };
 }

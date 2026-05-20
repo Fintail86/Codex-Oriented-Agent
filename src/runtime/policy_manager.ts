@@ -111,7 +111,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.9.1",
+  version: "0.10.0",
   tools: {
     read_file: {
       permission: "read_only",

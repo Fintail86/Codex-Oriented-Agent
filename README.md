@@ -1,8 +1,8 @@
-# COSIA v0.9.1
+# COSIA v0.10.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, structured agent-local skills, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
 ## Requirements
 
@@ -119,13 +119,21 @@ cosia skill candidate list
 cosia skill candidate show <candidate-id>
 cosia skill candidate promote <candidate-id>
 cosia skill candidate promote <candidate-id> --yes
+cosia skill candidate promote <candidate-id> --yes --prefer-for <agent-id>
 cosia skill candidate discard <candidate-id> --reason "<reason>"
 cosia skill candidate export --jsonl
+cosia skill list
 cosia skill list --agent <agent-id>
-cosia skill show <skill-id> --agent <agent-id>
-cosia skill check --agent <agent-id>
+cosia skill show <skill-id>
+cosia skill prefer <skill-id> --agent <agent-id> --weight <0-5>
+cosia skill unprefer <skill-id> --agent <agent-id>
+cosia skill block <skill-id> --agent <agent-id>
+cosia skill unblock <skill-id> --agent <agent-id>
+cosia skill select --agent <agent-id> --prompt "<prompt>" --explain
+cosia skill check
 cosia skill check --agent <agent-id> --repair
-cosia skill sync <agent-id>
+cosia skill sync
+cosia skill migrate --agent <agent-id>
 cosia policy show
 cosia policy check
 cosia policy check --repair
@@ -151,7 +159,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.9.
+- Destructive, network, external-send, and shell tools are not registered in v0.10.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -172,9 +180,12 @@ cosia session show <session-id>
 - Long tool output is capped with an explicit truncation marker.
 - Session context size warnings appear in status/session/chat output; automatic context summary/archive is deferred.
 - Skill candidates are stored in SQLite and remain pending until explicit promotion.
-- Promoted skills are agent-local files in `agents/<agent-id>/skills/`; `SKILLS.md` is a generated mirror/index.
-- `cosia skill check --agent <agent-id> --repair` regenerates stale `SKILLS.md`; it does not delete orphan skill files or rewrite manifest entries.
-- PromptBuilder loads selected skill files with XML-style boundaries and prompt budget limits.
+- Promoted skills live in the global toolbox: `skills/<skill-id>.md` plus `skills/<skill-id>.json`.
+- `skills/SKILLS.md` is a generated global mirror; agent `SKILLS.md` files are generated preference views.
+- Agents do not own skills. They use `preferredSkills`, `blockedSkills`, and `skillWeights` to bias global skill selection.
+- `cosia skill check --repair` regenerates stale global `SKILLS.md`; `--agent <agent-id>` checks an agent preference view.
+- PromptBuilder loads selected global skill files with XML-style boundaries and prompt budget limits.
+- Skill selection is deterministic: blocked filter, trigger score, preference/weight bonuses, then stable tie-breakers.
 - Triggerless skills are manual-only and must be selected with `--skill` or `/skills use`.
 
 ## Policy
@@ -213,7 +224,7 @@ cosia session summarize <session-id> --content "Short compact summary of the ses
 
 Chat history is durable through `CONTEXT_MEMORY.md`; the in-process REPL history is only a display/cache aid. `REF_MEMORY.md` is generated once when chat starts, then refreshed by `/memory refresh` or after memory auto-promotion. `SESSION_SUMMARY.md` is included in prompt assembly but is manually updated in v0.6.
 
-Manual skills selected with `--skill` or `/skills use` are included even when they have no triggers. Trigger-matched skills are selected automatically from agent manifest triggers and are capped by the prompt budget.
+Manual skills selected with `--skill` or `/skills use` are included even when they have no triggers. Trigger-matched skills are selected automatically from the global skill toolbox, then biased by the current agent's preferences and capped by the prompt budget.
 
 ## Skill Candidate Review
 
@@ -223,14 +234,16 @@ cosia skill candidate list
 cosia skill candidate show <candidate-id>
 cosia skill candidate promote <candidate-id>
 cosia skill candidate promote <candidate-id> --yes
-cosia skill check --agent architect-agent
+cosia skill candidate promote <candidate-id> --yes --prefer-for architect-agent
+cosia skill check
 cosia skill check --agent architect-agent --repair
+cosia skill select --agent architect-agent --prompt "git diff를 요약해줘." --explain
 cosia skill list --agent architect-agent
 cosia run --session <session-id> --prompt "git diff를 요약해줘."
 cosia run --session <session-id> --prompt "수동 스킬 적용 테스트" --skill <skill-id>
 ```
 
-Skill promotion preview does not mutate files. `--yes` writes `agents/<agent-id>/skills/<skill-id>.md`, updates `manifest.json`, and regenerates `SKILLS.md`. High-risk skill candidates require the explicit confirmation phrase shown in the preview.
+Skill promotion preview does not mutate files. `--yes` writes `skills/<skill-id>.md`, `skills/<skill-id>.json`, and regenerates `skills/SKILLS.md`. Use `--prefer-for <agent-id>` when the promoted skill should become preferred by one agent. High-risk skill candidates require the explicit confirmation phrase shown in the preview.
 
 ## Repo Hygiene
 
@@ -249,7 +262,7 @@ git rm --cached -- <tracked-runtime-files>
 git commit -m "chore: stop tracking runtime state"
 ```
 
-Source, policy, agent definitions, promoted skill files, tests, and docs remain project files. Runtime files such as `CONTEXT_MEMORY.md`, `REF_MEMORY.md`, `POLICY_AUDIT.jsonl`, `PROMPT_MANIFEST.jsonl`, SQLite databases, migration reports, and `.bak` queue files should not be committed.
+Source, policy, agent definitions, global skill files, tests, and docs remain project files. Runtime files such as `CONTEXT_MEMORY.md`, `REF_MEMORY.md`, `POLICY_AUDIT.jsonl`, `PROMPT_MANIFEST.jsonl`, SQLite databases, migration reports, and `.bak` queue files should not be committed.
 
 Prompt manifests record block sizes and truncation metadata without storing full prompt text:
 

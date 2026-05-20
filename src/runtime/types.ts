@@ -41,6 +41,11 @@ export const agentManifestSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
   allowedTools: z.array(toolNameSchema),
+  preferredSkills: z.array(z.string()).default([]),
+  blockedSkills: z.array(z.string()).default([]),
+  skillWeights: z.record(z.string(), z.number().min(0).max(5)).default({}),
+  // Legacy v0.9 agent-local skill fields. They are still accepted so old
+  // workspaces can be inspected and migrated into the global skill toolbox.
   skills: z.array(z.string()).default([]),
   skillTriggers: z.record(z.string(), z.array(z.string())).default({}),
   memoryScopes: z.array(memoryScopeSchema)
@@ -124,6 +129,7 @@ export const skillCandidateRecordSchema = skillCandidateSchema.extend({
   skillId: z.string().min(1),
   triggers: z.array(z.string()),
   riskLevel: riskLevelSchema,
+  suggestedByAgentId: z.string().optional(),
   sourceSessionId: z.string().optional(),
   sourceAgentId: z.string().optional(),
   runId: z.string().optional(),
@@ -134,6 +140,20 @@ export const skillCandidateRecordSchema = skillCandidateSchema.extend({
 });
 
 export type SkillCandidateRecord = z.infer<typeof skillCandidateRecordSchema>;
+
+export const skillMetadataSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  triggers: z.array(z.string()),
+  riskLevel: riskLevelSchema,
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+  sourceCandidateId: z.string().optional(),
+  suggestedByAgentId: z.string().optional()
+});
+
+export type SkillMetadata = z.infer<typeof skillMetadataSchema>;
 
 export const finalAgentStepSchema = z.object({
   type: z.literal("final"),
