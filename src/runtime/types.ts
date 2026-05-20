@@ -36,10 +36,28 @@ export const toolNameSchema = z.enum([
 ]);
 export type ToolName = z.infer<typeof toolNameSchema>;
 
+export const agentIdentitySchema = z.object({
+  role: z.string().min(1).default("General COSIA agent"),
+  voice: z.string().min(1).default("Direct, practical, and precise."),
+  operatingStyle: z.array(z.string().min(1)).default([]),
+  priorities: z.array(z.string().min(1)).default([]),
+  boundaries: z.array(z.string().min(1)).default([])
+});
+
+export type AgentIdentity = z.infer<typeof agentIdentitySchema>;
+
 export const agentManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   description: z.string().min(1),
+  identity: agentIdentitySchema.default({
+    role: "General COSIA agent",
+    voice: "Direct, practical, and precise.",
+    operatingStyle: [],
+    priorities: [],
+    boundaries: []
+  }),
+  selectionTriggers: z.array(z.string().min(1)).default([]),
   allowedTools: z.array(toolNameSchema),
   preferredSkills: z.array(z.string()).default([]),
   blockedSkills: z.array(z.string()).default([]),

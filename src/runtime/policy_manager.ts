@@ -21,6 +21,11 @@ const providerConfigSchema = z.object({
 
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
+  agents: z.object({
+    defaultAgentId: z.string().min(1).nullable().default("cosia-agent")
+  }).default({
+    defaultAgentId: "cosia-agent"
+  }),
   tools: z.record(toolNameSchema, policyToolSchema),
   disabledPermissions: z.array(toolPermissionSchema),
   overwrite: z.object({
@@ -111,7 +116,10 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.10.1",
+  version: "0.11.0",
+  agents: {
+    defaultAgentId: "cosia-agent"
+  },
   tools: {
     read_file: {
       permission: "read_only",
@@ -238,12 +246,31 @@ export class PolicyManager {
       await writeText(this.policyMarkdownPath(), renderPolicyMarkdown(policy));
       created.push("codex/POLICY.md");
     }
+    await this.normalizePolicyJson();
     return created;
   }
 
   async loadPolicy(): Promise<PolicyConfig> {
     const raw = JSON.parse(await readText(this.policyJsonPath())) as unknown;
     return policyConfigSchema.parse(raw);
+  }
+
+  async savePolicy(policy: PolicyConfig): Promise<void> {
+    await writeText(this.policyJsonPath(), `${JSON.stringify(policyConfigSchema.parse(policy), null, 2)}\n`);
+  }
+
+  async setDefaultAgent(agentId: string | null): Promise<PolicyConfig> {
+    const policy = await this.loadPolicy();
+    const next = policyConfigSchema.parse({
+      ...policy,
+      agents: {
+        ...policy.agents,
+        defaultAgentId: agentId
+      }
+    });
+    await this.savePolicy(next);
+    await writeText(this.policyMarkdownPath(), renderPolicyMarkdown(next));
+    return next;
   }
 
   async syncMarkdown(): Promise<string> {
@@ -342,6 +369,17 @@ export class PolicyManager {
   private policyMarkdownPath(): string {
     return join(this.codexDir(), "POLICY.md");
   }
+
+  private async normalizePolicyJson(): Promise<void> {
+    if (!existsSync(this.policyJsonPath())) {
+      return;
+    }
+    const raw = JSON.parse(await readText(this.policyJsonPath())) as unknown;
+    const normalized = policyConfigSchema.parse(raw);
+    if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
+      await this.savePolicy(normalized);
+    }
+  }
 }
 
 export function renderPolicyMarkdown(policy: PolicyConfig): string {
@@ -356,6 +394,10 @@ This file mirrors \`codex/POLICY.json\`. The JSON file is the runtime source of 
 ## Version
 
 - Policy version: \`${policy.version}\`
+
+## Agents
+
+- Default agent: \`${policy.agents.defaultAgentId ?? "none"}\`
 
 ## Tools
 
@@ -421,6 +463,7 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`,
     `Memory auto promotion: ${policy.memory.autoPromotion.mode}`,
     `Prompt budget: ${policy.promptBudget.maxPromptChars} chars`,
+    `Default agent: ${policy.agents.defaultAgentId ?? "none"}`,
     `Default provider: ${policy.model.defaultProvider}`
   ].join("\n");
 }

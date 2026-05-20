@@ -75,13 +75,30 @@ export async function loadPromptStaticBlocks(input: Pick<PromptInput, "workspace
       source: "static"
     });
   }
-  for (const fileName of ["AGENT.md", "LOCAL_RULES.md"] as const) {
-    blocks.push({
-      title: `agents/${input.agent.id}/${fileName}`,
-      content: await readText(join(input.workspaceRoot, "agents", input.agent.id, fileName)),
-      source: "static"
-    });
-  }
+  blocks.push({
+    title: "AGENT IDENTITY (JSON)",
+    content: JSON.stringify(input.agent.identity, null, 2),
+    required: true,
+    source: "static"
+  });
+  blocks.push({
+    title: "AGENT SUPPLEMENTARY PROFILE",
+    content: await readText(join(input.workspaceRoot, "agents", input.agent.id, "AGENT.md")),
+    required: true,
+    source: "static"
+  });
+  blocks.push({
+    title: "AGENT STYLE",
+    content: await readText(join(input.workspaceRoot, "agents", input.agent.id, "STYLE.md")),
+    required: true,
+    source: "static"
+  });
+  blocks.push({
+    title: "AGENT LOCAL RULES",
+    content: await readText(join(input.workspaceRoot, "agents", input.agent.id, "LOCAL_RULES.md")),
+    required: true,
+    source: "static"
+  });
   blocks.push({
     title: `sessions/${input.session.id}/SESSION_RULES.md`,
     content: await readText(join(input.workspaceRoot, "sessions", input.session.id, "SESSION_RULES.md")),

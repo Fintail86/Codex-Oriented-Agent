@@ -1,10 +1,10 @@
-# COSIA v0.10.1
+# COSIA v0.11.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.10.1 is a structural cleanup release: the global skill toolbox behavior is unchanged, while the internal skill subsystem is split behind the existing `SkillManager` facade.
+v0.11 adds agent identity, default agent management, guided agent bootstrap, and deterministic agent recommendation.
 
 ## Requirements
 
@@ -88,7 +88,17 @@ cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보
 
 ```text
 cosia init
+cosia agent create <agent-id> --template cosia
 cosia agent create <agent-id> --template architect
+cosia agent list
+cosia agent show <agent-id>
+cosia agent default show
+cosia agent default set <agent-id>
+cosia agent bootstrap
+cosia agent bootstrap --id <agent-id> --name "<name>" --role "<role>" --voice "<voice>"
+cosia agent delete <agent-id> --yes --force --allow-empty
+cosia agent recommend --prompt "<prompt>" --explain
+cosia session create --goal "<goal>"
 cosia session create --agent <agent-id> --goal "<goal>"
 cosia session summarize <session-id> --content "<summary>"
 cosia session prompt <session-id> --latest
@@ -161,7 +171,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.10.1.
+- Destructive, network, external-send, and shell tools are not registered in v0.11.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -189,6 +199,11 @@ cosia session show <session-id>
 - PromptBuilder loads selected global skill files with XML-style boundaries and prompt budget limits.
 - Skill selection is deterministic: blocked filter, trigger score, preference/weight bonuses, then stable tie-breakers.
 - Triggerless skills are manual-only and must be selected with `--skill` or `/skills use`.
+- Agents are replaceable identity/work-style units. `cosia-agent` is only the initial default.
+- `POLICY.json` stores `agents.defaultAgentId`; `cosia agent default set <agent-id>` changes it.
+- Agent identity comes from `manifest.json`; `AGENT.md`, `STYLE.md`, and `LOCAL_RULES.md` remain prompt/human supplements.
+- Agent recommendation is deterministic and does not change existing sessions automatically.
+- If no usable default agent exists, run `cosia agent bootstrap`.
 
 ## Policy
 
@@ -204,6 +219,20 @@ cosia policy audit --session <session-id> --latest-run --json
 
 `policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source. Use `policy check --repair` to regenerate a stale or missing Markdown mirror without changing the JSON source.
 Policy audit logs are append-only per session. Each new `run` writes a `runId`, so `--latest-run` or `--run-id <id>` can focus the output. The default audit output is a readable summary; use `--json` for raw events. Clear/archive commands are intentionally deferred to a later maintenance pass.
+
+## Agent Lifecycle
+
+```powershell
+cosia agent list
+cosia agent show cosia-agent
+cosia agent recommend --prompt "세션 상태를 정리해줘" --explain
+cosia agent default show
+cosia agent bootstrap --id helper-agent --name "Helper Agent" --role "General COSIA helper" --voice "Friendly and brief"
+cosia agent default set helper-agent
+cosia agent delete cosia-agent
+```
+
+`agent delete` previews by default. Use `--yes` to delete, `--force` for session-referenced agents, and `--allow-empty` only when deliberately leaving the workspace without a default or last agent.
 
 ## Prompt Budget and Chat
 
@@ -335,9 +364,17 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.11: Agent identity and selection.
-- v0.12: Provider hardening and `openai-compatible` provider.
-- v0.13: Context maintenance workflow.
+- v0.12: Session assignment and run lineage.
+  - Treat sessions as global work instances, not agent-owned records.
+  - Add `assignedAgentId`, session assignment commands, orphan session visibility, and per-run executing agent lineage.
+- v0.13: Memory ownership and lifecycle.
+  - Move from broad memory scopes toward `tier + kind`: `core`, `agent`, and `session` memory.
+  - Keep `kind` for search, display, and risk classification while `tier` controls ownership and lifecycle.
+- v0.14: Memory promotion policy v2.
+  - Split promotion paths: session-to-agent, session-to-core, agent-to-core, core-to-skill-candidate, and core-to-codex-amendment-candidate.
+  - Keep core-to-codex changes behind diff-based manual approval.
+- v0.15: Provider hardening and `openai-compatible` provider.
+- v0.16: Context maintenance workflow.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: automatic session summary/archive after warning thresholds are validated.

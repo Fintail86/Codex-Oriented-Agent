@@ -1,5 +1,8 @@
 {
-  "version": "0.10.1",
+  "version": "0.11.0",
+  "agents": {
+    "defaultAgentId": "cosia-agent"
+  },
   "tools": {
     "read_file": {
       "permission": "read_only",

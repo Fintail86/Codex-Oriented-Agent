@@ -1,1 +1,1 @@
-export const COSIA_VERSION = "0.10.1";
+export const COSIA_VERSION = "0.11.0";

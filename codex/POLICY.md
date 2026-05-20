@@ -4,7 +4,11 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.10.1`
+- Policy version: `0.11.0`
+
+## Agents
+
+- Default agent: `cosia-agent`
 
 ## Tools
 

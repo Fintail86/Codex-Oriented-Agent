@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
-import { AgentManager } from "./runtime/agent_manager.js";
+import {
+  AgentManager,
+  formatAgentDeleteResult,
+  formatAgentRecommendation
+} from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
@@ -63,7 +67,7 @@ const agent = program.command("agent").description("Manage agents.");
 agent
   .command("create")
   .argument("<agent-id>")
-  .option("--template <template>", "Agent template", "architect")
+  .option("--template <template>", "Agent template: cosia or architect", "architect")
   .description("Create an agent from a template.")
   .action(async (agentId: string, options: { template: string }) => {
     await main(async (workspaceRoot) => {
@@ -73,19 +77,163 @@ agent
     });
   });
 
+agent
+  .command("list")
+  .description("List agents.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const agents = await new AgentManager(workspaceRoot).listAgents();
+      if (!agents.length) {
+        console.log("No agents. Run `cosia agent bootstrap` to create one.");
+        return;
+      }
+      for (const item of agents) {
+        const marker = item.id === policy.agents.defaultAgentId ? "default" : "available";
+        console.log(`${item.id}\t${marker}\t${item.name}\t${item.identity.role}`);
+      }
+    });
+  });
+
+agent
+  .command("show")
+  .argument("<agent-id>")
+  .description("Show agent identity, selection triggers, tools, and skill preferences.")
+  .action(async (agentId: string) => {
+    await main(async (workspaceRoot) => {
+      const agent = await new AgentManager(workspaceRoot).loadAgent(agentId);
+      console.log(JSON.stringify({
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        identity: agent.identity,
+        selectionTriggers: agent.selectionTriggers,
+        allowedTools: agent.allowedTools,
+        preferredSkills: agent.preferredSkills,
+        blockedSkills: agent.blockedSkills,
+        skillWeights: agent.skillWeights
+      }, null, 2));
+    });
+  });
+
+const agentDefault = agent.command("default").description("Manage the default agent.");
+
+agentDefault
+  .command("show")
+  .description("Show the current default agent.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(policy.agents.defaultAgentId ?? "No default agent. Run `cosia agent bootstrap` to create one.");
+    });
+  });
+
+agentDefault
+  .command("set")
+  .argument("<agent-id>")
+  .description("Set the default agent.")
+  .action(async (agentId: string) => {
+    await main(async (workspaceRoot) => {
+      await new AgentManager(workspaceRoot).loadAgent(agentId);
+      await new PolicyManager(workspaceRoot).setDefaultAgent(agentId);
+      console.log(`Default agent set to ${agentId}`);
+    });
+  });
+
+agent
+  .command("bootstrap")
+  .option("--id <agent-id>", "Agent id")
+  .option("--name <name>", "Display name")
+  .option("--role <role>", "Agent role")
+  .option("--voice <voice>", "Agent voice")
+  .option("--priorities <items>", "Comma-separated priorities")
+  .option("--boundaries <items>", "Comma-separated boundaries")
+  .description("Create a new guided agent and set it as the default.")
+  .action(async (options: { id?: string; name?: string; role?: string; voice?: string; priorities?: string; boundaries?: string }) => {
+    await main(async (workspaceRoot) => {
+      const answers = await resolveBootstrapOptions(options);
+      const manager = new AgentManager(workspaceRoot);
+      const manifest = await manager.bootstrapAgent({
+        id: answers.id,
+        name: answers.name,
+        role: answers.role,
+        voice: answers.voice,
+        priorities: splitList(answers.priorities),
+        boundaries: splitList(answers.boundaries)
+      });
+      await new PolicyManager(workspaceRoot).setDefaultAgent(manifest.id);
+      console.log(`Bootstrapped agent ${manifest.id}`);
+      console.log(`Default agent set to ${manifest.id}`);
+    });
+  });
+
+agent
+  .command("delete")
+  .argument("<agent-id>")
+  .option("--yes", "Actually delete the agent.", false)
+  .option("--force", "Allow deleting agents referenced by sessions.", false)
+  .option("--allow-empty", "Allow deleting the default or last agent.", false)
+  .description("Preview or delete an agent.")
+  .action(async (agentId: string, options: { yes: boolean; force: boolean; allowEmpty: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const policyManager = new PolicyManager(workspaceRoot);
+      const policy = await policyManager.loadPolicy();
+      const result = await new AgentManager(workspaceRoot).deleteAgent(agentId, {
+        yes: options.yes,
+        force: options.force,
+        allowEmpty: options.allowEmpty,
+        defaultAgentId: policy.agents.defaultAgentId
+      });
+      if (result.changed && result.isDefault) {
+        await policyManager.setDefaultAgent(null);
+      }
+      console.log(formatAgentDeleteResult(result));
+      if (result.changed && result.isDefault) {
+        console.log("No default agent is configured. Run `cosia agent bootstrap` to create one.");
+      }
+    });
+  });
+
+agent
+  .command("recommend")
+  .requiredOption("--prompt <prompt>", "Current request")
+  .option("--goal <goal>", "Optional session goal", "")
+  .option("--explain", "Show deterministic scoring table.", false)
+  .description("Recommend an agent for a prompt without changing session state.")
+  .action(async (options: { prompt: string; goal: string; explain: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const rows = await new AgentManager(workspaceRoot).recommendAgent({
+        prompt: options.prompt,
+        goal: options.goal,
+        defaultAgentId: policy.agents.defaultAgentId
+      });
+      if (options.explain) {
+        console.log(formatAgentRecommendation(rows));
+      } else {
+        console.log(rows[0]?.agentId ?? "No agents. Run `cosia agent bootstrap` to create one.");
+      }
+    });
+  });
+
 const session = program.command("session").description("Manage sessions.");
 
 session
   .command("create")
-  .requiredOption("--agent <agent-id>", "Agent id")
+  .option("--agent <agent-id>", "Agent id. Defaults to policy agents.defaultAgentId.")
   .requiredOption("--goal <goal>", "Session goal")
   .description("Create a session for an agent.")
-  .action(async (options: { agent: string; goal: string }) => {
+  .action(async (options: { agent?: string; goal: string }) => {
     await main(async (workspaceRoot) => {
       const agents = new AgentManager(workspaceRoot);
-      await agents.loadAgent(options.agent);
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const agentId = options.agent ?? policy.agents.defaultAgentId;
+      if (!agentId) {
+        throw new Error("No default agent is configured. Run `cosia agent bootstrap` or pass --agent <agent-id>.");
+      }
+      await agents.loadAgent(agentId);
       const sessions = new SessionManager(workspaceRoot);
-      const metadata = await sessions.createSession(options.agent, options.goal);
+      const metadata = await sessions.createSession(agentId, options.goal);
       console.log(metadata.id);
     });
   });
@@ -1062,6 +1210,55 @@ function parseNumberOption(value: string, name: string): number {
     throw new Error(`Invalid ${name}: ${value}`);
   }
   return parsed;
+}
+
+async function resolveBootstrapOptions(options: {
+  id?: string;
+  name?: string;
+  role?: string;
+  voice?: string;
+  priorities?: string;
+  boundaries?: string;
+}): Promise<{
+  id: string;
+  name: string;
+  role: string;
+  voice: string;
+  priorities: string;
+  boundaries: string;
+}> {
+  if (options.id && options.name && options.role && options.voice) {
+    return {
+      id: options.id,
+      name: options.name,
+      role: options.role,
+      voice: options.voice,
+      priorities: options.priorities ?? "",
+      boundaries: options.boundaries ?? ""
+    };
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const id = options.id ?? (await rl.question("Agent id: ")).trim();
+    const name = options.name ?? (await rl.question("Display name: ")).trim();
+    const role = options.role ?? (await rl.question("Role: ")).trim();
+    const voice = options.voice ?? (await rl.question("Voice: ")).trim();
+    const priorities = options.priorities ?? (await rl.question("Priorities (comma-separated, optional): ")).trim();
+    const boundaries = options.boundaries ?? (await rl.question("Boundaries (comma-separated, optional): ")).trim();
+    if (!id || !name || !role || !voice) {
+      throw new Error("Agent id, name, role, and voice are required.");
+    }
+    return { id, name, role, voice, priorities, boundaries };
+  } finally {
+    rl.close();
+  }
+}
+
+function splitList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function formatPromptManifest(manifest: PromptManifest): string {
