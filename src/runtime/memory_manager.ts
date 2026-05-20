@@ -8,20 +8,24 @@ import {
   memoryCandidateRecordSchema,
   memoryCandidateSchema,
   memoryScopeSchema,
+  memoryTierSchema,
   type MemoryCandidate,
   type MemoryCandidateRecord,
   type MemoryRecord,
   type MemoryScope,
+  type MemoryTier,
   type RiskLevel,
   type SessionMetadata
 } from "./types.js";
 
 type AddMemoryInput = {
-  scope: MemoryScope;
+  tier?: MemoryTier;
+  scope?: MemoryScope;
   content: string;
   ownerType?: string;
   ownerId?: string;
   kind?: string;
+  legacyScope?: MemoryScope | null;
   sourceSessionId?: string;
   sourceAgentId?: string;
   confidence?: number;
@@ -31,11 +35,20 @@ type AddMemoryInput = {
   expiresAt?: string | null;
 };
 
-type UpdateMemoryInput = Partial<Pick<AddMemoryInput, "scope" | "content" | "ownerId" | "kind" | "confidence" | "importance">>;
+type UpdateMemoryInput = Partial<Pick<AddMemoryInput, "tier" | "scope" | "content" | "ownerId" | "kind" | "confidence" | "importance">>;
+
+type MemorySearchOptions = {
+  tier?: MemoryTier;
+  ownerId?: string;
+  refSessionId?: string;
+  refAgentId?: string;
+};
 
 type MemoryRow = {
   id: string;
+  tier: MemoryTier | null;
   scope: MemoryScope;
+  legacy_scope: MemoryScope | null;
   owner_type: string;
   owner_id: string | null;
   kind: string;
@@ -122,6 +135,8 @@ export type AutoPromotionPolicy = {
   mode: AutoPromotionMode;
   allowRiskLevels: RiskLevel[];
   requireNoConflict: boolean;
+  allowTiers?: MemoryTier[];
+  denyTiers?: MemoryTier[];
   allowScopes: MemoryScope[];
   denyScopes: MemoryScope[];
   denyKinds: string[];
@@ -158,6 +173,8 @@ export type MemoryReviewSummary = {
 };
 
 const memoryColumnMigrations: Record<string, string> = {
+  tier: "TEXT",
+  legacy_scope: "TEXT",
   valid_from: "TEXT",
   valid_until: "TEXT",
   expires_at: "TEXT",
@@ -190,7 +207,9 @@ export class MemoryManager {
       db.exec(`
         CREATE TABLE IF NOT EXISTS memories (
           id TEXT PRIMARY KEY,
+          tier TEXT,
           scope TEXT NOT NULL,
+          legacy_scope TEXT,
           owner_type TEXT NOT NULL,
           owner_id TEXT,
           kind TEXT NOT NULL,
@@ -221,7 +240,9 @@ export class MemoryManager {
         CREATE TABLE IF NOT EXISTS memory_candidates (
           id TEXT PRIMARY KEY,
           status TEXT NOT NULL,
+          tier TEXT,
           scope TEXT NOT NULL,
+          legacy_scope TEXT,
           owner_id TEXT,
           kind TEXT NOT NULL,
           content TEXT NOT NULL,
@@ -268,6 +289,15 @@ export class MemoryManager {
           report_path TEXT
         );
       `);
+      const candidateColumns = new Set((db.prepare("PRAGMA table_info(memory_candidates)").all() as TableColumn[]).map((column) => column.name));
+      if (!candidateColumns.has("tier")) {
+        db.exec("ALTER TABLE memory_candidates ADD COLUMN tier TEXT");
+      }
+      if (!candidateColumns.has("legacy_scope")) {
+        db.exec("ALTER TABLE memory_candidates ADD COLUMN legacy_scope TEXT");
+      }
+      repairMemoryTierRows(db);
+      repairCandidateTierRows(db);
     } finally {
       db.close();
     }
@@ -283,7 +313,7 @@ export class MemoryManager {
     }
   }
 
-  search(query: string, limit = 8): MemorySearchResult[] {
+  search(query: string, limit = 8, options: MemorySearchOptions = {}): MemorySearchResult[] {
     this.ensureSchema();
     const normalized = normalizeMemoryText(query);
     if (!normalized) {
@@ -291,7 +321,7 @@ export class MemoryManager {
     }
     const db = this.open();
     try {
-      const records = this.activeSearchableMemories(db);
+      const records = this.activeSearchableMemories(db, options);
       const results = records
         .map((record) => calculateMemoryScore(query, record))
         .filter((result) => result.score > 0)
@@ -308,16 +338,29 @@ export class MemoryManager {
     }
   }
 
-  listMemories(limit = 20, includeAll = false): MemoryRecord[] {
+  listMemories(limit = 20, includeAll = false, options: { tier?: MemoryTier; ownerId?: string } = {}): MemoryRecord[] {
     this.ensureSchema();
     const db = this.open();
     try {
+      const clauses: string[] = [];
+      const params: Array<string | number | null> = [];
+      if (!includeAll) {
+        clauses.push("status = 'active'");
+      }
+      if (options.tier) {
+        clauses.push("tier = ?");
+        params.push(options.tier);
+      }
+      if (options.ownerId) {
+        clauses.push("owner_id = ?");
+        params.push(options.ownerId);
+      }
       const rows = db.prepare(`
         SELECT * FROM memories
-        ${includeAll ? "" : "WHERE status = 'active'"}
+        ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
         ORDER BY updated_at DESC
         LIMIT ?
-      `).all(limit) as MemoryRow[];
+      `).all(...params, limit) as MemoryRow[];
       return rows.map(rowToRecord);
     } finally {
       db.close();
@@ -335,11 +378,21 @@ export class MemoryManager {
     if (!updates.length) {
       return target;
     }
+    const ownership = normalizeMemoryOwnership({
+      tier: input.tier ?? target.tier,
+      scope: input.scope ?? target.scope,
+      ownerId: input.ownerId !== undefined ? input.ownerId : target.ownerId,
+      sourceSessionId: target.sourceSessionId ?? undefined,
+      sourceAgentId: target.sourceAgentId ?? undefined,
+      existingLegacyScope: target.legacyScope
+    });
     const next: MemoryRecord = {
       ...target,
-      scope: input.scope ? memoryScopeSchema.parse(input.scope) : target.scope,
-      ownerType: input.scope ? input.scope : target.ownerType,
-      ownerId: input.ownerId !== undefined ? input.ownerId : target.ownerId,
+      tier: ownership.tier,
+      scope: ownership.scope,
+      legacyScope: ownership.legacyScope,
+      ownerType: ownership.tier,
+      ownerId: ownership.ownerId,
       kind: input.kind ?? target.kind,
       content: input.content ?? target.content,
       confidence: input.confidence ?? target.confidence,
@@ -367,6 +420,20 @@ export class MemoryManager {
     }
   }
 
+  archiveOwnerMemories(tier: MemoryTier, ownerId: string, reason: string): number {
+    this.ensureSchema();
+    const db = this.open();
+    try {
+      const targets = this.activeSearchableMemories(db, { tier, ownerId });
+      for (const target of targets) {
+        archiveMemoryRow(db, target, reason, null);
+      }
+      return targets.length;
+    } finally {
+      db.close();
+    }
+  }
+
   countMemories(): number {
     this.ensureSchema();
     const db = this.open();
@@ -378,8 +445,11 @@ export class MemoryManager {
     }
   }
 
-  async writeReferenceMemory(session: SessionMetadata, userPrompt: string): Promise<MemorySearchResult[]> {
-    const results = this.search(`${session.goal} ${userPrompt}`, 10);
+  async writeReferenceMemory(session: SessionMetadata, userPrompt: string, executingAgentId?: string): Promise<MemorySearchResult[]> {
+    const results = this.search(`${session.goal} ${userPrompt}`, 10, {
+      refSessionId: session.id,
+      refAgentId: executingAgentId ?? session.assignedAgentId ?? undefined
+    });
     const sessionDir = join(this.workspaceRoot, "sessions", session.id);
     const content = results.length
       ? `# REFERENCE MEMORY\n\n${results.map((result) => formatReferenceMemoryLine(result)).join("\n")}\n`
@@ -399,7 +469,7 @@ export class MemoryManager {
     this.ensureQueueStorage();
     const records: MemoryCandidateRecord[] = candidates.map((candidate) => {
       const parsed = memoryCandidateSchema.parse(candidate);
-      return {
+      return normalizeCandidateRecord({
         id: randomUUID(),
         status: "pending" as const,
         ...parsed,
@@ -407,7 +477,7 @@ export class MemoryManager {
         sourceAgentId: agentId,
         runId,
         createdAt: new Date().toISOString()
-      };
+      }, session, agentId);
     });
     const db = this.open();
     try {
@@ -783,7 +853,7 @@ export class MemoryManager {
     return candidate.record;
   }
 
-  private activeSearchableMemories(db: DatabaseSync): MemoryRecord[] {
+  private activeSearchableMemories(db: DatabaseSync, options: MemorySearchOptions = {}): MemoryRecord[] {
     const now = new Date().toISOString();
     const rows = db.prepare(`
       SELECT * FROM memories
@@ -791,7 +861,9 @@ export class MemoryManager {
         AND (expires_at IS NULL OR expires_at > ?)
       ORDER BY updated_at DESC
     `).all(now) as MemoryRow[];
-    return rows.map(rowToRecord);
+    return rows
+      .map(rowToRecord)
+      .filter((record) => memoryMatchesSearchOptions(record, options));
   }
 
   private resolveMemory(memoryId: string, includeAll: boolean): MemoryRecord {
@@ -1025,7 +1097,7 @@ export class MemoryManager {
 export function calculateMemoryScore(query: string, record: MemoryRecord): MemorySearchResult {
   const normalizedQuery = normalizeMemoryText(query);
   const queryTokens = tokenSet(query);
-  const haystack = normalizeMemoryText(`${record.content} ${record.kind} ${record.scope} ${record.ownerId ?? ""}`);
+  const haystack = normalizeMemoryText(`${record.content} ${record.kind} ${record.tier} ${record.scope} ${record.legacyScope ?? ""} ${record.ownerId ?? ""}`);
   const matchedTokens = intersection([...queryTokens], tokenSet(haystack));
   const exactPhrase = Boolean(normalizedQuery && haystack.includes(normalizedQuery));
   const relevant = exactPhrase || matchedTokens.length > 0;
@@ -1060,7 +1132,7 @@ export function formatMemoryReviewSummary(summary: MemoryReviewSummary): string 
     const id = review.candidate.id.slice(0, 8);
     const status = review.autoPromoted ? "auto-promoted" : "pending";
     const conflictText = review.conflicts.length ? ` conflicts:${review.conflicts.length}` : "";
-    lines.push(`- ${id} ${status} risk:${review.classification.riskLevel}${conflictText} ${review.candidate.scope}/${review.candidate.kind}`);
+    lines.push(`- ${id} ${status} risk:${review.classification.riskLevel}${conflictText} ${review.candidate.tier}/${review.candidate.kind}`);
     lines.push(`  reasons: ${review.classification.reasons.join(", ") || "none"}`);
     lines.push(`  content: ${redactedCandidatePreview(review.candidate, review.classification)}`);
     if (review.conflicts.length) {
@@ -1083,6 +1155,12 @@ function shouldAutoPromote(
     return false;
   }
   if (policy.requireNoConflict && conflicts.length > 0) {
+    return false;
+  }
+  if (policy.denyTiers?.includes(candidate.tier)) {
+    return false;
+  }
+  if (policy.allowTiers && !policy.allowTiers.includes(candidate.tier)) {
     return false;
   }
   if (policy.denyScopes.includes(candidate.scope) || policy.denyKinds.includes(candidate.kind.toLowerCase())) {
@@ -1178,13 +1256,46 @@ function parseCandidateMigrationEntries(text: string): {
       if (parsed.success) {
         records.push(parsed.data);
       } else {
-        legacyLines.push(lineId);
+        const repaired = normalizeLegacyCandidateRecord(raw);
+        if (repaired) {
+          records.push(repaired);
+        } else {
+          legacyLines.push(lineId);
+        }
       }
     } catch {
       invalidLines.push(lineId);
     }
   });
   return { records, legacyLines, invalidLines };
+}
+
+function normalizeLegacyCandidateRecord(raw: Record<string, unknown>): MemoryCandidateRecord | undefined {
+  const sourceSessionId = typeof raw.sourceSessionId === "string" ? raw.sourceSessionId : undefined;
+  const sourceAgentId = typeof raw.sourceAgentId === "string" ? raw.sourceAgentId : undefined;
+  if (!sourceSessionId || !sourceAgentId) {
+    return undefined;
+  }
+  const status = raw.status;
+  if (status !== "pending" && status !== "promoted" && status !== "discarded" && status !== "auto_promoted" && status !== "reverted") {
+    return undefined;
+  }
+  const ownership = normalizeMemoryOwnership({
+    tier: raw.tier as MemoryTier | undefined,
+    scope: raw.scope as MemoryScope | undefined,
+    ownerId: typeof raw.ownerId === "string" ? raw.ownerId : null,
+    legacyScope: raw.legacyScope as MemoryScope | null | undefined,
+    sourceSessionId,
+    sourceAgentId
+  });
+  const parsed = memoryCandidateRecordSchema.safeParse({
+    ...raw,
+    tier: ownership.tier,
+    scope: ownership.scope,
+    legacyScope: ownership.legacyScope ?? undefined,
+    ownerId: ownership.ownerId ?? undefined
+  });
+  return parsed.success ? parsed.data : undefined;
 }
 
 function parsePromotionMigrationEntries(text: string): {
@@ -1213,19 +1324,72 @@ function parsePromotionMigrationEntries(text: string): {
   return { records, legacyLines: [], invalidLines };
 }
 
+function repairMemoryTierRows(db: DatabaseSync): void {
+  const rows = db.prepare("SELECT * FROM memories").all() as MemoryRow[];
+  for (const row of rows) {
+    const ownership = normalizeMemoryOwnership({
+      tier: row.tier ?? undefined,
+      scope: row.scope,
+      ownerId: row.owner_id ?? undefined,
+      legacyScope: row.legacy_scope,
+      sourceSessionId: row.source_session_id ?? undefined,
+      sourceAgentId: row.source_agent_id ?? undefined
+    });
+    if (row.tier !== ownership.tier || row.legacy_scope !== ownership.legacyScope || row.owner_id !== ownership.ownerId || row.scope !== ownership.scope || row.owner_type !== ownership.tier) {
+      db.prepare("UPDATE memories SET tier = ?, scope = ?, legacy_scope = ?, owner_type = ?, owner_id = ? WHERE id = ?")
+        .run(ownership.tier, ownership.scope, ownership.legacyScope, ownership.tier, ownership.ownerId, row.id);
+    }
+  }
+}
+
+function repairCandidateTierRows(db: DatabaseSync): void {
+  const rows = db.prepare("SELECT id, record_json FROM memory_candidates").all() as CandidateRow[];
+  for (const row of rows) {
+    const raw = JSON.parse(row.record_json) as Partial<MemoryCandidateRecord> & Record<string, unknown>;
+    const sourceSessionId = typeof raw.sourceSessionId === "string" ? raw.sourceSessionId : "";
+    const sourceAgentId = typeof raw.sourceAgentId === "string" ? raw.sourceAgentId : "";
+    if (!sourceSessionId || !sourceAgentId) {
+      continue;
+    }
+    const ownership = normalizeMemoryOwnership({
+      tier: raw.tier as MemoryTier | undefined,
+      scope: raw.scope as MemoryScope | undefined,
+      ownerId: typeof raw.ownerId === "string" ? raw.ownerId : null,
+      legacyScope: raw.legacyScope as MemoryScope | null | undefined,
+      sourceSessionId,
+      sourceAgentId
+    });
+    const next = memoryCandidateRecordSchema.safeParse({
+      ...raw,
+      tier: ownership.tier,
+      scope: ownership.scope,
+      legacyScope: ownership.legacyScope ?? undefined,
+      ownerId: ownership.ownerId ?? undefined
+    });
+    if (!next.success) {
+      continue;
+    }
+    if (raw.tier !== next.data.tier || raw.scope !== next.data.scope || raw.legacyScope !== next.data.legacyScope || raw.ownerId !== next.data.ownerId) {
+      upsertCandidateRow(db, next.data);
+    }
+  }
+}
+
 function upsertCandidateRow(db: DatabaseSync, record: MemoryCandidateRecord): void {
   const normalized = memoryCandidateRecordSchema.parse(record);
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO memory_candidates (
-      id, status, scope, owner_id, kind, content, importance, confidence,
+      id, status, tier, scope, legacy_scope, owner_id, kind, content, importance, confidence,
       source_session_id, source_agent_id, run_id, created_at, reviewed_at,
       promoted_memory_id, auto_promotion_id, risk_level, risk_reasons_json,
       discard_reason, record_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
+      tier = excluded.tier,
       scope = excluded.scope,
+      legacy_scope = excluded.legacy_scope,
       owner_id = excluded.owner_id,
       kind = excluded.kind,
       content = excluded.content,
@@ -1246,7 +1410,9 @@ function upsertCandidateRow(db: DatabaseSync, record: MemoryCandidateRecord): vo
   `).run(
     normalized.id,
     normalized.status,
+    normalized.tier,
     normalized.scope,
+    normalized.legacyScope ?? null,
     normalized.ownerId ?? null,
     normalized.kind,
     normalized.content,
@@ -1370,13 +1536,13 @@ export function formatMemoryConflicts(candidate: MemoryCandidateRecord, conflict
   }
   const lines = [
     `Candidate: ${candidate.id}`,
-    `Scope: ${candidate.scope}/${candidate.kind}`,
+    `Tier: ${candidate.tier}/${candidate.kind}`,
     `Content: ${preview(candidate.content)}`,
     `Conflicts: ${conflicts.length}`,
     ""
   ];
   conflicts.forEach((conflict, index) => {
-    lines.push(`${index + 1}. ${conflict.type}  memory:${conflict.memory.id.slice(0, 8)}  ${conflict.memory.scope}/${conflict.memory.kind}`);
+    lines.push(`${index + 1}. ${conflict.type}  memory:${conflict.memory.id.slice(0, 8)}  ${conflict.memory.tier}/${conflict.memory.kind}`);
     lines.push(`   score: ${conflict.score.toFixed(2)}  overlap: ${conflict.overlapRatio.toFixed(2)}`);
     lines.push(`   memory: ${conflict.memoryPreview}`);
     lines.push(`   candidate: ${conflict.candidatePreview}`);
@@ -1394,6 +1560,81 @@ function validatePromotionOptions(options: PromoteCandidateOptions): void {
   }
 }
 
+function legacyScopeToTier(scope: MemoryScope | undefined): MemoryTier {
+  if (scope === "session") {
+    return "session";
+  }
+  if (scope === "agent") {
+    return "agent";
+  }
+  return "core";
+}
+
+function scopeMirrorForTier(tier: MemoryTier, legacyScope?: MemoryScope | null): MemoryScope {
+  if (legacyScope) {
+    return legacyScope;
+  }
+  if (tier === "agent" || tier === "session") {
+    return tier;
+  }
+  return "global";
+}
+
+function normalizeMemoryOwnership(input: {
+  tier?: MemoryTier;
+  scope?: MemoryScope;
+  ownerId?: string | null;
+  legacyScope?: MemoryScope | null;
+  existingLegacyScope?: MemoryScope | null;
+  sourceSessionId?: string;
+  sourceAgentId?: string;
+}): { tier: MemoryTier; scope: MemoryScope; legacyScope: MemoryScope | null; ownerId: string | null } {
+  const parsedTier = input.tier ? memoryTierSchema.parse(input.tier) : undefined;
+  const parsedScope = input.scope ? memoryScopeSchema.parse(input.scope) : undefined;
+  const tier = parsedTier ?? legacyScopeToTier(parsedScope);
+  const legacyScope = input.legacyScope !== undefined
+    ? input.legacyScope
+    : parsedScope && parsedScope !== scopeMirrorForTier(tier, null)
+      ? parsedScope
+      : input.existingLegacyScope ?? null;
+  const scope = scopeMirrorForTier(tier, parsedScope ?? legacyScope);
+  const ownerId = input.ownerId !== undefined
+    ? input.ownerId
+    : tier === "session"
+      ? input.sourceSessionId ?? null
+      : tier === "agent"
+        ? input.sourceAgentId ?? null
+        : null;
+  return {
+    tier,
+    scope,
+    legacyScope,
+    ownerId: ownerId ?? null
+  };
+}
+
+function normalizeCandidateRecord(
+  candidate: Omit<MemoryCandidateRecord, "tier" | "scope"> & Partial<Pick<MemoryCandidateRecord, "tier" | "scope" | "legacyScope">>,
+  session: SessionMetadata,
+  executingAgentId: string
+): MemoryCandidateRecord {
+  const ownership = normalizeMemoryOwnership({
+    tier: candidate.tier,
+    scope: candidate.scope,
+    ownerId: candidate.ownerId,
+    legacyScope: candidate.legacyScope,
+    sourceSessionId: session.id,
+    sourceAgentId: executingAgentId
+  });
+  return memoryCandidateRecordSchema.parse({
+    ...candidate,
+    tier: ownership.tier,
+    scope: ownership.scope,
+    legacyScope: ownership.legacyScope ?? undefined,
+    ownerId: ownership.ownerId ?? undefined
+  });
+}
+
 function candidateToView(record: MemoryCandidateRecord, lineNumber: number): CandidateView {
   return {
     displayId: record.id || `line:${lineNumber}`,
@@ -1405,7 +1646,9 @@ function candidateToView(record: MemoryCandidateRecord, lineNumber: number): Can
 
 function candidateToMemoryInput(candidate: MemoryCandidateRecord): AddMemoryInput {
   return {
+    tier: candidate.tier,
     scope: candidate.scope,
+    legacyScope: candidate.legacyScope ?? null,
     content: candidate.content,
     ownerId: candidate.ownerId,
     kind: candidate.kind,
@@ -1417,13 +1660,15 @@ function candidateToMemoryInput(candidate: MemoryCandidateRecord): AddMemoryInpu
 }
 
 function insertMemory(db: DatabaseSync, input: AddMemoryInput): MemoryRecord {
-  const scope = memoryScopeSchema.parse(input.scope);
+  const ownership = normalizeMemoryOwnership(input);
   const now = new Date().toISOString();
   const record: MemoryRecord = {
     id: randomUUID(),
-    scope,
-    ownerType: input.ownerType ?? scope,
-    ownerId: input.ownerId ?? null,
+    tier: ownership.tier,
+    scope: ownership.scope,
+    legacyScope: ownership.legacyScope,
+    ownerType: input.ownerType ?? ownership.tier,
+    ownerId: ownership.ownerId,
     kind: input.kind ?? "note",
     content: input.content,
     sourceSessionId: input.sourceSessionId ?? null,
@@ -1443,13 +1688,15 @@ function insertMemory(db: DatabaseSync, input: AddMemoryInput): MemoryRecord {
   };
   db.prepare(`
     INSERT INTO memories (
-      id, scope, owner_type, owner_id, kind, content, source_session_id, source_agent_id,
+      id, tier, scope, legacy_scope, owner_type, owner_id, kind, content, source_session_id, source_agent_id,
       confidence, importance, status, created_at, updated_at, last_accessed_at,
       valid_from, valid_until, expires_at, archived_at, archive_reason, replaced_by_memory_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.id,
+    record.tier,
     record.scope,
+    record.legacyScope,
     record.ownerType,
     record.ownerId,
     record.kind,
@@ -1475,11 +1722,13 @@ function insertMemory(db: DatabaseSync, input: AddMemoryInput): MemoryRecord {
 function updateMemoryRow(db: DatabaseSync, record: MemoryRecord): void {
   db.prepare(`
     UPDATE memories
-    SET scope = ?, owner_type = ?, owner_id = ?, kind = ?, content = ?,
+    SET tier = ?, scope = ?, legacy_scope = ?, owner_type = ?, owner_id = ?, kind = ?, content = ?,
       confidence = ?, importance = ?, updated_at = ?
     WHERE id = ? AND status = 'active'
   `).run(
+    record.tier,
     record.scope,
+    record.legacyScope,
     record.ownerType,
     record.ownerId,
     record.kind,
@@ -1510,11 +1759,21 @@ function archiveMemoryRow(db: DatabaseSync, target: MemoryRecord, reason: string
 }
 
 function rowToRecord(row: MemoryRow): MemoryRecord {
+  const ownership = normalizeMemoryOwnership({
+    tier: row.tier ?? undefined,
+    scope: row.scope,
+    ownerId: row.owner_id ?? undefined,
+    legacyScope: row.legacy_scope,
+    sourceSessionId: row.source_session_id ?? undefined,
+    sourceAgentId: row.source_agent_id ?? undefined
+  });
   return {
     id: row.id,
-    scope: row.scope,
-    ownerType: row.owner_type,
-    ownerId: row.owner_id,
+    tier: ownership.tier,
+    scope: ownership.scope,
+    legacyScope: ownership.legacyScope,
+    ownerType: row.owner_type || ownership.tier,
+    ownerId: ownership.ownerId,
     kind: row.kind,
     content: row.content,
     sourceSessionId: row.source_session_id,
@@ -1566,13 +1825,28 @@ function recencyScore(updatedAt: string): number {
 
 function formatReferenceMemoryLine(result: MemorySearchResult): string {
   const record = result.record;
-  return `- [mem:${record.id.slice(0, 8)} score:${result.score.toFixed(2)} ${record.scope}/${record.kind}] ${record.content}`;
+  return `- [mem:${record.id.slice(0, 8)} score:${result.score.toFixed(2)} ${record.tier}/${record.kind}] ${record.content}`;
 }
 
 function isComparableMemory(candidate: MemoryCandidateRecord, memory: MemoryRecord): boolean {
-  return candidate.scope === memory.scope
+  return candidate.tier === memory.tier
     && candidate.kind === memory.kind
     && ownersCompatible(candidate.ownerId ?? null, memory.ownerId);
+}
+
+function memoryMatchesSearchOptions(record: MemoryRecord, options: MemorySearchOptions): boolean {
+  if (options.tier && record.tier !== options.tier) {
+    return false;
+  }
+  if (options.ownerId && record.ownerId !== options.ownerId) {
+    return false;
+  }
+  if (options.refSessionId || options.refAgentId) {
+    return record.tier === "core"
+      || (record.tier === "session" && record.ownerId === options.refSessionId)
+      || (record.tier === "agent" && record.ownerId === options.refAgentId);
+  }
+  return true;
 }
 
 function ownersCompatible(candidateOwnerId: string | null, memoryOwnerId: string | null): boolean {

@@ -54,7 +54,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const runId = randomUUID();
   const recordPolicyEvent = (event: Parameters<PolicyAuditLog["append"]>[2]) => audit.append(session, agent.id, event, runId);
   if (options.refreshReferenceMemory ?? true) {
-    await memory.writeReferenceMemory(session, options.prompt);
+    await memory.writeReferenceMemory(session, options.prompt, agent.id);
   }
 
   const providerId = options.providerId ?? policy.model.defaultProvider;
@@ -163,7 +163,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
 
   await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames, agent.id));
   if (options.refreshReferenceMemoryAfterRun ?? options.refreshReferenceMemory ?? true) {
-    await memory.writeReferenceMemory(session, options.prompt);
+    await memory.writeReferenceMemory(session, options.prompt, agent.id);
   }
   return finalContent;
 }

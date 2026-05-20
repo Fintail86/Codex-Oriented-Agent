@@ -67,7 +67,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.12.0\"");
+    expect(policyJson).toContain("\"version\": \"0.13.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -565,7 +565,93 @@ describe("memory", () => {
     expect(ref).toContain("Codex / Agent / Session");
     expect(ref).toContain("mem:");
     expect(ref).toContain("score:");
-    expect(ref).toContain("project/decision");
+    expect(ref).toContain("core/decision");
+  });
+
+  it("filters memory by tier and writes run-scoped reference memory", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const currentSession = await sessions.createSession("architect-agent", "Current memory context");
+    const otherSession = await sessions.createSession("cosia-agent", "Other memory context");
+    const memory = new MemoryManager(root);
+
+    const core = memory.addMemory({
+      tier: "core",
+      kind: "decision",
+      content: "Shared COSIA memory tier decision."
+    });
+    const currentSessionMemory = memory.addMemory({
+      tier: "session",
+      ownerId: currentSession.id,
+      kind: "note",
+      content: "Current session private memory."
+    });
+    const otherSessionMemory = memory.addMemory({
+      tier: "session",
+      ownerId: otherSession.id,
+      kind: "note",
+      content: "Other session private memory."
+    });
+    const agentMemory = memory.addMemory({
+      tier: "agent",
+      ownerId: "architect-agent",
+      kind: "note",
+      content: "Architect agent private memory."
+    });
+
+    expect(memory.search("memory", 20, { tier: "session" }).map((result) => result.record.id))
+      .toEqual(expect.arrayContaining([currentSessionMemory.id, otherSessionMemory.id]));
+    expect(memory.search("memory", 20, { tier: "session", ownerId: currentSession.id }).map((result) => result.record.id))
+      .toEqual([currentSessionMemory.id]);
+
+    await memory.writeReferenceMemory(currentSession, "memory", "architect-agent");
+    const ref = await readFile(join(root, "sessions", currentSession.id, "REF_MEMORY.md"), "utf8");
+    expect(ref).toContain(core.id.slice(0, 8));
+    expect(ref).toContain(currentSessionMemory.id.slice(0, 8));
+    expect(ref).toContain(agentMemory.id.slice(0, 8));
+    expect(ref).not.toContain(otherSessionMemory.id.slice(0, 8));
+  });
+
+  it("archives session and agent tier memories with lifecycle hooks", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Lifecycle memory");
+    const memory = new MemoryManager(root);
+    const sessionMemory = memory.addMemory({
+      tier: "session",
+      ownerId: session.id,
+      content: "Session-owned memory.",
+      kind: "note"
+    });
+    const agentMemory = memory.addMemory({
+      tier: "agent",
+      ownerId: "architect-agent",
+      content: "Agent-owned memory.",
+      kind: "note"
+    });
+    const coreMemory = memory.addMemory({
+      tier: "core",
+      content: "Core memory survives lifecycle changes.",
+      kind: "note"
+    });
+
+    await sessions.archiveSession(session.id);
+    expect(memory.archiveOwnerMemories("session", session.id, "Session archived: test")).toBe(1);
+    expect(memory.getMemory(sessionMemory.id).status).toBe("archived");
+    expect(memory.getMemory(coreMemory.id).status).toBe("active");
+
+    await agents.deleteAgent("architect-agent", {
+      yes: true,
+      force: true,
+      defaultAgentId: "cosia-agent"
+    });
+    expect(memory.archiveOwnerMemories("agent", "architect-agent", "Agent deleted: architect-agent")).toBe(1);
+    expect(memory.getMemory(agentMemory.id).status).toBe("archived");
+    expect(memory.getMemory(coreMemory.id).status).toBe("active");
   });
 
   it("normalizes text and scores memory search results", async () => {
@@ -799,7 +885,9 @@ describe("memory", () => {
     const candidate = {
       id: "candidate-secret",
       status: "pending" as const,
+      tier: "core" as const,
       scope: "project" as const,
+      legacyScope: "project" as const,
       kind: "decision",
       content: "Use token = \"sk-testsecret1234567890\" for local auth.",
       importance: 3,
@@ -827,7 +915,7 @@ describe("memory", () => {
 
     await runSession(root, {
       sessionId: session.id,
-      prompt: "[MOCK_CANDIDATE] auto promote safe memory",
+      prompt: "[MOCK_SESSION_CANDIDATE] auto promote safe memory",
       providerId: "mock",
       onEvent: (message) => events.push(message)
     });
@@ -870,6 +958,32 @@ describe("memory", () => {
     expect(events.some((event) => event.includes("memory review: 1 candidates, 0 auto-promoted, 1 pending, 1 conflicts"))).toBe(true);
     expect(memory.listPromotions()).toHaveLength(0);
     expect((await memory.listCandidates())[0].record?.status).toBe("pending");
+  });
+
+  it("defaults candidate owners by tier and keeps non-session candidates pending", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Candidate tier defaults");
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_CORE_CANDIDATE]",
+      providerId: "mock"
+    });
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_AGENT_CANDIDATE]",
+      providerId: "mock"
+    });
+
+    const candidates = await new MemoryManager(root).listCandidates(true);
+    const agentCandidate = candidates.find((candidate) => candidate.record?.tier === "agent")?.record;
+    const coreCandidate = candidates.find((candidate) => candidate.record?.tier === "core")?.record;
+    expect(agentCandidate).toMatchObject({ ownerId: "architect-agent", status: "pending" });
+    expect(coreCandidate).toMatchObject({ status: "pending" });
+    expect(coreCandidate?.ownerId).toBeUndefined();
   });
 });
 
@@ -1520,7 +1634,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.12.0");
+    expect(emptyReport.version).toBe("0.13.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

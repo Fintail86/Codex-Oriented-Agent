@@ -156,7 +156,13 @@ const agentStepJsonSchema = {
       items: {
         type: "object",
         properties: {
+          tier: {
+            enum: ["core", "agent", "session"]
+          },
           scope: {
+            enum: ["global", "user", "codex", "agent", "project", "session", "task", "tool"]
+          },
+          legacyScope: {
             enum: ["global", "user", "codex", "agent", "project", "session", "task", "tool"]
           },
           ownerId: {
@@ -179,7 +185,7 @@ const agentStepJsonSchema = {
             maximum: 1
           }
         },
-        required: ["scope", "ownerId", "kind", "content", "importance", "confidence"],
+        required: ["tier", "kind", "content", "importance", "confidence"],
         additionalProperties: false
       }
     },

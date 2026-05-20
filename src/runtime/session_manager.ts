@@ -95,6 +95,18 @@ export class SessionManager {
     return next;
   }
 
+  async archiveSession(sessionId: string): Promise<SessionMetadata> {
+    const session = await this.loadSession(sessionId);
+    const next: SessionMetadata = {
+      ...session,
+      status: "archived",
+      updatedAt: new Date().toISOString()
+    };
+    await this.writeSessionMetadata(next);
+    await this.writeSessionMarkdown(next);
+    return next;
+  }
+
   async ensureSessionSupportFiles(sessionId: string): Promise<void> {
     const sessionDir = this.sessionDir(sessionId);
     await writeTextIfMissing(join(sessionDir, "SESSION_SUMMARY.md"), "# SESSION SUMMARY\n\nNo compact session summary yet.\n");

@@ -1,5 +1,5 @@
 {
-  "version": "0.12.0",
+  "version": "0.13.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -82,6 +82,11 @@
   },
   "memory": {
     "longTermWrite": "candidate_promote_only",
+    "candidateTiers": [
+      "core",
+      "agent",
+      "session"
+    ],
     "candidateScopes": [
       "global",
       "user",
@@ -100,6 +105,13 @@
         "low"
       ],
       "requireNoConflict": true,
+      "allowTiers": [
+        "session"
+      ],
+      "denyTiers": [
+        "core",
+        "agent"
+      ],
       "allowScopes": [
         "project",
         "session",

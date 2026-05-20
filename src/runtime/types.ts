@@ -13,6 +13,14 @@ export const memoryScopeSchema = z.enum([
 
 export type MemoryScope = z.infer<typeof memoryScopeSchema>;
 
+export const memoryTierSchema = z.enum([
+  "core",
+  "agent",
+  "session"
+]);
+
+export type MemoryTier = z.infer<typeof memoryTierSchema>;
+
 export const toolPermissionSchema = z.enum([
   "read_only",
   "write_local",
@@ -102,7 +110,9 @@ export type ModelInput = {
 };
 
 export const memoryCandidateSchema = z.object({
-  scope: memoryScopeSchema,
+  tier: memoryTierSchema.optional(),
+  scope: memoryScopeSchema.optional(),
+  legacyScope: memoryScopeSchema.optional(),
   ownerId: z.string().optional(),
   kind: z.string().min(1),
   content: z.string().min(1),
@@ -121,6 +131,8 @@ export type MemoryCandidateStatus = z.infer<typeof memoryCandidateStatusSchema>;
 export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
   id: z.string().min(1),
   status: memoryCandidateStatusSchema,
+  tier: memoryTierSchema,
+  scope: memoryScopeSchema,
   sourceSessionId: z.string().min(1),
   sourceAgentId: z.string().min(1),
   runId: z.string().optional(),
@@ -232,7 +244,9 @@ export type ToolDefinition = {
 
 export type MemoryRecord = {
   id: string;
+  tier: MemoryTier;
   scope: MemoryScope;
+  legacyScope: MemoryScope | null;
   ownerType: string;
   ownerId: string | null;
   kind: string;

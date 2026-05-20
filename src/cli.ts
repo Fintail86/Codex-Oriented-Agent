@@ -16,8 +16,8 @@ import { SessionManager } from "./runtime/session_manager.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
 import { getStatusReport } from "./runtime/status_report.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
-import { memoryScopeSchema } from "./runtime/types.js";
-import type { SessionMetadata, ToolName } from "./runtime/types.js";
+import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
+import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
 import { COSIA_VERSION } from "./runtime/version.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
 
@@ -187,6 +187,12 @@ agent
       if (result.changed && result.isDefault) {
         await policyManager.setDefaultAgent(null);
       }
+      if (result.changed) {
+        const archived = new MemoryManager(workspaceRoot).archiveOwnerMemories("agent", agentId, `Agent deleted: ${agentId}`);
+        if (archived) {
+          console.log(`Archived ${archived} agent memory record(s).`);
+        }
+      }
       console.log(formatAgentDeleteResult(result));
       if (result.changed && result.isDefault) {
         console.log("No default agent is configured. Run `cosia agent bootstrap` to create one.");
@@ -294,6 +300,21 @@ session
   });
 
 session
+  .command("archive")
+  .argument("<session-id>")
+  .requiredOption("--reason <reason>", "Archive reason")
+  .description("Archive a session and its session-tier memories.")
+  .action(async (sessionId: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      const sessions = new SessionManager(workspaceRoot);
+      const metadata = await sessions.archiveSession(sessionId);
+      const archived = new MemoryManager(workspaceRoot).archiveOwnerMemories("session", sessionId, `Session archived: ${options.reason}`);
+      console.log(`Archived session ${metadata.id}`);
+      console.log(`Archived ${archived} session memory record(s).`);
+    });
+  });
+
+session
   .command("show")
   .argument("<session-id>")
   .option("--tail <chars>", "Context tail character count", "1200")
@@ -377,21 +398,24 @@ const memory = program.command("memory").description("Manage long-term memory.")
 
 memory
   .command("add")
-  .requiredOption("--scope <scope>", "Memory scope")
+  .option("--tier <tier>", "Memory tier: core, agent, or session")
+  .option("--scope <scope>", "Deprecated memory scope alias")
   .requiredOption("--content <content>", "Memory content")
   .option("--kind <kind>", "Memory kind", "note")
   .option("--owner-id <owner-id>", "Owner id")
   .option("--importance <importance>", "Memory importance from 1 to 5", "3")
   .option("--confidence <confidence>", "Memory confidence from 0 to 1", "0.7")
   .description("Add an explicit long-term memory.")
-  .action(async (options: { scope: string; content: string; kind: string; ownerId?: string; importance: string; confidence: string }) => {
+  .action(async (options: { tier?: string; scope?: string; content: string; kind: string; ownerId?: string; importance: string; confidence: string }) => {
     await main(async (workspaceRoot) => {
+      const ownership = await resolveMemoryTierOptions(workspaceRoot, options, true);
       const manager = new MemoryManager(workspaceRoot);
       const record = manager.addMemory({
-        scope: memoryScopeSchema.parse(options.scope),
+        tier: ownership.tier,
+        scope: ownership.scope,
         content: options.content,
         kind: options.kind,
-        ownerId: options.ownerId,
+        ownerId: ownership.ownerId ?? undefined,
         importance: parseIntegerOption(options.importance, "importance"),
         confidence: parseNumberOption(options.confidence, "confidence")
       });
@@ -402,13 +426,16 @@ memory
 memory
   .command("search")
   .requiredOption("--query <query>", "Search query")
+  .option("--tier <tier>", "Filter by memory tier")
+  .option("--owner-id <owner-id>", "Filter by owner id")
   .option("--limit <limit>", "Result limit", "8")
   .option("--show-score", "Show memory search scores.", false)
   .description("Search explicit long-term memory.")
-  .action(async (options: { query: string; limit: string; showScore: boolean }) => {
+  .action(async (options: { query: string; tier?: string; ownerId?: string; limit: string; showScore: boolean }) => {
     await main(async (workspaceRoot) => {
       const manager = new MemoryManager(workspaceRoot);
-      const results = manager.search(options.query, Number.parseInt(options.limit, 10));
+      const tier = options.tier ? memoryTierSchema.parse(options.tier) : undefined;
+      const results = manager.search(options.query, Number.parseInt(options.limit, 10), { tier, ownerId: options.ownerId });
       if (!results.length) {
         console.log("No matches.");
         return;
@@ -416,25 +443,31 @@ memory
       for (const result of results) {
         const record = result.record;
         const score = options.showScore ? ` score:${result.score.toFixed(2)} tokens:${result.matchedTokens.join(",") || "none"}` : "";
-        console.log(`${record.id}\t[${record.scope}/${record.kind}]${score}\t${record.content}`);
+        console.log(`${record.id}\t[${record.tier}/${record.kind}]${score}\t${record.content}`);
       }
     });
   });
 
 memory
   .command("list")
+  .option("--tier <tier>", "Filter by memory tier")
+  .option("--owner-id <owner-id>", "Filter by owner id")
   .option("--limit <limit>", "Result limit", "20")
   .option("--all", "Show active and archived memories.", false)
   .description("List latest active long-term memories.")
-  .action(async (options: { limit: string; all: boolean }) => {
+  .action(async (options: { tier?: string; ownerId?: string; limit: string; all: boolean }) => {
     await main(async (workspaceRoot) => {
-      const records = new MemoryManager(workspaceRoot).listMemories(Number.parseInt(options.limit, 10), options.all);
+      const tier = options.tier ? memoryTierSchema.parse(options.tier) : undefined;
+      const records = new MemoryManager(workspaceRoot).listMemories(Number.parseInt(options.limit, 10), options.all, {
+        tier,
+        ownerId: options.ownerId
+      });
       if (!records.length) {
         console.log("No memories.");
         return;
       }
       for (const record of records) {
-        console.log(`${record.id}\t${record.status}\t[${record.scope}/${record.kind}]\t${record.content}`);
+        console.log(`${record.id}\t${record.status}\t[${record.tier}/${record.kind}]\t${record.content}`);
       }
     });
   });
@@ -454,18 +487,23 @@ memory
   .argument("<memory-id>")
   .option("--content <content>", "Memory content")
   .option("--kind <kind>", "Memory kind")
-  .option("--scope <scope>", "Memory scope")
+  .option("--tier <tier>", "Memory tier")
+  .option("--scope <scope>", "Deprecated memory scope alias")
   .option("--owner-id <owner-id>", "Owner id")
   .option("--importance <importance>", "Memory importance from 1 to 5")
   .option("--confidence <confidence>", "Memory confidence from 0 to 1")
   .description("Update an active long-term memory.")
-  .action(async (memoryId: string, options: { content?: string; kind?: string; scope?: string; ownerId?: string; importance?: string; confidence?: string }) => {
+  .action(async (memoryId: string, options: { content?: string; kind?: string; tier?: string; scope?: string; ownerId?: string; importance?: string; confidence?: string }) => {
     await main(async (workspaceRoot) => {
+      const ownership = (options.tier || options.scope || options.ownerId)
+        ? await resolveMemoryTierOptions(workspaceRoot, options, false)
+        : {};
       const record = new MemoryManager(workspaceRoot).updateMemory(memoryId, {
         content: options.content,
         kind: options.kind,
-        scope: options.scope ? memoryScopeSchema.parse(options.scope) : undefined,
-        ownerId: options.ownerId,
+        tier: ownership.tier,
+        scope: ownership.scope,
+        ownerId: ownership.ownerId ?? undefined,
         importance: options.importance ? parseIntegerOption(options.importance, "importance") : undefined,
         confidence: options.confidence ? parseNumberOption(options.confidence, "confidence") : undefined
       });
@@ -516,10 +554,10 @@ candidate
       for (const candidate of candidates) {
         const record = candidate.record;
         const status = record?.status ?? "legacy";
-        const scope = record?.scope ?? String(candidate.raw.scope ?? "unknown");
+        const tier = record?.tier ?? String(candidate.raw.tier ?? candidate.raw.scope ?? "unknown");
         const kind = record?.kind ?? String(candidate.raw.kind ?? "unknown");
         const content = record?.content ?? String(candidate.raw.content ?? JSON.stringify(candidate.raw));
-        console.log(`${candidate.displayId}\t${status}\t[${scope}/${kind}]\t${content}`);
+        console.log(`${candidate.displayId}\t${status}\t[${tier}/${kind}]\t${content}`);
       }
       console.log("\nTip: candidate ids accept unique prefixes, e.g. `cosia memory candidate show d1ec6de4`.");
     });
@@ -1108,7 +1146,7 @@ program
       }
       const memory = new MemoryManager(workspaceRoot);
       const skills = new SkillManager(workspaceRoot);
-      await memory.writeReferenceMemory(session, session.goal);
+      await memory.writeReferenceMemory(session, session.goal, agent.id);
       const staticBlocks = await loadPromptStaticBlocks({ workspaceRoot, agent, session });
       const history: Array<{ prompt: string; response: string }> = [];
       let lastPrompt = session.goal;
@@ -1149,7 +1187,7 @@ program
             continue;
           }
           if (prompt === "/memory refresh") {
-            await memory.writeReferenceMemory(session, lastPrompt);
+            await memory.writeReferenceMemory(session, lastPrompt, agent.id);
             console.error(`[cosia] refreshed REF_MEMORY.md for ${session.id}`);
             continue;
           }
@@ -1217,7 +1255,7 @@ program
           lastPrompt = prompt;
           console.log(content);
           if (shouldRefreshMemory) {
-            await memory.writeReferenceMemory(session, prompt);
+            await memory.writeReferenceMemory(session, prompt, agent.id);
             console.error("[cosia] refreshed REF_MEMORY.md after memory auto-promotion");
           }
         }
@@ -1258,6 +1296,50 @@ function parseNumberOption(value: string, name: string): number {
     throw new Error(`Invalid ${name}: ${value}`);
   }
   return parsed;
+}
+
+async function resolveMemoryTierOptions(
+  workspaceRoot: string,
+  options: { tier?: string; scope?: string; ownerId?: string },
+  requireTier: boolean
+): Promise<{ tier?: MemoryTier; scope?: MemoryScope; ownerId?: string | null }> {
+  if (options.tier && options.scope) {
+    throw new Error("Use either --tier or deprecated --scope, not both.");
+  }
+  if (!options.tier && !options.scope) {
+    if (requireTier) {
+      throw new Error("Memory tier is required. Use --tier core, --tier agent, or --tier session.");
+    }
+    return { ownerId: options.ownerId };
+  }
+  const scope = options.scope ? memoryScopeSchema.parse(options.scope) : undefined;
+  const tier = options.tier
+    ? memoryTierSchema.parse(options.tier)
+    : scope === "session"
+      ? "session"
+      : scope === "agent"
+        ? "agent"
+        : "core";
+  if (scope) {
+    console.error(`[cosia] warning: --scope is deprecated; using tier '${tier}' with legacy scope '${scope}'.`);
+  }
+  if (tier === "agent") {
+    if (!options.ownerId) {
+      throw new Error("--owner-id is required for agent memory.");
+    }
+    await new AgentManager(workspaceRoot).loadAgent(options.ownerId);
+  }
+  if (tier === "session") {
+    if (!options.ownerId) {
+      throw new Error("--owner-id is required for session memory.");
+    }
+    await new SessionManager(workspaceRoot).loadSession(options.ownerId);
+  }
+  return {
+    tier,
+    scope,
+    ownerId: tier === "core" ? options.ownerId ?? null : options.ownerId
+  };
 }
 
 async function resolveBootstrapOptions(options: {

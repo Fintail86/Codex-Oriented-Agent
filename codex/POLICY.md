@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.12.0`
+- Policy version: `0.13.0`
 
 ## Agents
 
@@ -44,11 +44,13 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 ## Memory
 
 - Long-term memory write policy: `candidate_promote_only`
+- Candidate tiers: `core`, `agent`, `session`
 - Candidate scopes: `global`, `user`, `codex`, `agent`, `project`, `session`, `task`, `tool`
 - Promotion conflict policy: `block_until_resolved`
 - Archive policy: `explicit_cli_only`
 - Auto promotion mode: `conservative`
 - Auto promotion risk levels: `low`
+- Auto promotion tiers: `session`
 - Auto promotion requires no conflict: `true`
 
 ## Prompt Budget

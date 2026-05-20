@@ -22,7 +22,8 @@ export class MockProvider implements ModelProvider {
       return parseModelOutput(JSON.stringify({
         type: "final",
         content: `Mock response for ${input.sessionId}.`,
-        memoryCandidates: input.prompt.includes("[MOCK_CANDIDATE]")
+        memoryCandidates: mockMemoryCandidates(input.prompt)
+          ?? (input.prompt.includes("[MOCK_CANDIDATE]")
           ? [{
               scope: "project",
               kind: "note",
@@ -30,7 +31,7 @@ export class MockProvider implements ModelProvider {
               importance: 3,
               confidence: 0.8
             }]
-          : [],
+          : []),
         skillCandidates: mockSkillCandidates(input.prompt)
       }));
     }
@@ -39,7 +40,8 @@ export class MockProvider implements ModelProvider {
       return parseModelOutput(JSON.stringify({
         type: "final",
         content: `Mock response for ${input.sessionId}.`,
-        memoryCandidates: input.prompt.includes("[MOCK_CANDIDATE]")
+        memoryCandidates: mockMemoryCandidates(input.prompt)
+          ?? (input.prompt.includes("[MOCK_CANDIDATE]")
           ? [{
               scope: "project",
               kind: "note",
@@ -47,7 +49,7 @@ export class MockProvider implements ModelProvider {
               importance: 3,
               confidence: 0.8
             }]
-          : [],
+          : []),
         skillCandidates: mockSkillCandidates(input.prompt)
       }));
     }
@@ -84,7 +86,8 @@ export class MockProvider implements ModelProvider {
     return parseModelOutput(JSON.stringify({
       type: "final",
       content: `Mock response for ${input.sessionId}.`,
-      memoryCandidates: input.prompt.includes("[MOCK_CANDIDATE]")
+      memoryCandidates: mockMemoryCandidates(input.prompt)
+        ?? (input.prompt.includes("[MOCK_CANDIDATE]")
         ? [{
             scope: "project",
             kind: "note",
@@ -92,7 +95,7 @@ export class MockProvider implements ModelProvider {
             importance: 3,
             confidence: 0.8
           }]
-        : [],
+        : []),
       skillCandidates: mockSkillCandidates(input.prompt)
     }));
   }
@@ -112,6 +115,37 @@ function mockToolArgs(tool: string, value: string): Record<string, unknown> {
     return {};
   }
   return { path: value };
+}
+
+function mockMemoryCandidates(prompt: string) {
+  if (prompt.includes("[MOCK_SESSION_CANDIDATE]")) {
+    return [{
+      tier: "session",
+      kind: "note",
+      content: "Mock session candidate memory",
+      importance: 3,
+      confidence: 0.8
+    }];
+  }
+  if (prompt.includes("[MOCK_AGENT_CANDIDATE]")) {
+    return [{
+      tier: "agent",
+      kind: "note",
+      content: "Mock agent candidate memory",
+      importance: 3,
+      confidence: 0.8
+    }];
+  }
+  if (prompt.includes("[MOCK_CORE_CANDIDATE]")) {
+    return [{
+      tier: "core",
+      kind: "note",
+      content: "Mock core candidate memory",
+      importance: 3,
+      confidence: 0.8
+    }];
+  }
+  return undefined;
 }
 
 function mockSkillCandidates(prompt: string) {

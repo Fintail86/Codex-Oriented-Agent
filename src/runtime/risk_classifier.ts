@@ -1,4 +1,4 @@
-import type { MemoryCandidateRecord, MemoryScope, RiskLevel } from "./types.js";
+import type { MemoryCandidateRecord, RiskLevel } from "./types.js";
 
 export type SecretDetection = {
   matched: boolean;
@@ -16,8 +16,7 @@ export type RiskClassification = {
 const highRiskKinds = new Set(["security", "policy", "credential", "secret"]);
 const mediumRiskKinds = new Set(["decision", "preference", "architecture"]);
 const lowRiskKinds = new Set(["note", "observation", "command"]);
-const mediumRiskScopes = new Set<MemoryScope>(["user", "global"]);
-const lowRiskScopes = new Set<MemoryScope>(["project", "session", "task", "tool"]);
+const highRiskCoreKinds = new Set(["policy", "security", "credential", "secret"]);
 
 const secretPatterns: Array<{ reason: string; pattern: RegExp }> = [
   { reason: "openai-key", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
@@ -41,8 +40,8 @@ export function classifyMemoryCandidate(candidate: MemoryCandidateRecord, hasCon
   const reasons: string[] = [];
   const secretDetection = detectSecrets(candidate.content);
 
-  if (candidate.scope === "codex") {
-    reasons.push("scope:codex");
+  if (candidate.tier === "core" && highRiskCoreKinds.has(candidate.kind.toLowerCase())) {
+    reasons.push(`tier:core:${candidate.kind}`);
   }
   if (highRiskKinds.has(candidate.kind.toLowerCase())) {
     reasons.push(`kind:${candidate.kind}`);
@@ -63,19 +62,19 @@ export function classifyMemoryCandidate(candidate: MemoryCandidateRecord, hasCon
     };
   }
 
-  if (mediumRiskScopes.has(candidate.scope) || mediumRiskKinds.has(candidate.kind.toLowerCase()) || mentionsArchitecture(candidate.content)) {
+  if (candidate.tier === "core" || candidate.tier === "agent" || mediumRiskKinds.has(candidate.kind.toLowerCase()) || mentionsArchitecture(candidate.content)) {
     return {
       riskLevel: "medium",
-      reasons: [`scope:${candidate.scope}`, `kind:${candidate.kind}`],
+      reasons: [`tier:${candidate.tier}`, `kind:${candidate.kind}`],
       autoPromotable: !hasConflicts,
       secretDetection
     };
   }
 
-  const lowRisk = lowRiskScopes.has(candidate.scope) && lowRiskKinds.has(candidate.kind.toLowerCase());
+  const lowRisk = candidate.tier === "session" && lowRiskKinds.has(candidate.kind.toLowerCase());
   return {
     riskLevel: lowRisk ? "low" : "medium",
-    reasons: [`scope:${candidate.scope}`, `kind:${candidate.kind}`],
+    reasons: [`tier:${candidate.tier}`, `kind:${candidate.kind}`],
     autoPromotable: lowRisk && !hasConflicts,
     secretDetection
   };

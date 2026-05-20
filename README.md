@@ -1,10 +1,10 @@
-# COSIA v0.12.0
+# COSIA v0.13.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.12 separates sessions from agent ownership and records the actual executing agent for each run.
+v0.13 adds tiered memory ownership: `core`, `agent`, and `session` memory with lifecycle-aware archive hooks.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ The legacy `agent-runtime` alias is also kept for compatibility.
 cosia init
 cosia agent create architect-agent --template architect
 cosia session create --agent architect-agent --goal "Design the COSIA runtime MVP"
-cosia memory add --scope project --content "COSIA uses Codex / Agent / Session layers." --importance 5 --confidence 0.9
+cosia memory add --tier core --content "COSIA uses Codex / Agent / Session layers." --importance 5 --confidence 0.9
 cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 cosia chat --session <session-id>
 cosia tool git-status
@@ -103,6 +103,7 @@ cosia session create --goal "<goal>"
 cosia session create --agent <agent-id> --goal "<goal>"
 cosia session assign <session-id> --agent <agent-id>
 cosia session unassign <session-id>
+cosia session archive <session-id> --reason "<reason>"
 cosia session list --agent <agent-id>
 cosia session summarize <session-id> --content "<summary>"
 cosia session prompt <session-id> --latest
@@ -111,9 +112,10 @@ cosia run --session <session-id> --prompt "<prompt>" --agent <agent-id>
 cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
 cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
+cosia memory add --tier <tier> --owner-id <owner-id> --content "<content>"
 cosia memory add --scope <scope> --content "<content>"
-cosia memory search --query "<query>" --show-score
-cosia memory list --limit <n> --all
+cosia memory search --query "<query>" --tier <tier> --owner-id <owner-id> --show-score
+cosia memory list --tier <tier> --owner-id <owner-id> --limit <n> --all
 cosia memory show <memory-id>
 cosia memory update <memory-id> --content "<content>"
 cosia memory archive <memory-id> --reason "<reason>"
@@ -175,7 +177,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.12.
+- Destructive, network, external-send, and shell tools are not registered in v0.13.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is policy-backed; `codex-cli` remains the default provider.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -186,11 +188,15 @@ cosia session show <session-id>
 - Memory candidates and auto-promotions are stored in `memory/longterm.sqlite`.
 - Existing JSONL queue files are imported once, then moved to `.bak` files with a migration report.
 - Memory search is scored with deterministic keyword, importance, confidence, and recency signals.
+- Memory ownership is tiered: `core` memory survives agent/session lifecycle, `agent` memory follows an agent, and `session` memory follows a session.
+- Deprecated memory `scope` values are still accepted as aliases. New commands should use `--tier`.
+- `REF_MEMORY.md` is built from core memory plus the current session's session memory and the executing agent's agent memory.
 - Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
 - Low-risk, no-conflict memory candidates can be auto-promoted by runtime policy.
 - Auto-promotions can be listed, exported, and reverted.
 - Secret-like candidates are high-risk and remain pending with redacted summaries.
 - Long-term memory archive is explicit CLI-only soft deletion.
+- `session archive` soft-archives session-tier memory. Deleting an agent soft-archives that agent's agent-tier memory.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
 - Controlled Git/NPM tools are individual read-only tools, not generic shell access.
 - Long tool output is capped with an explicit truncation marker.
@@ -241,7 +247,7 @@ cosia agent delete cosia-agent
 cosia agent sessions architect-agent
 ```
 
-`agent delete` previews by default. Use `--yes` to delete, `--force` for session-referenced agents, and `--allow-empty` only when deliberately leaving the workspace without a default or last agent. Deleting an agent does not delete sessions; affected sessions become orphaned until reassigned.
+`agent delete` previews by default. Use `--yes` to delete, `--force` for session-referenced agents, and `--allow-empty` only when deliberately leaving the workspace without a default or last agent. Deleting an agent does not delete sessions; affected sessions become orphaned until reassigned. Active agent-tier memories for the deleted agent are soft-archived.
 
 ## Prompt Budget and Chat
 
@@ -324,8 +330,11 @@ cosia session context undo-last <session-id> --reason "Mistyped chat command"
 
 ```powershell
 cosia memory search --query "memory ranking" --show-score
+cosia memory add --tier session --owner-id <session-id> --content "Session-local context"
+cosia memory add --tier agent --owner-id <agent-id> --content "Agent operating preference"
+cosia memory add --tier core --content "System-wide durable fact"
 cosia memory show <memory-id>
-cosia memory update <memory-id> --importance 5 --confidence 0.9
+cosia memory update <memory-id> --tier core --importance 5 --confidence 0.9
 cosia memory archive <memory-id> --reason "Superseded by newer decision"
 cosia memory candidate list
 cosia memory candidate review --latest
@@ -350,7 +359,7 @@ cosia memory candidate promote d1ec6de4 --force
 Reference memory is written with source hints so model answers can cite durable context:
 
 ```md
-- [mem:abcd1234 score:8.42 project/decision] COSIA v0.4 improves memory ranking.
+- [mem:abcd1234 score:8.42 core/decision] COSIA v0.13 improves memory ownership.
 ```
 
 ## Test
@@ -373,9 +382,6 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.13: Memory ownership and lifecycle.
-  - Move from broad memory scopes toward `tier + kind`: `core`, `agent`, and `session` memory.
-  - Keep `kind` for search, display, and risk classification while `tier` controls ownership and lifecycle.
 - v0.14: Memory promotion policy v2.
   - Split promotion paths: session-to-agent, session-to-core, agent-to-core, core-to-skill-candidate, and core-to-codex-amendment-candidate.
   - Keep core-to-codex changes behind diff-based manual approval.

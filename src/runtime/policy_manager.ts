@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { ensureDir, readText, writeText } from "./fs_utils.js";
-import { memoryScopeSchema, riskLevelSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
+import { memoryScopeSchema, memoryTierSchema, riskLevelSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
 
 const policyToolSchema = z.object({
   permission: toolPermissionSchema,
@@ -41,6 +41,7 @@ export const policyConfigSchema = z.object({
   }),
   memory: z.object({
     longTermWrite: z.literal("candidate_promote_only"),
+    candidateTiers: z.array(memoryTierSchema).default(["core", "agent", "session"]),
     candidateScopes: z.array(memoryScopeSchema),
     promotionConflictPolicy: z.literal("block_until_resolved").default("block_until_resolved"),
     archivePolicy: z.literal("explicit_cli_only").default("explicit_cli_only"),
@@ -48,6 +49,8 @@ export const policyConfigSchema = z.object({
       mode: autoPromotionModeSchema,
       allowRiskLevels: z.array(riskLevelSchema),
       requireNoConflict: z.boolean(),
+      allowTiers: z.array(memoryTierSchema).default(["session"]),
+      denyTiers: z.array(memoryTierSchema).default(["core", "agent"]),
       allowScopes: z.array(memoryScopeSchema),
       denyScopes: z.array(memoryScopeSchema),
       denyKinds: z.array(z.string().min(1))
@@ -55,6 +58,8 @@ export const policyConfigSchema = z.object({
       mode: "conservative",
       allowRiskLevels: ["low"],
       requireNoConflict: true,
+      allowTiers: ["session"],
+      denyTiers: ["core", "agent"],
       allowScopes: ["project", "session", "task", "tool"],
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
@@ -116,7 +121,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.12.0",
+  version: "0.13.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -191,6 +196,7 @@ export const defaultPolicy: PolicyConfig = {
   },
   memory: {
     longTermWrite: "candidate_promote_only",
+    candidateTiers: ["core", "agent", "session"],
     candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"],
     promotionConflictPolicy: "block_until_resolved",
     archivePolicy: "explicit_cli_only",
@@ -198,6 +204,8 @@ export const defaultPolicy: PolicyConfig = {
       mode: "conservative",
       allowRiskLevels: ["low"],
       requireNoConflict: true,
+      allowTiers: ["session"],
+      denyTiers: ["core", "agent"],
       allowScopes: ["project", "session", "task", "tool"],
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
@@ -423,11 +431,13 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 ## Memory
 
 - Long-term memory write policy: \`${policy.memory.longTermWrite}\`
+- Candidate tiers: ${policy.memory.candidateTiers.map((tier) => `\`${tier}\``).join(", ")}
 - Candidate scopes: ${policy.memory.candidateScopes.map((scope) => `\`${scope}\``).join(", ")}
 - Promotion conflict policy: \`${policy.memory.promotionConflictPolicy}\`
 - Archive policy: \`${policy.memory.archivePolicy}\`
 - Auto promotion mode: \`${policy.memory.autoPromotion.mode}\`
 - Auto promotion risk levels: ${policy.memory.autoPromotion.allowRiskLevels.map((level) => `\`${level}\``).join(", ")}
+- Auto promotion tiers: ${policy.memory.autoPromotion.allowTiers.map((tier) => `\`${tier}\``).join(", ")}
 - Auto promotion requires no conflict: \`${policy.memory.autoPromotion.requireNoConflict}\`
 
 ## Prompt Budget
