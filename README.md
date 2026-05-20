@@ -1,10 +1,10 @@
-# COSIA v0.13.0
+# COSIA v0.14.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.13 adds tiered memory ownership: `core`, `agent`, and `session` memory with lifecycle-aware archive hooks.
+v0.14 adds explicit memory tier promotion paths with conflict gates, transaction-safe history, revert support, and core-memory-to-skill-candidate handoff.
 
 ## Requirements
 
@@ -192,8 +192,10 @@ cosia session show <session-id>
 - Deprecated memory `scope` values are still accepted as aliases. New commands should use `--tier`.
 - `REF_MEMORY.md` is built from core memory plus the current session's session memory and the executing agent's agent memory.
 - Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
+- Memory tier promotion supports `session -> agent`, `session -> core`, and `agent -> core`; source memories are archived after successful promotion.
+- Core memory can create pending skill candidates, but Codex amendment remains deferred to a later diff-based gate.
 - Low-risk, no-conflict memory candidates can be auto-promoted by runtime policy.
-- Auto-promotions can be listed, exported, and reverted.
+- Auto-promotions and tier promotions can be listed and reverted.
 - Secret-like candidates are high-risk and remain pending with redacted summaries.
 - Long-term memory archive is explicit CLI-only soft deletion.
 - `session archive` soft-archives session-tier memory. Deleting an agent soft-archives that agent's agent-tier memory.
@@ -336,6 +338,9 @@ cosia memory add --tier core --content "System-wide durable fact"
 cosia memory show <memory-id>
 cosia memory update <memory-id> --tier core --importance 5 --confidence 0.9
 cosia memory archive <memory-id> --reason "Superseded by newer decision"
+cosia memory promote <memory-id> --to-tier agent --owner-id <agent-id> --reason "Agent should inherit this"
+cosia memory promote <memory-id> --to-tier core --reason "Project-wide durable fact"
+cosia memory promote <core-memory-id> --to-skill-candidate --skill-name "Memory Review" --reason "Turn core rule into skill"
 cosia memory candidate list
 cosia memory candidate review --latest
 cosia memory candidate show <candidate-id>
@@ -344,6 +349,7 @@ cosia memory candidate promote <candidate-id> --replace <memory-id>
 cosia memory candidate discard <candidate-id> --reason "Not durable enough"
 cosia memory candidate export --jsonl
 cosia memory promotion list
+cosia memory promotion list --type tier
 cosia memory promotion revert <promotion-id> --reason "Not durable enough"
 cosia memory promotion export --jsonl
 ```
@@ -359,7 +365,7 @@ cosia memory candidate promote d1ec6de4 --force
 Reference memory is written with source hints so model answers can cite durable context:
 
 ```md
-- [mem:abcd1234 score:8.42 core/decision] COSIA v0.13 improves memory ownership.
+- [mem:abcd1234 score:8.42 core/decision] COSIA v0.14 promotes memory across lifecycle tiers.
 ```
 
 ## Test
@@ -382,9 +388,6 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.14: Memory promotion policy v2.
-  - Split promotion paths: session-to-agent, session-to-core, agent-to-core, core-to-skill-candidate, and core-to-codex-amendment-candidate.
-  - Keep core-to-codex changes behind diff-based manual approval.
 - v0.15: Provider hardening and `openai-compatible` provider.
 - v0.16: Context maintenance workflow.
 - v1.0+: Codex amendment gate.

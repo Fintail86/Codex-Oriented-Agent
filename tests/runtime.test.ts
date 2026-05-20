@@ -67,7 +67,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.13.0\"");
+    expect(policyJson).toContain("\"version\": \"0.14.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -652,6 +652,190 @@ describe("memory", () => {
     expect(memory.archiveOwnerMemories("agent", "architect-agent", "Agent deleted: architect-agent")).toBe(1);
     expect(memory.getMemory(agentMemory.id).status).toBe("archived");
     expect(memory.getMemory(coreMemory.id).status).toBe("active");
+  });
+
+  it("promotes memory across lifecycle tiers and rejects reverse paths", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Promote memory tiers");
+    const memory = new MemoryManager(root);
+    const sessionToAgent = memory.addMemory({
+      tier: "session",
+      ownerId: session.id,
+      kind: "note",
+      content: "Session learning should become an agent habit.",
+      importance: 4,
+      confidence: 0.8
+    });
+    const sessionToCore = memory.addMemory({
+      tier: "session",
+      ownerId: session.id,
+      kind: "decision",
+      content: "COSIA session learnings can become core knowledge.",
+      importance: 5,
+      confidence: 0.9
+    });
+    const agentToCore = memory.addMemory({
+      tier: "agent",
+      ownerId: "architect-agent",
+      kind: "note",
+      content: "Architect agent discovered a reusable planning rule.",
+      importance: 3,
+      confidence: 0.75
+    });
+
+    const agentPromotion = memory.promoteMemory(sessionToAgent.id, {
+      toTier: "agent",
+      ownerId: "architect-agent",
+      reason: "agent should remember this"
+    });
+    expect(memory.getMemory(agentPromotion.targetMemoryId)).toMatchObject({
+      tier: "agent",
+      ownerId: "architect-agent",
+      content: sessionToAgent.content
+    });
+    expect(memory.getMemory(sessionToAgent.id).status).toBe("archived");
+
+    const corePromotion = memory.promoteMemory(sessionToCore.id, {
+      toTier: "core",
+      reason: "core project knowledge"
+    });
+    expect(memory.getMemory(corePromotion.targetMemoryId)).toMatchObject({
+      tier: "core",
+      ownerId: null
+    });
+
+    const agentCorePromotion = memory.promoteMemory(agentToCore.id, {
+      toTier: "core",
+      reason: "core reusable rule"
+    });
+    expect(memory.getMemory(agentCorePromotion.targetMemoryId).tier).toBe("core");
+    expect(() => memory.promoteMemory(agentCorePromotion.targetMemoryId, {
+      toTier: "agent",
+      ownerId: "architect-agent",
+      reason: "reverse path"
+    })).toThrow("Core memory cannot be promoted");
+  });
+
+  it("blocks tier promotion conflicts and supports force, replace, merge, and revert", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Resolve tier promotion conflicts");
+    const memory = new MemoryManager(root);
+    const existingAgent = memory.addMemory({
+      tier: "agent",
+      ownerId: "architect-agent",
+      kind: "note",
+      content: "Agent prefers concise implementation notes.",
+      importance: 3,
+      confidence: 0.7
+    });
+    const conflictingSession = memory.addMemory({
+      tier: "session",
+      ownerId: session.id,
+      kind: "note",
+      content: "Agent prefers concise implementation note.",
+      importance: 4,
+      confidence: 0.8
+    });
+    expect(() => memory.promoteMemory(conflictingSession.id, {
+      toTier: "agent",
+      ownerId: "architect-agent",
+      reason: "conflict expected"
+    })).toThrow("Memory promotion conflicts detected");
+
+    const forcedSource = memory.addMemory({
+      tier: "session",
+      ownerId: session.id,
+      kind: "note",
+      content: "Agent prefers concise implementation notes.",
+      importance: 4,
+      confidence: 0.8
+    });
+    const forced = memory.promoteMemory(forcedSource.id, {
+      toTier: "agent",
+      ownerId: "architect-agent",
+      reason: "force duplicate",
+      force: true
+    });
+    expect(forced.mode).toBe("force");
+    expect(memory.getMemory(forced.targetMemoryId).status).toBe("active");
+
+    const replaceSource = memory.addMemory({
+      tier: "session",
+      ownerId: session.id,
+      kind: "note",
+      content: "Agent prefers concise implementation notes with review.",
+      importance: 5,
+      confidence: 0.9
+    });
+    const replaced = memory.promoteMemory(replaceSource.id, {
+      toTier: "agent",
+      ownerId: "architect-agent",
+      reason: "replace stale memory",
+      replaceMemoryId: existingAgent.id
+    });
+    expect(memory.getMemory(existingAgent.id).status).toBe("archived");
+    expect(memory.getMemory(replaceSource.id).status).toBe("archived");
+    expect(memory.listTierPromotions().map((item) => item.id)).toContain(replaced.id);
+    const revertedReplace = memory.revertTierPromotion(replaced.id.slice(0, 12), "undo replace");
+    expect(revertedReplace.revertedAt).toBeTruthy();
+    expect(memory.getMemory(existingAgent.id).status).toBe("active");
+    expect(memory.getMemory(replaceSource.id).status).toBe("active");
+    expect(memory.getMemory(replaced.targetMemoryId).status).toBe("archived");
+
+    const existingCore = memory.addMemory({
+      tier: "core",
+      kind: "decision",
+      content: "COSIA memory promotes durable context.",
+      importance: 3,
+      confidence: 0.7
+    });
+    const mergeSource = memory.addMemory({
+      tier: "agent",
+      ownerId: "architect-agent",
+      kind: "decision",
+      content: "COSIA memory promotes durable context for core.",
+      importance: 4,
+      confidence: 0.8
+    });
+    const merged = memory.promoteMemory(mergeSource.id, {
+      toTier: "core",
+      reason: "merge into core",
+      mergeMemoryId: existingCore.id,
+      content: "COSIA memory promotes durable context for core decisions."
+    });
+    expect(merged.mode).toBe("merge");
+    expect(memory.getMemory(existingCore.id).content).toContain("core decisions");
+    memory.revertTierPromotion(merged.id, "undo merge");
+    expect(memory.getMemory(existingCore.id).content).toBe("COSIA memory promotes durable context.");
+    expect(memory.getMemory(mergeSource.id).status).toBe("active");
+  });
+
+  it("creates skill candidates from core memory without archiving the source", async () => {
+    const root = await initializedWorkspace();
+    const memory = new MemoryManager(root);
+    const core = memory.addMemory({
+      tier: "core",
+      kind: "note",
+      content: "When content includes token = \"sk-testsecret1234567890\", treat it as high risk.",
+      importance: 4,
+      confidence: 0.8
+    });
+
+    const result = memory.promoteCoreMemoryToSkillCandidate(core.id, {
+      skillName: "Secret Memory Review",
+      reason: "turn core rule into a skill candidate"
+    });
+    expect(memory.getMemory(core.id).status).toBe("active");
+    expect(result.promotion.toTier).toBe("skill_candidate");
+    expect(result.promotion.targetMemoryId).toBe(result.candidate.id);
+    expect(result.candidate.riskLevel).toBe("high");
+    expect(new SkillManager(root).getCandidate(result.candidate.id).record.content).toContain("token");
   });
 
   it("normalizes text and scores memory search results", async () => {
@@ -1634,7 +1818,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.13.0");
+    expect(emptyReport.version).toBe("0.14.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

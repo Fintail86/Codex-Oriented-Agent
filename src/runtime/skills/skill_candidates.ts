@@ -42,6 +42,19 @@ export type PromoteSkillResult = {
   warning?: string;
 };
 
+export type CreateSkillCandidateInput = {
+  skillName: string;
+  reason: string;
+  content: string;
+  triggers?: string[];
+  riskLevel?: RiskLevel;
+  agentId?: string;
+  suggestedByAgentId?: string;
+  sourceSessionId?: string;
+  sourceAgentId?: string;
+  runId?: string;
+};
+
 export const highRiskConfirmPhrase = "PROMOTE HIGH RISK SKILL";
 
 export class SkillCandidateStore {
@@ -56,28 +69,7 @@ export class SkillCandidateStore {
     this.store.ensureSkillsDir();
     const db = this.open();
     try {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS skill_candidates (
-          id TEXT PRIMARY KEY,
-          status TEXT NOT NULL,
-          agent_id TEXT NOT NULL,
-          skill_name TEXT NOT NULL,
-          skill_id TEXT NOT NULL,
-          reason TEXT NOT NULL,
-          content TEXT NOT NULL,
-          triggers_json TEXT NOT NULL,
-          risk_level TEXT NOT NULL,
-          source_session_id TEXT,
-          source_agent_id TEXT,
-          run_id TEXT,
-          created_at TEXT NOT NULL,
-          reviewed_at TEXT,
-          promoted_skill_id TEXT,
-          discard_reason TEXT,
-          record_json TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-      `);
+      ensureSkillCandidateTable(db);
     } finally {
       db.close();
     }
@@ -92,29 +84,14 @@ export class SkillCandidateStore {
       throw new Error("Cannot append skill candidates without an executing or assigned agent.");
     }
     this.ensureSchema();
-    const now = new Date().toISOString();
-    const records = candidates.map((candidate) => {
-      const id = randomUUID();
-      const suggestedByAgentId = candidate.agentId || executingAgentId;
-      const triggers = normalizeTriggers(candidate.triggers ?? []);
-      const record: SkillCandidateRecord = {
-        id,
-        status: "pending",
-        agentId: suggestedByAgentId,
-        skillName: candidate.skillName,
-        skillId: slugifySkillId(candidate.skillName, id),
-        reason: candidate.reason,
-        content: candidate.content,
-        triggers,
-        riskLevel: classifySkillRisk(candidate),
-        suggestedByAgentId,
-        sourceSessionId: session.id,
-        sourceAgentId: executingAgentId,
-        runId,
-        createdAt: now
-      };
-      return skillCandidateRecordSchema.parse(record);
-    });
+    const records = candidates.map((candidate) => createSkillCandidateRecord({
+      ...candidate,
+      agentId: candidate.agentId || executingAgentId,
+      suggestedByAgentId: candidate.agentId || executingAgentId,
+      sourceSessionId: session.id,
+      sourceAgentId: executingAgentId,
+      runId
+    }));
     const db = this.open();
     try {
       db.exec("BEGIN IMMEDIATE");
@@ -135,6 +112,18 @@ export class SkillCandidateStore {
       db.close();
     }
     return records;
+  }
+
+  appendManualCandidate(input: CreateSkillCandidateInput): SkillCandidateRecord {
+    this.ensureSchema();
+    const record = createSkillCandidateRecord(input);
+    const db = this.open();
+    try {
+      upsertSkillCandidateRow(db, record);
+    } finally {
+      db.close();
+    }
+    return record;
   }
 
   listCandidates(includeAll = false): SkillCandidateView[] {
@@ -250,7 +239,62 @@ export class SkillCandidateStore {
   }
 }
 
-function upsertSkillCandidateRow(db: DatabaseSync, record: SkillCandidateRecord): void {
+export function ensureSkillCandidateTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS skill_candidates (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      skill_name TEXT NOT NULL,
+      skill_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      content TEXT NOT NULL,
+      triggers_json TEXT NOT NULL,
+      risk_level TEXT NOT NULL,
+      source_session_id TEXT,
+      source_agent_id TEXT,
+      run_id TEXT,
+      created_at TEXT NOT NULL,
+      reviewed_at TEXT,
+      promoted_skill_id TEXT,
+      discard_reason TEXT,
+      record_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+}
+
+export function createSkillCandidateRecord(input: CreateSkillCandidateInput): SkillCandidateRecord {
+  const id = randomUUID();
+  const agentId = input.agentId || input.suggestedByAgentId || input.sourceAgentId || "core-memory";
+  const candidate: SkillCandidate = {
+    agentId,
+    skillName: input.skillName,
+    reason: input.reason,
+    content: input.content,
+    triggers: input.triggers,
+    riskLevel: input.riskLevel
+  };
+  const record: SkillCandidateRecord = {
+    id,
+    status: "pending",
+    agentId,
+    skillName: input.skillName,
+    skillId: slugifySkillId(input.skillName, id),
+    reason: input.reason,
+    content: input.content,
+    triggers: normalizeTriggers(input.triggers ?? []),
+    riskLevel: classifySkillRisk(candidate),
+    suggestedByAgentId: input.suggestedByAgentId,
+    sourceSessionId: input.sourceSessionId,
+    sourceAgentId: input.sourceAgentId,
+    runId: input.runId,
+    createdAt: new Date().toISOString()
+  };
+  return skillCandidateRecordSchema.parse(record);
+}
+
+export function upsertSkillCandidateRow(db: DatabaseSync, record: SkillCandidateRecord): void {
   db.prepare(`
     INSERT INTO skill_candidates (
       id, status, agent_id, skill_name, skill_id, reason, content, triggers_json,

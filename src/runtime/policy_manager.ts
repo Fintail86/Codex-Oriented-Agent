@@ -11,6 +11,7 @@ const policyToolSchema = z.object({
 });
 
 const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
+const memoryPromotionPathPolicySchema = z.enum(["manual_or_low_risk", "manual_only", "deferred"]);
 const promptOverflowPolicySchema = z.literal("truncate_low_priority");
 const providerConfigSchema = z.object({
   enabled: z.boolean(),
@@ -45,6 +46,19 @@ export const policyConfigSchema = z.object({
     candidateScopes: z.array(memoryScopeSchema),
     promotionConflictPolicy: z.literal("block_until_resolved").default("block_until_resolved"),
     archivePolicy: z.literal("explicit_cli_only").default("explicit_cli_only"),
+    promotionPaths: z.object({
+      sessionToAgent: memoryPromotionPathPolicySchema,
+      sessionToCore: memoryPromotionPathPolicySchema,
+      agentToCore: memoryPromotionPathPolicySchema,
+      coreToSkillCandidate: memoryPromotionPathPolicySchema,
+      coreToCodexAmendment: memoryPromotionPathPolicySchema
+    }).default({
+      sessionToAgent: "manual_or_low_risk",
+      sessionToCore: "manual_only",
+      agentToCore: "manual_only",
+      coreToSkillCandidate: "manual_only",
+      coreToCodexAmendment: "deferred"
+    }),
     autoPromotion: z.object({
       mode: autoPromotionModeSchema,
       allowRiskLevels: z.array(riskLevelSchema),
@@ -121,7 +135,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.13.0",
+  version: "0.14.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -200,6 +214,13 @@ export const defaultPolicy: PolicyConfig = {
     candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"],
     promotionConflictPolicy: "block_until_resolved",
     archivePolicy: "explicit_cli_only",
+    promotionPaths: {
+      sessionToAgent: "manual_or_low_risk",
+      sessionToCore: "manual_only",
+      agentToCore: "manual_only",
+      coreToSkillCandidate: "manual_only",
+      coreToCodexAmendment: "deferred"
+    },
     autoPromotion: {
       mode: "conservative",
       allowRiskLevels: ["low"],
@@ -435,6 +456,7 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Candidate scopes: ${policy.memory.candidateScopes.map((scope) => `\`${scope}\``).join(", ")}
 - Promotion conflict policy: \`${policy.memory.promotionConflictPolicy}\`
 - Archive policy: \`${policy.memory.archivePolicy}\`
+- Promotion paths: session->agent \`${policy.memory.promotionPaths.sessionToAgent}\`, session->core \`${policy.memory.promotionPaths.sessionToCore}\`, agent->core \`${policy.memory.promotionPaths.agentToCore}\`, core->skill \`${policy.memory.promotionPaths.coreToSkillCandidate}\`, core->codex \`${policy.memory.promotionPaths.coreToCodexAmendment}\`
 - Auto promotion mode: \`${policy.memory.autoPromotion.mode}\`
 - Auto promotion risk levels: ${policy.memory.autoPromotion.allowRiskLevels.map((level) => `\`${level}\``).join(", ")}
 - Auto promotion tiers: ${policy.memory.autoPromotion.allowTiers.map((tier) => `\`${tier}\``).join(", ")}

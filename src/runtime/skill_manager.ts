@@ -2,6 +2,7 @@ import type { AgentManifest, SessionMetadata, SkillCandidate, SkillCandidateReco
 import {
   highRiskConfirmPhrase,
   SkillCandidateStore,
+  type CreateSkillCandidateInput,
   type PromoteSkillOptions,
   type PromoteSkillResult,
   type SkillCandidateView
@@ -42,6 +43,7 @@ export type {
   PromoteSkillResult,
   SkillBudget,
   SkillCandidateView,
+  CreateSkillCandidateInput,
   SkillCheckResult,
   SkillMigrationResult,
   SkillPromptBlock,
@@ -79,6 +81,10 @@ export class SkillManager {
 
   appendCandidates(candidates: SkillCandidate[] | undefined, session: SessionMetadata, runId?: string, sourceAgentId?: string): SkillCandidateRecord[] {
     return this.candidates.appendCandidates(candidates, session, runId, sourceAgentId);
+  }
+
+  appendManualCandidate(input: CreateSkillCandidateInput): SkillCandidateRecord {
+    return this.candidates.appendManualCandidate(input);
   }
 
   listCandidates(includeAll = false): SkillCandidateView[] {

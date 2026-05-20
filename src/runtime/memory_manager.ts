@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { classifyMemoryCandidate, redactedCandidatePreview, type RiskClassification } from "./risk_classifier.js";
+import { createSkillCandidateRecord, ensureSkillCandidateTable, upsertSkillCandidateRow } from "./skills/skill_candidates.js";
 import {
   memoryCandidateRecordSchema,
   memoryCandidateSchema,
@@ -15,7 +16,8 @@ import {
   type MemoryScope,
   type MemoryTier,
   type RiskLevel,
-  type SessionMetadata
+  type SessionMetadata,
+  type SkillCandidateRecord
 } from "./types.js";
 
 type AddMemoryInput = {
@@ -83,6 +85,11 @@ type PromotionRow = {
   record_json: string;
 };
 
+type TierPromotionRow = {
+  id: string;
+  record_json: string;
+};
+
 type QueueMigrationReport = {
   version: 1;
   generatedAt: string;
@@ -127,6 +134,49 @@ export type PromoteCandidateOptions = {
   replaceMemoryId?: string;
   mergeMemoryId?: string;
   mergeContent?: string;
+};
+
+export type MemoryTierPromotionMode = "promote" | "force" | "replace" | "merge" | "skill_candidate";
+
+export type MemoryTierPromotionTarget = MemoryTier | "skill_candidate";
+
+export type PromoteMemoryOptions = {
+  toTier: Extract<MemoryTier, "agent" | "core">;
+  ownerId?: string;
+  reason: string;
+  content?: string;
+  kind?: string;
+  importance?: number;
+  confidence?: number;
+  force?: boolean;
+  replaceMemoryId?: string;
+  mergeMemoryId?: string;
+};
+
+export type PromoteMemoryToSkillCandidateOptions = {
+  skillName: string;
+  reason: string;
+  content?: string;
+  triggers?: string[];
+};
+
+export type MemoryTierPromotionRecord = {
+  id: string;
+  sourceMemoryId: string;
+  targetMemoryId: string;
+  replacedMemoryId?: string;
+  fromTier: MemoryTier;
+  toTier: MemoryTierPromotionTarget;
+  fromOwnerId?: string | null;
+  toOwnerId?: string | null;
+  mode: MemoryTierPromotionMode;
+  reason: string;
+  createdAt: string;
+  revertedAt?: string;
+  revertReason?: string;
+  sourceSnapshot?: MemoryRecord;
+  targetSnapshot?: MemoryRecord;
+  replacedSnapshot?: MemoryRecord;
 };
 
 export type AutoPromotionMode = "manual" | "conservative" | "balanced" | "strict";
@@ -277,6 +327,23 @@ export class MemoryManager {
           record_json TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS memory_tier_promotions (
+          id TEXT PRIMARY KEY,
+          source_memory_id TEXT NOT NULL,
+          target_memory_id TEXT NOT NULL,
+          replaced_memory_id TEXT,
+          from_tier TEXT NOT NULL,
+          to_tier TEXT NOT NULL,
+          from_owner_id TEXT,
+          to_owner_id TEXT,
+          mode TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          reverted_at TEXT,
+          revert_reason TEXT,
+          record_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS queue_migrations (
           id TEXT PRIMARY KEY,
           source_path TEXT NOT NULL,
@@ -289,6 +356,7 @@ export class MemoryManager {
           report_path TEXT
         );
       `);
+      ensureSkillCandidateTable(db);
       const candidateColumns = new Set((db.prepare("PRAGMA table_info(memory_candidates)").all() as TableColumn[]).map((column) => column.name));
       if (!candidateColumns.has("tier")) {
         db.exec("ALTER TABLE memory_candidates ADD COLUMN tier TEXT");
@@ -429,6 +497,181 @@ export class MemoryManager {
         archiveMemoryRow(db, target, reason, null);
       }
       return targets.length;
+    } finally {
+      db.close();
+    }
+  }
+
+  promoteMemory(memoryId: string, options: PromoteMemoryOptions): MemoryTierPromotionRecord {
+    this.ensureSchema();
+    validateMemoryPromotionOptions(options);
+    const db = this.open();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      const source = this.resolveMemoryWithDb(db, memoryId, false);
+      const target = resolvePromotionTarget(source, options);
+      const candidate = promotionTargetToCandidate(source, target, options);
+      const conflicts = this.findConflictsForPromotionWithDb(db, candidate, [source.id]);
+      const hasResolution = options.force || options.replaceMemoryId || options.mergeMemoryId;
+      if (conflicts.length && !hasResolution) {
+        throw new Error(`Memory promotion conflicts detected. Resolve with --force, --replace, or --merge.\n${formatMemoryConflicts(candidate, conflicts)}`);
+      }
+
+      let record: MemoryTierPromotionRecord;
+      if (options.mergeMemoryId) {
+        const targetMemory = this.resolveMemoryWithDb(db, options.mergeMemoryId, false);
+        validatePromotionResolutionTarget(targetMemory, target, candidate.kind);
+        const merged: MemoryRecord = {
+          ...targetMemory,
+          content: options.content?.trim() ?? "",
+          kind: candidate.kind,
+          confidence: Math.max(targetMemory.confidence, candidate.confidence),
+          importance: Math.max(targetMemory.importance, candidate.importance),
+          updatedAt: new Date().toISOString()
+        };
+        if (!merged.content) {
+          throw new Error("--merge requires --content with merged memory content.");
+        }
+        updateMemoryRow(db, merged);
+        archiveMemoryRow(db, source, `Promoted to ${target.tier} by merge: ${options.reason}`, merged.id);
+        record = createTierPromotionRecord(source, merged, {
+          toTier: target.tier,
+          toOwnerId: target.ownerId,
+          mode: "merge",
+          reason: options.reason,
+          sourceSnapshot: source,
+          targetSnapshot: targetMemory
+        });
+      } else if (options.replaceMemoryId) {
+        const replaced = this.resolveMemoryWithDb(db, options.replaceMemoryId, false);
+        validatePromotionResolutionTarget(replaced, target, candidate.kind);
+        const promoted = insertMemory(db, promotionCandidateToMemoryInput(candidate, source));
+        archiveMemoryRow(db, source, `Promoted to ${target.tier}: ${options.reason}`, promoted.id);
+        archiveMemoryRow(db, replaced, `Replaced by memory promotion ${promoted.id}: ${options.reason}`, promoted.id);
+        record = createTierPromotionRecord(source, promoted, {
+          toTier: target.tier,
+          toOwnerId: target.ownerId,
+          mode: "replace",
+          reason: options.reason,
+          replacedMemoryId: replaced.id,
+          sourceSnapshot: source,
+          replacedSnapshot: replaced
+        });
+      } else {
+        const promoted = insertMemory(db, promotionCandidateToMemoryInput(candidate, source));
+        archiveMemoryRow(db, source, `Promoted to ${target.tier}: ${options.reason}`, promoted.id);
+        record = createTierPromotionRecord(source, promoted, {
+          toTier: target.tier,
+          toOwnerId: target.ownerId,
+          mode: options.force ? "force" : "promote",
+          reason: options.reason,
+          sourceSnapshot: source
+        });
+      }
+      upsertTierPromotionRow(db, record);
+      db.exec("COMMIT");
+      return record;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original error.
+      }
+      throw error;
+    } finally {
+      db.close();
+    }
+  }
+
+  promoteCoreMemoryToSkillCandidate(memoryId: string, options: PromoteMemoryToSkillCandidateOptions): { promotion: MemoryTierPromotionRecord; candidate: SkillCandidateRecord } {
+    this.ensureSchema();
+    const db = this.open();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      const source = this.resolveMemoryWithDb(db, memoryId, false);
+      if (source.tier !== "core") {
+        throw new Error("Only core memory can be promoted to a skill candidate.");
+      }
+      const content = options.content?.trim() || source.content;
+      const candidate = createSkillCandidateRecord({
+        skillName: options.skillName,
+        reason: `Created from core memory ${source.id.slice(0, 8)}: ${options.reason}`,
+        content,
+        triggers: options.triggers,
+        sourceSessionId: source.sourceSessionId ?? undefined,
+        sourceAgentId: source.sourceAgentId ?? undefined,
+        suggestedByAgentId: source.sourceAgentId ?? undefined
+      });
+      upsertSkillCandidateRow(db, candidate);
+      const promotion = createTierPromotionRecord(source, source, {
+        toTier: "skill_candidate",
+        toOwnerId: null,
+        mode: "skill_candidate",
+        reason: options.reason,
+        sourceSnapshot: source,
+        targetMemoryId: candidate.id
+      });
+      upsertTierPromotionRow(db, promotion);
+      db.exec("COMMIT");
+      return { promotion, candidate };
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original error.
+      }
+      throw error;
+    } finally {
+      db.close();
+    }
+  }
+
+  listTierPromotions(includeReverted = false): MemoryTierPromotionRecord[] {
+    return this.readTierPromotionEntries().filter((record) => includeReverted || !record.revertedAt);
+  }
+
+  getTierPromotion(promotionId: string): MemoryTierPromotionRecord {
+    return resolveTierPromotionFromEntries(this.readTierPromotionEntries(), promotionId, true);
+  }
+
+  revertTierPromotion(promotionId: string, reason: string): MemoryTierPromotionRecord {
+    this.ensureSchema();
+    const promotion = resolveTierPromotionFromEntries(this.readTierPromotionEntries(), promotionId, false);
+    const db = this.open();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      if (promotion.toTier === "skill_candidate") {
+        throw new Error("Skill candidate promotions cannot be reverted from memory promotion history. Discard the skill candidate instead.");
+      }
+      if (promotion.mode === "merge" && promotion.targetSnapshot) {
+        restoreMemorySnapshot(db, promotion.targetSnapshot);
+      } else {
+        const target = this.resolveMemoryWithDb(db, promotion.targetMemoryId, true);
+        if (target.status === "active") {
+          archiveMemoryRow(db, target, `Reverted memory promotion ${promotion.id}: ${reason}`, null);
+        }
+      }
+      if (promotion.replacedSnapshot) {
+        restoreMemorySnapshot(db, promotion.replacedSnapshot);
+      }
+      if (promotion.sourceSnapshot) {
+        restoreMemorySnapshot(db, promotion.sourceSnapshot);
+      }
+      const updated = {
+        ...promotion,
+        revertedAt: new Date().toISOString(),
+        revertReason: reason
+      };
+      upsertTierPromotionRow(db, updated);
+      db.exec("COMMIT");
+      return updated;
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original error.
+      }
+      throw error;
     } finally {
       db.close();
     }
@@ -806,40 +1049,45 @@ export class MemoryManager {
 
   private findConflictsForCandidate(candidate: MemoryCandidateRecord): MemoryConflict[] {
     this.ensureSchema();
+    const db = this.open();
+    try {
+      return this.findConflictsForPromotionWithDb(db, candidate);
+    } finally {
+      db.close();
+    }
+  }
+
+  private findConflictsForPromotionWithDb(db: DatabaseSync, candidate: MemoryCandidateRecord, excludeMemoryIds: string[] = []): MemoryConflict[] {
     const candidateNormalized = normalizeMemoryText(candidate.content);
     const candidateTokens = tokenSet(candidate.content);
     if (!candidateNormalized || !candidateTokens.size) {
       return [];
     }
-    const db = this.open();
-    try {
-      return this.activeSearchableMemories(db)
-        .flatMap((memory) => {
-          if (!isComparableMemory(candidate, memory)) {
-            return [];
-          }
-          const memoryNormalized = normalizeMemoryText(memory.content);
-          const memoryTokens = tokenSet(memory.content);
-          const matchedTokens = intersection([...candidateTokens], memoryTokens);
-          const overlapRatio = matchedTokens.length / Math.max(1, Math.min(candidateTokens.size, memoryTokens.size));
-          const type = classifyConflict(candidateNormalized, memoryNormalized, overlapRatio);
-          if (!type) {
-            return [];
-          }
-          return [{
-            type,
-            memory,
-            score: calculateMemoryScore(candidate.content, memory).score,
-            overlapRatio,
-            matchedTokens,
-            candidatePreview: preview(candidate.content),
-            memoryPreview: preview(memory.content)
-          }];
-        })
-        .sort((a, b) => conflictRank[a.type] - conflictRank[b.type] || b.overlapRatio - a.overlapRatio);
-    } finally {
-      db.close();
-    }
+    const excluded = new Set(excludeMemoryIds);
+    return this.activeSearchableMemories(db, { tier: candidate.tier, ownerId: candidate.ownerId })
+      .flatMap((memory) => {
+        if (excluded.has(memory.id) || !isComparableMemory(candidate, memory)) {
+          return [];
+        }
+        const memoryNormalized = normalizeMemoryText(memory.content);
+        const memoryTokens = tokenSet(memory.content);
+        const matchedTokens = intersection([...candidateTokens], memoryTokens);
+        const overlapRatio = matchedTokens.length / Math.max(1, Math.min(candidateTokens.size, memoryTokens.size));
+        const type = classifyConflict(candidateNormalized, memoryNormalized, overlapRatio);
+        if (!type) {
+          return [];
+        }
+        return [{
+          type,
+          memory,
+          score: calculateMemoryScore(candidate.content, memory).score,
+          overlapRatio,
+          matchedTokens,
+          candidatePreview: preview(candidate.content),
+          memoryPreview: preview(memory.content)
+        }];
+      })
+      .sort((a, b) => conflictRank[a.type] - conflictRank[b.type] || b.overlapRatio - a.overlapRatio);
   }
 
   private async pendingCandidateRecord(candidateId: string): Promise<MemoryCandidateRecord> {
@@ -972,6 +1220,17 @@ export class MemoryManager {
     try {
       const rows = db.prepare("SELECT id, record_json FROM auto_promotions ORDER BY created_at ASC, rowid ASC").all() as PromotionRow[];
       return rows.map((row) => JSON.parse(row.record_json) as AutoPromotionRecord);
+    } finally {
+      db.close();
+    }
+  }
+
+  private readTierPromotionEntries(): MemoryTierPromotionRecord[] {
+    this.ensureSchema();
+    const db = this.open();
+    try {
+      const rows = db.prepare("SELECT id, record_json FROM memory_tier_promotions ORDER BY created_at ASC, rowid ASC").all() as TierPromotionRow[];
+      return rows.map((row) => JSON.parse(row.record_json) as MemoryTierPromotionRecord);
     } finally {
       db.close();
     }
@@ -1473,6 +1732,64 @@ function upsertPromotionRow(db: DatabaseSync, record: AutoPromotionRecord): void
   );
 }
 
+function upsertTierPromotionRow(db: DatabaseSync, record: MemoryTierPromotionRecord): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO memory_tier_promotions (
+      id, source_memory_id, target_memory_id, replaced_memory_id, from_tier, to_tier,
+      from_owner_id, to_owner_id, mode, reason, created_at, reverted_at, revert_reason,
+      record_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      source_memory_id = excluded.source_memory_id,
+      target_memory_id = excluded.target_memory_id,
+      replaced_memory_id = excluded.replaced_memory_id,
+      from_tier = excluded.from_tier,
+      to_tier = excluded.to_tier,
+      from_owner_id = excluded.from_owner_id,
+      to_owner_id = excluded.to_owner_id,
+      mode = excluded.mode,
+      reason = excluded.reason,
+      created_at = excluded.created_at,
+      reverted_at = excluded.reverted_at,
+      revert_reason = excluded.revert_reason,
+      record_json = excluded.record_json,
+      updated_at = excluded.updated_at
+  `).run(
+    record.id,
+    record.sourceMemoryId,
+    record.targetMemoryId,
+    record.replacedMemoryId ?? null,
+    record.fromTier,
+    record.toTier,
+    record.fromOwnerId ?? null,
+    record.toOwnerId ?? null,
+    record.mode,
+    record.reason,
+    record.createdAt,
+    record.revertedAt ?? null,
+    record.revertReason ?? null,
+    JSON.stringify(record),
+    now
+  );
+}
+
+function resolveTierPromotionFromEntries(entries: MemoryTierPromotionRecord[], promotionId: string, includeReverted: boolean): MemoryTierPromotionRecord {
+  const normalized = promotionId.trim();
+  if (!normalized) {
+    throw new Error("Memory tier promotion id is required.");
+  }
+  const candidates = includeReverted ? entries : entries.filter((entry) => !entry.revertedAt);
+  const matches = candidates.filter((entry) => entry.id === normalized || entry.id.startsWith(normalized));
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (matches.length > 1) {
+    throw new Error(`Memory tier promotion id prefix is ambiguous: ${promotionId}. Matches: ${matches.map((entry) => entry.id).join(", ")}`);
+  }
+  throw new Error(`Memory tier promotion not found: ${promotionId}`);
+}
+
 function isAutoPromotionRecord(value: unknown): value is AutoPromotionRecord {
   if (!value || typeof value !== "object") {
     return false;
@@ -1558,6 +1875,124 @@ function validatePromotionOptions(options: PromoteCandidateOptions): void {
   if (options.mergeContent && !options.mergeMemoryId) {
     throw new Error("--content for candidate promote is only valid with --merge.");
   }
+}
+
+function validateMemoryPromotionOptions(options: PromoteMemoryOptions): void {
+  const selected = [options.force, options.replaceMemoryId, options.mergeMemoryId].filter(Boolean).length;
+  if (selected > 1) {
+    throw new Error("Use only one memory promotion resolution: --force, --replace, or --merge.");
+  }
+  if (!options.reason.trim()) {
+    throw new Error("--reason is required for memory promotion.");
+  }
+  if (options.mergeMemoryId && !options.content?.trim()) {
+    throw new Error("--merge requires --content with merged memory content.");
+  }
+}
+
+function resolvePromotionTarget(source: MemoryRecord, options: PromoteMemoryOptions): { tier: Extract<MemoryTier, "agent" | "core">; ownerId: string | null } {
+  if (source.tier === "core") {
+    throw new Error("Core memory cannot be promoted to agent or session memory.");
+  }
+  if (source.tier === "agent" && options.toTier !== "core") {
+    throw new Error("Agent memory can only be promoted to core memory.");
+  }
+  if (source.tier === "session" && options.toTier !== "agent" && options.toTier !== "core") {
+    throw new Error("Session memory can only be promoted to agent or core memory.");
+  }
+  if (options.toTier === "agent") {
+    if (!options.ownerId?.trim()) {
+      throw new Error("--owner-id is required when promoting memory to agent tier.");
+    }
+    return { tier: "agent", ownerId: options.ownerId };
+  }
+  return { tier: "core", ownerId: null };
+}
+
+function promotionTargetToCandidate(
+  source: MemoryRecord,
+  target: { tier: Extract<MemoryTier, "agent" | "core">; ownerId: string | null },
+  options: PromoteMemoryOptions
+): MemoryCandidateRecord {
+  const ownership = normalizeMemoryOwnership({
+    tier: target.tier,
+    ownerId: target.ownerId,
+    sourceSessionId: source.sourceSessionId ?? undefined,
+    sourceAgentId: source.sourceAgentId ?? undefined
+  });
+  return memoryCandidateRecordSchema.parse({
+    id: `promotion:${source.id}`,
+    status: "pending",
+    tier: ownership.tier,
+    scope: ownership.scope,
+    legacyScope: ownership.legacyScope ?? undefined,
+    ownerId: ownership.ownerId ?? undefined,
+    kind: options.kind ?? source.kind,
+    content: options.content?.trim() || source.content,
+    importance: options.importance ?? source.importance,
+    confidence: options.confidence ?? source.confidence,
+    sourceSessionId: source.sourceSessionId ?? source.ownerId ?? "memory-promotion",
+    sourceAgentId: source.sourceAgentId ?? target.ownerId ?? "memory-promotion",
+    createdAt: new Date().toISOString()
+  });
+}
+
+function promotionCandidateToMemoryInput(candidate: MemoryCandidateRecord, source: MemoryRecord): AddMemoryInput {
+  return {
+    tier: candidate.tier,
+    scope: candidate.scope,
+    legacyScope: candidate.legacyScope ?? null,
+    ownerId: candidate.ownerId,
+    kind: candidate.kind,
+    content: candidate.content,
+    importance: candidate.importance,
+    confidence: candidate.confidence,
+    sourceSessionId: source.sourceSessionId ?? (source.tier === "session" ? source.ownerId ?? undefined : undefined),
+    sourceAgentId: source.sourceAgentId ?? (source.tier === "agent" ? source.ownerId ?? undefined : undefined)
+  };
+}
+
+function validatePromotionResolutionTarget(
+  memory: MemoryRecord,
+  target: { tier: Extract<MemoryTier, "agent" | "core">; ownerId: string | null },
+  kind: string
+): void {
+  if (memory.tier !== target.tier || memory.ownerId !== target.ownerId || memory.kind !== kind) {
+    throw new Error(`Resolution memory must match target tier, owner, and kind: expected ${target.tier}/${kind}.`);
+  }
+}
+
+function createTierPromotionRecord(
+  source: MemoryRecord,
+  target: MemoryRecord,
+  options: {
+    toTier: MemoryTierPromotionTarget;
+    toOwnerId?: string | null;
+    mode: MemoryTierPromotionMode;
+    reason: string;
+    replacedMemoryId?: string;
+    targetMemoryId?: string;
+    sourceSnapshot?: MemoryRecord;
+    targetSnapshot?: MemoryRecord;
+    replacedSnapshot?: MemoryRecord;
+  }
+): MemoryTierPromotionRecord {
+  return {
+    id: randomUUID(),
+    sourceMemoryId: source.id,
+    targetMemoryId: options.targetMemoryId ?? target.id,
+    replacedMemoryId: options.replacedMemoryId,
+    fromTier: source.tier,
+    toTier: options.toTier,
+    fromOwnerId: source.ownerId,
+    toOwnerId: options.toOwnerId ?? target.ownerId,
+    mode: options.mode,
+    reason: options.reason,
+    createdAt: new Date().toISOString(),
+    sourceSnapshot: options.sourceSnapshot,
+    targetSnapshot: options.targetSnapshot,
+    replacedSnapshot: options.replacedSnapshot
+  };
 }
 
 function legacyScopeToTier(scope: MemoryScope | undefined): MemoryTier {
@@ -1736,6 +2171,39 @@ function updateMemoryRow(db: DatabaseSync, record: MemoryRecord): void {
     record.confidence,
     record.importance,
     record.updatedAt,
+    record.id
+  );
+}
+
+function restoreMemorySnapshot(db: DatabaseSync, record: MemoryRecord): void {
+  db.prepare(`
+    UPDATE memories
+    SET tier = ?, scope = ?, legacy_scope = ?, owner_type = ?, owner_id = ?, kind = ?, content = ?,
+      source_session_id = ?, source_agent_id = ?, confidence = ?, importance = ?, status = ?,
+      updated_at = ?, last_accessed_at = ?, valid_from = ?, valid_until = ?, expires_at = ?,
+      archived_at = ?, archive_reason = ?, replaced_by_memory_id = ?
+    WHERE id = ?
+  `).run(
+    record.tier,
+    record.scope,
+    record.legacyScope,
+    record.ownerType,
+    record.ownerId,
+    record.kind,
+    record.content,
+    record.sourceSessionId,
+    record.sourceAgentId,
+    record.confidence,
+    record.importance,
+    record.status,
+    new Date().toISOString(),
+    record.lastAccessedAt,
+    record.validFrom,
+    record.validUntil,
+    record.expiresAt,
+    record.archivedAt,
+    record.archiveReason,
+    record.replacedByMemoryId,
     record.id
   );
 }

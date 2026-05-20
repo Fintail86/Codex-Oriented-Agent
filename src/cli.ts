@@ -523,6 +523,81 @@ memory
     });
   });
 
+memory
+  .command("promote")
+  .argument("<memory-id>")
+  .option("--to-tier <tier>", "Target memory tier: agent or core")
+  .option("--to-skill-candidate", "Create a skill candidate from core memory.", false)
+  .option("--skill-name <name>", "Skill candidate name for --to-skill-candidate")
+  .option("--owner-id <owner-id>", "Target owner id")
+  .requiredOption("--reason <reason>", "Promotion reason")
+  .option("--content <content>", "Promoted or merged content")
+  .option("--kind <kind>", "Promoted memory kind")
+  .option("--importance <importance>", "Promoted memory importance from 1 to 5")
+  .option("--confidence <confidence>", "Promoted memory confidence from 0 to 1")
+  .option("--force", "Promote even if conflicts are detected.", false)
+  .option("--replace <memory-id>", "Archive an existing target memory and promote this memory.")
+  .option("--merge <memory-id>", "Merge this memory into an existing target memory.")
+  .description("Promote memory across lifecycle tiers or into a skill candidate.")
+  .action(async (memoryId: string, options: {
+    toTier?: string;
+    toSkillCandidate: boolean;
+    skillName?: string;
+    ownerId?: string;
+    reason: string;
+    content?: string;
+    kind?: string;
+    importance?: string;
+    confidence?: string;
+    force: boolean;
+    replace?: string;
+    merge?: string;
+  }) => {
+    await main(async (workspaceRoot) => {
+      const manager = new MemoryManager(workspaceRoot);
+      if (options.toSkillCandidate) {
+        if (options.toTier) {
+          throw new Error("Use either --to-tier or --to-skill-candidate, not both.");
+        }
+        if (!options.skillName?.trim()) {
+          throw new Error("--skill-name is required with --to-skill-candidate.");
+        }
+        const result = manager.promoteCoreMemoryToSkillCandidate(memoryId, {
+          skillName: options.skillName,
+          reason: options.reason,
+          content: options.content
+        });
+        console.log(`Skill candidate: ${result.candidate.id}`);
+        console.log(`Promotion: ${result.promotion.id}`);
+        return;
+      }
+      if (!options.toTier) {
+        throw new Error("Use --to-tier agent|core or --to-skill-candidate.");
+      }
+      const toTier = memoryTierSchema.parse(options.toTier);
+      if (toTier === "session") {
+        throw new Error("Memory promotion to session tier is not supported.");
+      }
+      if (toTier === "agent") {
+        await new AgentManager(workspaceRoot).loadAgent(options.ownerId ?? "");
+      }
+      const record = manager.promoteMemory(memoryId, {
+        toTier,
+        ownerId: options.ownerId,
+        reason: options.reason,
+        content: options.content,
+        kind: options.kind,
+        importance: options.importance ? parseIntegerOption(options.importance, "importance") : undefined,
+        confidence: options.confidence ? parseNumberOption(options.confidence, "confidence") : undefined,
+        force: options.force,
+        replaceMemoryId: options.replace,
+        mergeMemoryId: options.merge
+      });
+      console.log(`Promotion: ${record.id}`);
+      console.log(`Target memory: ${record.targetMemoryId}`);
+    });
+  });
+
 const candidate = memory.command("candidate").description("Review memory candidates.");
 
 const promotion = memory.command("promotion").description("Review automatic memory promotions.");
@@ -685,10 +760,27 @@ promotion
 promotion
   .command("list")
   .option("--all", "Include reverted promotions.", false)
-  .description("List automatic memory promotions.")
-  .action(async (options: { all: boolean }) => {
+  .option("--type <type>", "Promotion type: auto or tier", "auto")
+  .description("List automatic or tier memory promotions.")
+  .action(async (options: { all: boolean; type: string }) => {
     await main(async (workspaceRoot) => {
-      const records = new MemoryManager(workspaceRoot).listPromotions(options.all);
+      const manager = new MemoryManager(workspaceRoot);
+      if (options.type === "tier") {
+        const records = manager.listTierPromotions(options.all);
+        if (!records.length) {
+          console.log("No tier promotions.");
+          return;
+        }
+        for (const record of records) {
+          const status = record.revertedAt ? "reverted" : "active";
+          console.log(`${record.id}\t${status}\t${record.fromTier}->${record.toTier}\t${record.mode}\ttarget:${record.targetMemoryId.slice(0, 8)}`);
+        }
+        return;
+      }
+      if (options.type !== "auto") {
+        throw new Error("Promotion type must be auto or tier.");
+      }
+      const records = manager.listPromotions(options.all);
       if (!records.length) {
         console.log("No auto promotions.");
         return;
@@ -703,10 +795,15 @@ promotion
 promotion
   .command("show")
   .argument("<promotion-id>")
-  .description("Show one automatic memory promotion.")
+  .description("Show one automatic or tier memory promotion.")
   .action(async (promotionId: string) => {
     await main(async (workspaceRoot) => {
-      console.log(JSON.stringify(new MemoryManager(workspaceRoot).getPromotion(promotionId), null, 2));
+      const manager = new MemoryManager(workspaceRoot);
+      try {
+        console.log(JSON.stringify(manager.getPromotion(promotionId), null, 2));
+      } catch {
+        console.log(JSON.stringify(manager.getTierPromotion(promotionId), null, 2));
+      }
     });
   });
 
@@ -714,11 +811,17 @@ promotion
   .command("revert")
   .argument("<promotion-id>")
   .requiredOption("--reason <reason>", "Revert reason")
-  .description("Archive the memory created by an automatic promotion.")
+  .description("Revert an automatic or tier memory promotion.")
   .action(async (promotionId: string, options: { reason: string }) => {
     await main(async (workspaceRoot) => {
-      const record = new MemoryManager(workspaceRoot).revertPromotion(promotionId, options.reason);
-      console.log(`${record.id} reverted`);
+      const manager = new MemoryManager(workspaceRoot);
+      try {
+        const record = manager.revertPromotion(promotionId, options.reason);
+        console.log(`${record.id} reverted`);
+      } catch {
+        const record = manager.revertTierPromotion(promotionId, options.reason);
+        console.log(`${record.id} reverted`);
+      }
     });
   });
 

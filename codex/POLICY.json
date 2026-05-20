@@ -1,5 +1,5 @@
 {
-  "version": "0.13.0",
+  "version": "0.14.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -99,6 +99,13 @@
     ],
     "promotionConflictPolicy": "block_until_resolved",
     "archivePolicy": "explicit_cli_only",
+    "promotionPaths": {
+      "sessionToAgent": "manual_or_low_risk",
+      "sessionToCore": "manual_only",
+      "agentToCore": "manual_only",
+      "coreToSkillCandidate": "manual_only",
+      "coreToCodexAmendment": "deferred"
+    },
     "autoPromotion": {
       "mode": "conservative",
       "allowRiskLevels": [
