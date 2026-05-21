@@ -1,10 +1,10 @@
-# COSIA v0.17.0
+# COSIA v0.19.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.17.0 fixes the MVP acceptance line: `codex-cli` OAuth is the required manual acceptance provider, while `mock` remains a regression-only provider.
+v0.19.0 adds the MVP UX Foundation: `status` is now the home view, `doctor` diagnoses and safely repairs/reset runtime state, and `start` guides the user into a session.
 
 ## Requirements
 
@@ -68,6 +68,9 @@ cosia provider list
 cosia provider check codex-cli
 cosia provider check openrouter
 cosia mvp checklist
+cosia status
+cosia doctor
+cosia start --no-chat
 ```
 
 For runtime-only regression checks without Codex login:
@@ -77,6 +80,37 @@ cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
 
 `mock` is not an MVP readiness signal. Manual MVP acceptance must pass with `codex-cli`.
+
+## UX Foundation
+
+Use `status` as the normal home screen:
+
+```powershell
+cosia status
+cosia status --compact
+cosia status --json
+```
+
+Use `doctor` for workspace health:
+
+```powershell
+cosia doctor
+cosia doctor repair
+cosia doctor reset --state
+cosia doctor reset --factory
+```
+
+Reset commands are preview-only unless `--yes` and the exact confirmation phrase are provided. Reset uses a two-phase backup flow under `.cosia-reset-backups/` and does not touch source code, package files, README, or git history.
+
+Use `start` for guided session entry:
+
+```powershell
+cosia start
+cosia start --no-chat
+cosia start --new-session --goal "Plan the next task"
+```
+
+`agent create` still creates only an agent. `start` is responsible for session creation/selection when beginning work.
 
 To force COSIA to inspect files before answering:
 

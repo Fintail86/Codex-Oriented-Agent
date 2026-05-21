@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager, formatAgentRecommendation } from "../src/runtime/agent_manager.js";
+import { applyReset, previewReset, repairDoctor } from "../src/runtime/doctor.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMemoryText } from "../src/runtime/memory_manager.js";
 import { formatMvpChecklist } from "../src/runtime/mvp_checklist.js";
@@ -20,6 +21,7 @@ import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_clas
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
+import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import type { ModelProvider } from "../src/runtime/types.js";
@@ -96,7 +98,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.17.0\"");
+    expect(policyJson).toContain("\"version\": \"0.19.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -2182,10 +2184,11 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.17.0");
+    expect(emptyReport.version).toBe("0.19.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
+    expect(emptyReport.issues.some((issue) => issue.severity === "critical" && issue.id === "agents.none")).toBe(true);
 
     const root = await initializedWorkspace();
     const agents = new AgentManager(root);
@@ -2207,8 +2210,68 @@ describe("status and listing", () => {
     expect(report.contextWarningCount).toBe(1);
     expect(report.contextCriticalCount).toBe(0);
     expect(report.largestContext?.sessionId).toBe(session.id);
+    expect(report.issues.some((issue) => issue.id === "context.needs_attention")).toBe(true);
+    expect(report.recommendedActions[0]).toContain("cosia session context status");
     expect(await sessions.listSessions()).toHaveLength(1);
     expect(memory.listMemories()).toHaveLength(1);
+  });
+
+  it("repairs doctor issues idempotently and previews safe reset", async () => {
+    const root = await initializedWorkspace();
+    await writeFile(join(root, "codex", "POLICY.md"), "# stale\n", "utf8");
+    await writeFile(join(root, "skills", "SKILLS.md"), "# stale\n", "utf8");
+
+    const firstRepair = await repairDoctor(root);
+    expect(firstRepair.changed).toBe(true);
+    expect(firstRepair.repaired).toEqual(expect.arrayContaining(["codex/POLICY.md", "skills/SKILLS.md"]));
+    const policyAfterFirst = await readFile(join(root, "codex", "POLICY.md"), "utf8");
+    const skillsAfterFirst = await readFile(join(root, "skills", "SKILLS.md"), "utf8");
+
+    const secondRepair = await repairDoctor(root);
+    expect(secondRepair.repaired).not.toContain("codex/POLICY.md");
+    expect(secondRepair.repaired).not.toContain("skills/SKILLS.md");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toBe(policyAfterFirst);
+    expect(await readFile(join(root, "skills", "SKILLS.md"), "utf8")).toBe(skillsAfterFirst);
+
+    await new SessionManager(root).createSession("cosia-agent", "Preview reset");
+    const preview = await previewReset(root, "state");
+    expect(preview.applied).toBe(false);
+    expect(preview.entries.some((entry) => entry.source === "sessions")).toBe(true);
+    expect(await readdir(join(root, "sessions"))).not.toEqual([]);
+
+    await expect(applyReset(root, "state", "wrong")).rejects.toThrow("RESET COSIA STATE");
+  });
+
+  it("applies state reset through backup copy and keeps source code out of reset targets", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    await sessions.createSession("cosia-agent", "Reset me");
+    const result = await applyReset(root, "state", "RESET COSIA STATE");
+
+    expect(result.applied).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.entries.map((entry) => entry.source)).toContain("sessions");
+    expect(result.entries.some((entry) => entry.source === "package.json")).toBe(false);
+    expect(result.entries.every((entry) => entry.copied && entry.verified && entry.deleted)).toBe(true);
+    expect(await readdir(join(root, "sessions"))).toEqual([]);
+    expect(await readFile(join(root, "memory", "longterm.sqlite"))).toBeInstanceOf(Buffer);
+  });
+
+  it("recommends start sessions deterministically", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    const agentList = await agents.listAgents();
+    const sessions = new SessionManager(root);
+    const older = await sessions.createSession("cosia-agent", "Older");
+    const newer = await sessions.createSession("cosia-agent", "Newer");
+    await sessions.assignAgent(older.id, "missing-agent");
+
+    const sessionList = await sessions.listSessions();
+    const recommendation = recommendStartSession(sessionList, agentList);
+    expect(recommendation.session?.id).toBe(newer.id);
+    expect(sessionFromChoice("", sessionList, recommendation.session)).toMatchObject({ id: newer.id });
+    expect(sessionFromChoice("n", sessionList, recommendation.session)).toBe("new");
+    expect(sessionFromChoice("q", sessionList, recommendation.session)).toBe("quit");
   });
 
   it("prints MVP acceptance checklist and documents expected outcomes", async () => {

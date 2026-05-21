@@ -76,6 +76,31 @@ Failure Hint:
 
 - If no default agent exists, run `cosia agent bootstrap`.
 
+## 3A. UX Foundation Home and Doctor
+
+Purpose: verify COSIA can explain current workspace health and safe next actions.
+
+Command:
+
+```powershell
+cosia status
+cosia status --compact
+cosia doctor
+cosia doctor repair
+cosia start --no-chat
+```
+
+Expected Outcome:
+
+- `status` prints grouped workspace/provider/session/review health.
+- `doctor` prints findings without changing files.
+- `doctor repair` completes safely and can be run repeatedly.
+- `start --no-chat` recommends or selects a usable next session command.
+
+Failure Hint:
+
+- If `doctor` reports critical issues, follow the printed action hints before continuing.
+
 ## 4. Runtime Smoke with Codex CLI
 
 Purpose: verify the real model provider can produce a final answer.

@@ -7,6 +7,7 @@ import {
   formatAgentRecommendation
 } from "./runtime/agent_manager.js";
 import { initProject } from "./runtime/init_project.js";
+import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, getDoctorReport, previewReset, repairDoctor, type ResetMode } from "./runtime/doctor.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatMvpChecklist } from "./runtime/mvp_checklist.js";
 import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
@@ -17,7 +18,8 @@ import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_bu
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
-import { getStatusReport } from "./runtime/status_report.js";
+import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
+import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
@@ -34,29 +36,53 @@ program
 program
   .command("status")
   .option("--provider <provider>", "Model provider smoke check: default, codex-cli, openai-compatible, or mock", "default")
+  .option("--compact", "Print a compact status summary.", false)
+  .option("--json", "Print structured JSON status.", false)
   .description("Show workspace, runtime, memory, session, and provider status.")
-  .action(async (options: { provider: string }) => {
+  .action(async (options: { provider: string; compact: boolean; json: boolean }) => {
     await main(async (workspaceRoot) => {
       const report = await getStatusReport(workspaceRoot, options.provider);
-      console.log(`COSIA ${report.version}`);
-      console.log(`Workspace: ${report.workspaceRoot}`);
-      console.log(`Agents: ${report.agentsCount}`);
-      console.log(`Sessions: ${report.sessionsCount}`);
-      console.log(`Memories: ${report.memoriesCount}`);
-      console.log(`Pending candidates: ${report.pendingCandidatesCount}`);
-      console.log(`Context warnings: ${report.contextWarningCount}`);
-      console.log(`Context critical: ${report.contextCriticalCount}`);
-      if (report.largestContext) {
-        console.log(`Largest context: ${formatContextHealth(report.largestContext)}`);
+      if (options.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(formatStatusReport(report, { compact: options.compact }));
       }
-      console.log(`Provider: ${report.providerId} (${report.providerOk ? "ok" : "failed"})`);
-      console.log(`Provider message: ${report.providerMessage}`);
-      if (report.providerReason) {
-        console.log(`Provider reason: ${report.providerReason}`);
-      }
-      if (report.providerHint) {
-        console.log(`Provider hint: ${report.providerHint}`);
-      }
+    });
+  });
+
+const doctor = program.command("doctor").description("Diagnose and safely repair COSIA workspace health.");
+
+doctor
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const report = await getDoctorReport(workspaceRoot);
+      console.log(formatDoctorReport(report));
+    });
+  });
+
+doctor
+  .command("repair")
+  .description("Run deterministic, idempotent safe repairs.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      console.log(formatDoctorRepair(await repairDoctor(workspaceRoot)));
+    });
+  });
+
+doctor
+  .command("reset")
+  .option("--state", "Reset runtime state only.", false)
+  .option("--factory", "Reset COSIA runtime workspace configuration and state.", false)
+  .option("--yes", "Apply the reset. Without this, only preview.", false)
+  .option("--confirm <phrase>", "Required confirmation phrase when applying.")
+  .description("Preview or apply a safe two-phase COSIA reset.")
+  .action(async (options: { state: boolean; factory: boolean; yes: boolean; confirm?: string }) => {
+    await main(async (workspaceRoot) => {
+      const mode = resolveResetMode(options);
+      const result = options.yes
+        ? await applyReset(workspaceRoot, mode, options.confirm)
+        : await previewReset(workspaceRoot, mode);
+      console.log(formatResetResult(result));
     });
   });
 
@@ -1333,6 +1359,81 @@ tool
   });
 
 program
+  .command("start")
+  .option("--session <session-id>", "Use an existing session.")
+  .option("--new-session", "Create a new session.", false)
+  .option("--goal <goal>", "Goal for --new-session.")
+  .option("--provider <provider>", "Model provider for the suggested or launched chat.", "default")
+  .option("--no-chat", "Do not enter chat; print the selected next command.")
+  .description("Guided entrypoint for choosing or creating a session.")
+  .action(async (options: { session?: string; newSession: boolean; goal?: string; provider: string; chat?: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const enterChat = options.chat !== false;
+      const agents = new AgentManager(workspaceRoot);
+      const sessions = new SessionManager(workspaceRoot);
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const [agentList, sessionList, report] = await Promise.all([
+        agents.listAgents(),
+        sessions.listSessions(),
+        getStatusReport(workspaceRoot, options.provider)
+      ]);
+      const recommendation = recommendStartSession(sessionList, agentList);
+      console.log(formatStartOverview({
+        agents: agentList,
+        sessions: sessionList,
+        defaultAgentId: policy.agents.defaultAgentId,
+        providerId: report.providerId,
+        issues: report.issues,
+        recommendation
+      }));
+
+      if (!agentList.length) {
+        console.log("\nNo agents are available. Run `cosia agent bootstrap` first.");
+        return;
+      }
+
+      let selectedSession: SessionMetadata | undefined;
+      if (options.session) {
+        selectedSession = await sessions.loadSession(options.session);
+      } else if (options.newSession) {
+        selectedSession = await createStartSession(workspaceRoot, options.goal ?? await askOnce("New session goal: "));
+      } else if (!enterChat) {
+        selectedSession = recommendation.session;
+      } else {
+        console.log("");
+        console.log(formatSessionChoices(sessionList, recommendation.session));
+        const choice = sessionFromChoice(await askOnce("start> "), sessionList, recommendation.session);
+        if (choice === "quit") {
+          console.log("Start cancelled.");
+          return;
+        }
+        if (choice === "new") {
+          selectedSession = await createStartSession(workspaceRoot, await askOnce("New session goal: "));
+        } else if (choice) {
+          selectedSession = choice;
+        } else {
+          throw new Error("Invalid session selection.");
+        }
+      }
+
+      if (!selectedSession) {
+        console.log("\nNo usable session selected.");
+        console.log("Next: cosia start --new-session --goal \"<goal>\"");
+        return;
+      }
+
+      console.log(`\nSelected session: ${selectedSession.id}`);
+      const chatCommand = `cosia chat --session ${selectedSession.id} --provider ${report.providerId}`;
+      if (!enterChat) {
+        console.log(`Next: ${chatCommand}`);
+        return;
+      }
+      console.log(`[cosia] entering chat. Equivalent command: ${chatCommand}`);
+      await runBasicStartChat(workspaceRoot, selectedSession.id, report.providerId);
+    });
+  });
+
+program
   .command("run")
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
@@ -1577,6 +1678,79 @@ async function main(fn: (workspaceRoot: string) => Promise<void>, options: { all
   } catch (error) {
     console.error((error as Error).message);
     process.exitCode = 1;
+  }
+}
+
+function resolveResetMode(options: { state: boolean; factory: boolean }): ResetMode {
+  if (options.state === options.factory) {
+    throw new Error("Choose exactly one reset mode: --state or --factory.");
+  }
+  return options.factory ? "factory" : "state";
+}
+
+async function askOnce(prompt: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(prompt)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function createStartSession(workspaceRoot: string, goal: string): Promise<SessionMetadata> {
+  const trimmedGoal = goal.trim();
+  if (!trimmedGoal) {
+    throw new Error("A session goal is required.");
+  }
+  const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const agentId = policy.agents.defaultAgentId;
+  if (!agentId) {
+    throw new Error("No default agent is configured. Run `cosia agent bootstrap` first.");
+  }
+  await new AgentManager(workspaceRoot).loadAgent(agentId);
+  const session = await new SessionManager(workspaceRoot).createSession(agentId, trimmedGoal);
+  console.log(`Created session: ${session.id}`);
+  return session;
+}
+
+async function runBasicStartChat(workspaceRoot: string, sessionId: string, providerId: string): Promise<void> {
+  const sessions = new SessionManager(workspaceRoot);
+  const session = await sessions.loadSession(sessionId);
+  const agentId = session.assignedAgentId;
+  if (!agentId) {
+    throw new Error(`Session has no assigned agent. Run \`cosia session assign ${session.id} --agent <agent-id>\`.`);
+  }
+  await new AgentManager(workspaceRoot).loadAgent(agentId);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let turns = 0;
+  try {
+    while (true) {
+      const prompt = (await rl.question("cosia> ")).trim();
+      if (!prompt) {
+        continue;
+      }
+      if (prompt === "/exit") {
+        console.error(`[cosia] chat ended after ${turns} turn(s).`);
+        break;
+      }
+      if (prompt === "/status") {
+        console.log(`Session: ${session.id}`);
+        console.log(`Assigned agent: ${session.assignedAgentId ?? "none"}`);
+        console.log(`Provider: ${providerId}`);
+        continue;
+      }
+      const content = await runSession(workspaceRoot, {
+        sessionId: session.id,
+        prompt,
+        agentId,
+        providerId,
+        onEvent: (message) => console.error(`[cosia] ${message}`)
+      });
+      turns += 1;
+      console.log(content);
+    }
+  } finally {
+    rl.close();
   }
 }
 
