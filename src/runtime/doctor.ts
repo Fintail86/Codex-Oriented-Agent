@@ -212,6 +212,7 @@ export function formatResetResult(result: ResetResult): string {
   if (!result.applied) {
     const confirm = result.mode === "state" ? stateConfirmPhrase : factoryConfirmPhrase;
     lines.push("");
+    lines.push("No files changed.");
     lines.push(`Re-run with --yes --confirm "${confirm}" to apply.`);
   }
   if (result.recoveryManifestPath) {

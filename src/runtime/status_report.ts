@@ -157,6 +157,10 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
     } : undefined
   ].filter((issue): issue is StatusIssue => Boolean(issue)));
   const pendingCandidatesCount = await memory.countPendingCandidates();
+  const recommendedActions = issues.filter((issue) => issue.action).map((issue) => issue.action!);
+  if (!recommendedActions.length) {
+    recommendedActions.push("Run `cosia start`.");
+  }
   return {
     version: COSIA_VERSION,
     workspaceRoot,
@@ -182,7 +186,7 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
     sessions,
     orphanSessions,
     issues,
-    recommendedActions: issues.filter((issue) => issue.action).map((issue) => issue.action!)
+    recommendedActions
   };
 }
 

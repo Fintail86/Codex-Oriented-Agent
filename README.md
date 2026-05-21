@@ -1,10 +1,10 @@
-# COSIA v0.19.0
+# COSIA v0.19.1
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.19.0 adds the MVP UX Foundation: `status` is now the home view, `doctor` diagnoses and safely repairs/reset runtime state, and `start` guides the user into a session.
+v0.19.1 polishes the MVP UX Foundation: `status` is the home view, `doctor` diagnoses and safely repairs/reset runtime state, and `start` now enters the same full chat REPL as `cosia chat`.
 
 ## Requirements
 
@@ -111,6 +111,7 @@ cosia start --new-session --goal "Plan the next task"
 ```
 
 `agent create` still creates only an agent. `start` is responsible for session creation/selection when beginning work.
+When chat is launched through `start`, it supports the same `/help`, `/context`, `/summary`, `/skills`, and `/memory refresh` commands as `cosia chat`.
 
 To force COSIA to inspect files before answering:
 
@@ -359,9 +360,10 @@ cosia session context status <session-id>
 cosia session context compact <session-id> --keep-last 5 --reason "Summary captured older turns" --yes
 ```
 
-`chat` starts a simple REPL over the existing session runtime. Use `--agent <agent-id>` to run the chat with a different executing agent without changing the session assignment. Supported commands:
+`chat` starts the shared COSIA REPL over the existing session runtime. `cosia start` enters this same REPL after selecting or creating a session. Use `--agent <agent-id>` to run the chat with a different executing agent without changing the session assignment. Type `/help` inside the REPL to see supported commands:
 
 ```text
+/help
 /status
 /context status
 /context compact --keep-last <n> --reason "<reason>"

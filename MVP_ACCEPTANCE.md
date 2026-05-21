@@ -96,6 +96,7 @@ Expected Outcome:
 - `doctor` prints findings without changing files.
 - `doctor repair` completes safely and can be run repeatedly.
 - `start --no-chat` recommends or selects a usable next session command.
+- `start` without `--no-chat` enters the same REPL command set as `cosia chat`, including `/help`, `/status`, `/context`, `/summary`, and `/skills`.
 
 Failure Hint:
 

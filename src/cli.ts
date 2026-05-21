@@ -14,7 +14,8 @@ import { checkProvider, createProvider, listProviders } from "./runtime/model/pr
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
-import { loadPromptStaticBlocks, type PromptManifest } from "./runtime/prompt_builder.js";
+import type { PromptManifest } from "./runtime/prompt_builder.js";
+import { runChatRepl } from "./runtime/repl.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
@@ -1423,13 +1424,29 @@ program
       }
 
       console.log(`\nSelected session: ${selectedSession.id}`);
+      console.log(`Provider: ${report.providerId}`);
+      console.log(`Assigned agent: ${selectedSession.assignedAgentId ?? "none"}`);
       const chatCommand = `cosia chat --session ${selectedSession.id} --provider ${report.providerId}`;
       if (!enterChat) {
         console.log(`Next: ${chatCommand}`);
         return;
       }
+      if (!report.providerOk) {
+        console.log(`Provider ${report.providerId} is not ready.`);
+        console.log(`Reason: ${report.providerReason ?? "unknown"}`);
+        console.log(`Message: ${report.providerMessage}`);
+        if (report.providerHint) {
+          console.log(`Hint: ${report.providerHint}`);
+        }
+        console.log(`Next: cosia provider check ${report.providerId}`);
+        return;
+      }
       console.log(`[cosia] entering chat. Equivalent command: ${chatCommand}`);
-      await runBasicStartChat(workspaceRoot, selectedSession.id, report.providerId);
+      await runChatRepl({
+        workspaceRoot,
+        sessionId: selectedSession.id,
+        providerId: report.providerId
+      });
     });
   });
 
@@ -1473,194 +1490,16 @@ program
   .description("Enter a simple session REPL.")
   .action(async (options: { session: string; agent?: string; provider?: string; providerTimeoutMs?: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
-      const sessions = new SessionManager(workspaceRoot);
-      const session = await sessions.loadSession(options.session);
-      await sessions.ensureSessionSupportFiles(session.id);
-      const executingAgentId = options.agent ?? session.assignedAgentId;
-      if (!executingAgentId) {
-        throw new Error(`Session has no assigned agent. Run \`cosia session assign ${session.id} --agent <agent-id>\` or pass --agent <agent-id>.`);
-      }
-      const agent = await new AgentManager(workspaceRoot).loadAgent(executingAgentId);
-      const policyManager = new PolicyManager(workspaceRoot);
-      const policy = await policyManager.loadPolicy();
-      if (await policyManager.ensureMarkdownCurrent()) {
-        console.error("[cosia] policy mirror synced from POLICY.json");
-      }
-      const memory = new MemoryManager(workspaceRoot);
-      const skills = new SkillManager(workspaceRoot);
-      await memory.writeReferenceMemory(session, session.goal, agent.id);
-      const staticBlocks = await loadPromptStaticBlocks({ workspaceRoot, agent, session });
-      const history: Array<{ prompt: string; response: string }> = [];
-      let lastPrompt = session.goal;
-      const manualSkills = new Set(options.skill ?? []);
-
-      console.error(`[cosia] chat started: ${session.id}`);
-      console.error("[cosia] commands: /status, /context status, /context compact --keep-last <n> --reason \"<reason>\" [--yes], /summary show, /summary update <summary>, /memory refresh, /skills list, /skills use <id>, /skills drop <id>, /skills clear, /exit");
-      const rl = createInterface({ input: process.stdin, output: process.stdout });
-      try {
-        while (true) {
-          const line = await rl.question("cosia> ");
-          const prompt = line.trim();
-          if (!prompt) {
-            continue;
-          }
-          if (prompt === "/exit") {
-            console.error(`[cosia] chat ended after ${history.length} turn(s).`);
-            const status = await sessions.contextStatus(session.id, {
-              warningChars: policy.promptBudget.contextWarningChars,
-              criticalChars: policy.promptBudget.contextCriticalChars
-            });
-            if (status.level !== "ok" || status.summaryIsPlaceholder) {
-              console.error(`[cosia] summary hint: cosia session summarize ${session.id} --content "<summary>"`);
-            }
-            if (status.level !== "ok" || status.compactRecommended) {
-              console.error(`[cosia] context hint: cosia session context compact ${session.id} --keep-last 5 --reason "<reason>"`);
-            }
-            break;
-          }
-          if (prompt === "/status") {
-            console.log(`Session: ${session.id}`);
-            console.log(`Assigned agent: ${session.assignedAgentId ?? "none"}`);
-            console.log(`Executing agent: ${agent.id}`);
-            console.log(`Provider: ${options.provider ?? policy.model.defaultProvider}`);
-            console.log(`Prompt budget: ${policy.promptBudget.maxPromptChars} chars`);
-            console.log(`Context tail: ${policy.promptBudget.contextTailChars} chars`);
-            console.log(`Manual skills: ${manualSkills.size ? [...manualSkills].join(", ") : "none"}`);
-            const health = await sessions.contextStatus(session.id, {
-              warningChars: policy.promptBudget.contextWarningChars,
-              criticalChars: policy.promptBudget.contextCriticalChars
-            });
-            console.log("Context status:");
-            console.log(formatContextStatus(health));
-            if (health.level !== "ok" || health.compactRecommended) {
-              console.log(contextMaintenanceHint(session.id));
-            }
-            console.log(`Turns in this REPL: ${history.length}`);
-            continue;
-          }
-          if (prompt === "/context status") {
-            const status = await sessions.contextStatus(session.id, {
-              warningChars: policy.promptBudget.contextWarningChars,
-              criticalChars: policy.promptBudget.contextCriticalChars
-            });
-            console.log(formatContextStatus(status));
-            if (status.level !== "ok" || status.compactRecommended) {
-              console.log(contextMaintenanceHint(session.id));
-            }
-            continue;
-          }
-          if (prompt.startsWith("/context compact ")) {
-            const args = parseCommandLineArgs(prompt.slice("/context compact ".length));
-            const flags = parseFlagArgs(args);
-            const keepLast = flags["keep-last"];
-            const reason = flags.reason;
-            if (!keepLast || !reason) {
-              throw new Error("Usage: /context compact --keep-last <n> --reason \"<reason>\" [--yes] [--allow-empty-summary]");
-            }
-            const result = await sessions.compactContext(session.id, {
-              keepLast: parseIntegerOption(keepLast, "keep-last"),
-              reason,
-              apply: flags.yes === "true",
-              allowEmptySummary: flags["allow-empty-summary"] === "true"
-            });
-            console.log(formatContextCompactResult(result));
-            if (result.blocked) {
-              console.log(contextMaintenanceHint(session.id));
-            } else if (!result.applied && result.archivedRuns > 0) {
-              console.log("Re-run the same /context compact command with --yes to apply.");
-            }
-            continue;
-          }
-          if (prompt === "/summary show") {
-            const source = await sessions.summarySource(session.id, policy.promptBudget.contextTailChars);
-            console.log(source.existingSummary || "# SESSION SUMMARY\n\nNo compact session summary yet.");
-            continue;
-          }
-          if (prompt.startsWith("/summary update ")) {
-            const summary = prompt.slice("/summary update ".length).trim();
-            if (!summary) {
-              throw new Error("Usage: /summary update <summary>");
-            }
-            await sessions.updateSummary(session.id, summary);
-            console.error(`[cosia] updated SESSION_SUMMARY.md for ${session.id}`);
-            continue;
-          }
-          if (prompt === "/memory refresh") {
-            await memory.writeReferenceMemory(session, lastPrompt, agent.id);
-            console.error(`[cosia] refreshed REF_MEMORY.md for ${session.id}`);
-            continue;
-          }
-          if (prompt === "/skills list") {
-            const globalSkills = skills.listSkills();
-            if (!globalSkills.length) {
-              console.log("No global skills.");
-            } else {
-              for (const item of globalSkills) {
-                const state = agent.blockedSkills.includes(item.id)
-                  ? "blocked"
-                  : manualSkills.has(item.id)
-                    ? "selected"
-                    : agent.preferredSkills.includes(item.id)
-                      ? "preferred"
-                      : "available";
-                const weight = agent.skillWeights?.[item.id] ? ` weight:${agent.skillWeights[item.id]}` : "";
-                console.log(`${item.id}\t${state}${weight}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}`);
-              }
-            }
-            continue;
-          }
-          if (prompt.startsWith("/skills use ")) {
-            const skillId = prompt.slice("/skills use ".length).trim();
-            const skill = skills.getSkill(skillId);
-            if (agent.blockedSkills.includes(skill.id)) {
-              throw new Error(`Skill is blocked for ${agent.id}: ${skill.id}`);
-            }
-            manualSkills.add(skill.id);
-            console.error(`[cosia] selected skill ${skill.id}`);
-            continue;
-          }
-          if (prompt.startsWith("/skills drop ")) {
-            const skillId = prompt.slice("/skills drop ".length).trim();
-            const skill = skills.getSkill(skillId);
-            manualSkills.delete(skill.id);
-            console.error(`[cosia] dropped skill ${skill.id}`);
-            continue;
-          }
-          if (prompt === "/skills clear") {
-            manualSkills.clear();
-            console.error("[cosia] cleared manual skills");
-            continue;
-          }
-
-          let shouldRefreshMemory = false;
-          const content = await runSession(workspaceRoot, {
-            sessionId: session.id,
-            prompt,
-            agentId: agent.id,
-            providerId: options.provider,
-            providerTimeoutMs: options.providerTimeoutMs ? Number.parseInt(options.providerTimeoutMs, 10) : undefined,
-            approveOverwriteFiles: options.approveOverwrite,
-            requireTools: options.requireTools,
-            promptStaticBlocks: staticBlocks,
-            manualSkillIds: [...manualSkills],
-            refreshReferenceMemory: false,
-            refreshReferenceMemoryAfterRun: false,
-            onMemoryReview: (summary) => {
-              shouldRefreshMemory = summary.autoPromoted > 0;
-            },
-            onEvent: (message) => console.error(`[cosia] ${message}`)
-          });
-          history.push({ prompt, response: content });
-          lastPrompt = prompt;
-          console.log(content);
-          if (shouldRefreshMemory) {
-            await memory.writeReferenceMemory(session, prompt, agent.id);
-            console.error("[cosia] refreshed REF_MEMORY.md after memory auto-promotion");
-          }
-        }
-      } finally {
-        rl.close();
-      }
+      await runChatRepl({
+        workspaceRoot,
+        sessionId: options.session,
+        agentId: options.agent,
+        providerId: options.provider,
+        providerTimeoutMs: options.providerTimeoutMs ? Number.parseInt(options.providerTimeoutMs, 10) : undefined,
+        approveOverwriteFiles: options.approveOverwrite,
+        requireTools: options.requireTools,
+        manualSkillIds: options.skill
+      });
     });
   });
 
@@ -1711,47 +1550,6 @@ async function createStartSession(workspaceRoot: string, goal: string): Promise<
   const session = await new SessionManager(workspaceRoot).createSession(agentId, trimmedGoal);
   console.log(`Created session: ${session.id}`);
   return session;
-}
-
-async function runBasicStartChat(workspaceRoot: string, sessionId: string, providerId: string): Promise<void> {
-  const sessions = new SessionManager(workspaceRoot);
-  const session = await sessions.loadSession(sessionId);
-  const agentId = session.assignedAgentId;
-  if (!agentId) {
-    throw new Error(`Session has no assigned agent. Run \`cosia session assign ${session.id} --agent <agent-id>\`.`);
-  }
-  await new AgentManager(workspaceRoot).loadAgent(agentId);
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  let turns = 0;
-  try {
-    while (true) {
-      const prompt = (await rl.question("cosia> ")).trim();
-      if (!prompt) {
-        continue;
-      }
-      if (prompt === "/exit") {
-        console.error(`[cosia] chat ended after ${turns} turn(s).`);
-        break;
-      }
-      if (prompt === "/status") {
-        console.log(`Session: ${session.id}`);
-        console.log(`Assigned agent: ${session.assignedAgentId ?? "none"}`);
-        console.log(`Provider: ${providerId}`);
-        continue;
-      }
-      const content = await runSession(workspaceRoot, {
-        sessionId: session.id,
-        prompt,
-        agentId,
-        providerId,
-        onEvent: (message) => console.error(`[cosia] ${message}`)
-      });
-      turns += 1;
-      console.log(content);
-    }
-  } finally {
-    rl.close();
-  }
 }
 
 function parseIntegerOption(value: string, name: string): number {
@@ -2048,30 +1846,6 @@ Context source:
 Context tail:
 ${source.contextTail}
 `;
-}
-
-function parseCommandLineArgs(value: string): string[] {
-  const matches = value.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g);
-  return [...matches].map((match) => match[1] ?? match[2] ?? match[3]);
-}
-
-function parseFlagArgs(tokens: string[]): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (!token.startsWith("--")) {
-      continue;
-    }
-    const key = token.slice(2);
-    const next = tokens[index + 1];
-    if (!next || next.startsWith("--")) {
-      result[key] = "true";
-      continue;
-    }
-    result[key] = next;
-    index += 1;
-  }
-  return result;
 }
 
 async function runCliTool(workspaceRoot: string, name: ToolName, args: Record<string, unknown>): Promise<void> {

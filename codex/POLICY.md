@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.19.0`
+- Policy version: `0.19.1`
 
 ## Agents
 

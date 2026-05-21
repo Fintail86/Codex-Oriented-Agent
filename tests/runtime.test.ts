@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager, formatAgentRecommendation } from "../src/runtime/agent_manager.js";
-import { applyReset, previewReset, repairDoctor } from "../src/runtime/doctor.js";
+import { applyReset, formatResetResult, previewReset, repairDoctor } from "../src/runtime/doctor.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMemoryText } from "../src/runtime/memory_manager.js";
 import { formatMvpChecklist } from "../src/runtime/mvp_checklist.js";
@@ -18,6 +19,7 @@ import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_a
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
+import { formatChatHelp, runChatRepl } from "../src/runtime/repl.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
@@ -29,6 +31,19 @@ import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspac
 
 const tempRoots: string[] = [];
 const execFileAsync = promisify(execFile);
+
+function captureWritable(): { stream: Writable; read: () => string } {
+  let text = "";
+  return {
+    stream: new Writable({
+      write(chunk, _encoding, callback) {
+        text += chunk.toString();
+        callback();
+      }
+    }),
+    read: () => text
+  };
+}
 
 afterEach(async () => {
   for (const root of tempRoots.splice(0)) {
@@ -98,7 +113,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.19.0\"");
+    expect(policyJson).toContain("\"version\": \"0.19.1\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -2184,7 +2199,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.19.0");
+    expect(emptyReport.version).toBe("0.19.1");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -2237,6 +2252,7 @@ describe("status and listing", () => {
     const preview = await previewReset(root, "state");
     expect(preview.applied).toBe(false);
     expect(preview.entries.some((entry) => entry.source === "sessions")).toBe(true);
+    expect(formatResetResult(preview)).toContain("No files changed.");
     expect(await readdir(join(root, "sessions"))).not.toEqual([]);
 
     await expect(applyReset(root, "state", "wrong")).rejects.toThrow("RESET COSIA STATE");
@@ -2272,6 +2288,41 @@ describe("status and listing", () => {
     expect(sessionFromChoice("", sessionList, recommendation.session)).toMatchObject({ id: newer.id });
     expect(sessionFromChoice("n", sessionList, recommendation.session)).toBe("new");
     expect(sessionFromChoice("q", sessionList, recommendation.session)).toBe("quit");
+  });
+
+  it("runs shared chat REPL commands and exits gracefully", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Shared REPL test");
+    const input = new PassThrough();
+    const output = captureWritable();
+    const errorOutput = captureWritable();
+
+    const resultPromise = runChatRepl({
+      workspaceRoot: root,
+      sessionId: session.id,
+      providerId: "mock",
+      input,
+      output: output.stream,
+      errorOutput: errorOutput.stream
+    });
+    const feedInput = async () => {
+      for (const line of ["/help", "/status", "/summary show", "/context status", "/skills list", "/exit"]) {
+        input.write(`${line}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      input.end();
+    };
+    await feedInput();
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
+    expect(formatChatHelp()).toContain("/context status");
+    expect(output.read()).toContain("COSIA chat commands");
+    expect(output.read()).toContain(`Session: ${session.id}`);
+    expect(output.read()).toContain("# SESSION SUMMARY");
+    expect(output.read()).toContain("Context:");
+    expect(errorOutput.read()).toContain("Type /help for commands");
   });
 
   it("prints MVP acceptance checklist and documents expected outcomes", async () => {
