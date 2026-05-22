@@ -7,7 +7,9 @@ import { readText, resolveExistingInside, resolveInside, writeText } from "./fs_
 import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
-import type { ToolContext, ToolDefinition, ToolName, ToolResult } from "./types.js";
+import { loadRuntimeConfig } from "./runtime_config.js";
+import { getToolCatalogEntry } from "./tool_catalog.js";
+import type { ToolContext, ToolDefinition, ToolName, ToolPermission, ToolResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,29 +55,18 @@ export class ToolRegistry {
   private readonly tools = new Map<ToolName, ToolDefinition>();
 
   constructor() {
-    this.register({
-      name: "read_file",
-      permission: "read_only",
-      execute: async (args, ctx) => {
+    this.registerCatalogTool("read_file", async (args, ctx) => {
         const parsed = readFileArgs.parse(args);
         const resolved = await resolveExistingInside(ctx.workspaceRoot, parsed.path);
         return { ok: true, content: await readText(resolved) };
-      }
     });
-    this.register({
-      name: "write_file",
-      permission: "write_local",
-      execute: async (args, ctx) => {
+    this.registerCatalogTool("write_file", async (args, ctx) => {
         const parsed = writeFileArgs.parse(args);
         const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
         await writeText(resolved, parsed.content);
         return { ok: true, content: `Wrote ${parsed.path}` };
-      }
     });
-    this.register({
-      name: "search_files",
-      permission: "read_only",
-      execute: async (args, ctx) => {
+    this.registerCatalogTool("search_files", async (args, ctx) => {
         const parsed = searchFilesArgs.parse(args);
         const directory = resolveInside(ctx.workspaceRoot, parsed.directory ?? ".");
         const [contentMatches, pathSearch] = await Promise.all([
@@ -84,17 +75,9 @@ export class ToolRegistry {
         ]);
         const content = formatSearchResult(contentMatches, pathSearch.matches, pathSearch.diagnostics);
         return { ok: true, content };
-      }
     });
-    this.register({
-      name: "git_status",
-      permission: "read_only",
-      execute: async (_args, ctx) => runWorkspaceCommand("git", ["status", "--short", "--branch"], ctx.workspaceRoot)
-    });
-    this.register({
-      name: "git_diff",
-      permission: "read_only",
-      execute: async (args, ctx) => {
+    this.registerCatalogTool("git_status", async (_args, ctx) => runWorkspaceCommand("git", ["status", "--short", "--branch"], ctx.workspaceRoot));
+    this.registerCatalogTool("git_diff", async (args, ctx) => {
         const parsed = gitDiffArgs.parse(args);
         const commandArgs = ["diff"];
         if (parsed.staged) {
@@ -105,31 +88,27 @@ export class ToolRegistry {
           commandArgs.push("--", toDisplayPath(resolved, ctx.workspaceRoot));
         }
         return runWorkspaceCommand("git", commandArgs, ctx.workspaceRoot);
-      }
     });
-    this.register({
-      name: "git_log",
-      permission: "read_only",
-      execute: async (args, ctx) => {
+    this.registerCatalogTool("git_log", async (args, ctx) => {
         const parsed = gitLogArgs.parse(args);
         const maxCount = Math.min(parsed.maxCount ?? 20, 50);
         return runWorkspaceCommand("git", ["log", `--max-count=${maxCount}`, "--date=short", "--pretty=format:%h %ad %s"], ctx.workspaceRoot);
-      }
     });
-    this.register({
-      name: "npm_test",
-      permission: "read_only",
-      execute: async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "test", ["test"])
-    });
-    this.register({
-      name: "npm_typecheck",
-      permission: "read_only",
-      execute: async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "typecheck", ["run", "typecheck"])
-    });
+    this.registerCatalogTool("npm_test", async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "test", ["test"]));
+    this.registerCatalogTool("npm_typecheck", async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "typecheck", ["run", "typecheck"]));
   }
 
   register(tool: ToolDefinition): void {
     this.tools.set(tool.name, tool);
+  }
+
+  private registerCatalogTool(name: ToolName, execute: ToolDefinition["execute"]): void {
+    const catalog = getToolCatalogEntry(name);
+    this.register({
+      name,
+      permission: catalog.permission as ToolPermission,
+      execute
+    });
   }
 
   get(name: ToolName): ToolDefinition {
@@ -143,7 +122,7 @@ export class ToolRegistry {
   async execute(name: ToolName, args: unknown, ctx: ToolContext): Promise<ToolResult> {
     try {
       const tool = this.get(name);
-      const argsSummary = summarizePolicyArgs(args);
+      const argsSummary = summarizeToolArgs(name, args);
       if (!ctx.allowedTools.includes(name)) {
         await ctx.policyAudit?.({
           eventType: "tool_decision",
@@ -157,7 +136,8 @@ export class ToolRegistry {
         return { ok: false, content: `Tool is not allowed for this agent: ${name}` };
       }
       const policy = await new PolicyManager(ctx.workspaceRoot).loadPolicy();
-      const engine = new PolicyEngine(policy);
+      const runtime = await loadRuntimeConfig(ctx.workspaceRoot);
+      const engine = new PolicyEngine(policy, runtime.config);
       const decision = engine.evaluate(tool, args, ctx.workspaceRoot);
       await ctx.policyAudit?.({
         eventType: "tool_decision",
@@ -207,6 +187,28 @@ async function runPackageScript(workspaceRoot: string, scriptName: "test" | "typ
     return { ok: false, content: `package.json script not found: ${scriptName}` };
   }
   return runNpmCommand(npmArgs, workspaceRoot);
+}
+
+function summarizeToolArgs(name: ToolName, args: unknown): Record<string, unknown> {
+  if (name === "npm_test") {
+    return {
+      ...summarizePolicyArgs(args),
+      permission: "project_check",
+      script: "test",
+      packageJsonPath: "package.json",
+      arbitraryArgs: false
+    };
+  }
+  if (name === "npm_typecheck") {
+    return {
+      ...summarizePolicyArgs(args),
+      permission: "project_check",
+      script: "typecheck",
+      packageJsonPath: "package.json",
+      arbitraryArgs: false
+    };
+  }
+  return summarizePolicyArgs(args);
 }
 
 async function runWorkspaceCommand(command: string, args: string[], cwd: string): Promise<ToolResult> {

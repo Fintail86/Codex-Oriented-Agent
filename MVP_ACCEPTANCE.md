@@ -63,6 +63,7 @@ Command:
 
 ```powershell
 cosia policy check --repair
+cosia config check
 cosia provider check codex-cli
 ```
 
@@ -70,12 +71,14 @@ Expected Outcome:
 
 - `POLICY.json: ok`
 - `POLICY.md: ok`
+- `Config: ok`
 - `Provider: codex-cli`
 - `Status: ok`
 
 Failure Hint:
 
 - If provider auth fails, run `codex login` and retry `codex login status`.
+- If config check warns about real-looking secrets, move those values to environment variables.
 
 ## 3. Fresh Workspace Bootstrap
 
@@ -301,6 +304,7 @@ Expected Outcome:
 
 - If OpenRouter is enabled and `OPENROUTER_API_KEY` is set, status is `ok`.
 - If disabled or missing an API key, the failure reason and hint are clear.
+- OpenRouter is configured in `config/runtime.local.json`; API keys remain environment-only.
 
 Failure Hint:
 
@@ -317,15 +321,19 @@ $env:TELEGRAM_BOT_TOKEN="..."
 cosia gateway status
 cosia gateway status --json
 cosia gateway telegram check
-cosia gateway telegram start --provider codex-cli --once
+cosia gateway start --model-provider codex-cli --once
+cosia gateway stop
+cosia gateway restart --model-provider codex-cli --once
 ```
 
 Expected Outcome:
 
 - `gateway status` prints Telegram connector state and stored offset information.
 - `gateway status --json` prints structured gateway state including lock and offset fields.
-- `gateway telegram check` succeeds when `connectors.telegram.enabled=true`, `allowedChatIds` contains the Telegram chat id, and the token env is set.
-- `start --once` processes one update batch, stores the next offset, and exits without leaving a process lock.
+- `gateway telegram check` succeeds when `connectors.telegram.enabled=true` and `allowedChatIds` are set in runtime config, and the token env is set.
+- `gateway start --once` processes one update batch, stores the next offset, and exits without leaving a process lock.
+- `gateway stop` is a safe no-op when the supervisor is already stopped.
+- `gateway restart --once` cooperatively stops any running supervisor before starting a one-batch run.
 - Unauthorized chat ids do not reach COSIA runtime.
 - Telegram review shortcuts create previews only; `/apply` is still required for mutations.
 

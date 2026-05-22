@@ -1,10 +1,10 @@
-# COSIA v0.26.0
+# COSIA v0.27.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated core and bundled extension tools, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.26.0 focuses on remote review UX and operational upkeep: Telegram Gateway review shortcuts keep preview/apply gates intact, gateway state gains stronger diagnostics, discarded review candidates can be cleaned after retention, and hash-command triggers move toward language-pack based management.
+v0.27.0 splits Codex law from runtime configuration. `codex/POLICY.json` stays a minimal law source, while provider, gateway, prompt budget, and review retention settings live in `config/runtime.defaults.json` plus optional ignored `config/runtime.local.json`.
 
 ## Requirements
 
@@ -130,7 +130,7 @@ Provider setup:
 - `codex-cli` is the default provider and uses the user's existing Codex CLI login.
 - COSIA never reads or stores Codex token files.
 - `mock` is for deterministic regression tests only.
-- `openai-compatible` is available in `codex/POLICY.json` but starts disabled.
+- `openai-compatible` is available in runtime config but starts disabled.
 - `openrouter` is available as a disabled `openai-compatible` preset.
 - API keys are read only from the configured environment variable, default `OPENAI_API_KEY`.
 - Use `cosia provider list` and `cosia provider check <provider-id>` to inspect provider status.
@@ -144,7 +144,7 @@ cosia provider check openrouter
 cosia run --session <session-id> --provider openrouter --prompt "간단히 응답해줘"
 ```
 
-In `codex/POLICY.json`, enable OpenRouter and set a model id:
+In `config/runtime.local.json`, enable OpenRouter and set a model id:
 
 ```json
 "openrouter": {
@@ -193,6 +193,9 @@ cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
 cosia provider list
 cosia provider check <provider-id>
+cosia config show
+cosia config check
+cosia config migrate --from-policy
 cosia mvp checklist
 cosia memory add --tier <tier> --owner-id <owner-id> --content "<content>"
 cosia memory add --scope <scope> --content "<content>"
@@ -254,14 +257,16 @@ cosia session show <session-id>
 - `read_file` and `search_files` are read-only workspace tools.
 - `write_file` can only write inside the workspace.
 - Existing file overwrite requires explicit approval.
-- `codex/POLICY.json` is the runtime policy source of truth.
-- `codex/POLICY.md` mirrors the JSON policy for humans.
+- `codex/POLICY.json` is the Codex law source of truth.
+- `codex/POLICY.md` mirrors the JSON law for humans.
+- Runtime settings live in `config/runtime.defaults.json` and optional ignored `config/runtime.local.json`.
+- `config show`, `config check`, and `config migrate --from-policy` manage runtime configuration.
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
 - Destructive, network, external-send, and shell tools are not registered in v0.16.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
-- Provider config is policy-backed; `codex-cli` remains the default provider.
+- Provider config is runtime-config-backed; `codex-cli` remains the default provider.
 - `openai-compatible` is implemented but disabled by default. Its API key is read only from the configured environment variable.
 - `mock` provider success proves regression safety only; MVP acceptance requires `codex-cli`.
 - Provider failures are reported with reason codes and short next-action hints.
@@ -286,7 +291,8 @@ cosia session show <session-id>
 - Long-term memory archive is explicit CLI-only soft deletion.
 - `session archive` soft-archives session-tier memory. Deleting an agent soft-archives that agent's agent-tier memory.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
-- Controlled Git/NPM tools are individual read-only tools, not generic shell access.
+- Git and NPM tools are bundled extension tools controlled by runtime config and still gated by Tool Registry, agent allowlists, and Policy Engine boundaries.
+- NPM tools use the `project_check` permission class. They run only fixed registered package scripts and are not generic shell access.
 - Long tool output is capped with an explicit truncation marker.
 - Session context size warnings appear in status/session/chat output; context summary and compaction are explicit CLI/REPL actions.
 - Skill candidates are stored in SQLite and remain pending until explicit promotion.
@@ -436,10 +442,21 @@ Setup:
 $env:TELEGRAM_BOT_TOKEN="..."
 cosia policy check --repair
 cosia gateway telegram check
-cosia gateway telegram start --provider codex-cli
+cosia gateway start --model-provider codex-cli
 ```
 
-`codex/POLICY.json` must enable the connector and list allowed chat ids:
+Normal operation uses the top-level Gateway supervisor:
+
+```powershell
+cosia gateway start
+cosia gateway status
+cosia gateway stop
+cosia gateway restart
+```
+
+`cosia gateway telegram ...` commands remain available for connector-specific checks and debugging, but users should usually start and stop the Gateway through the top-level commands.
+
+`config/runtime.local.json` should enable the connector and list allowed chat ids:
 
 ```json
 "connectors": {
@@ -465,7 +482,7 @@ Useful Telegram commands:
 
 Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply` or `#적용`, and stale previews are rejected if the target or conflict state changed.
 
-The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default. Use `cosia gateway status --json` for structured gateway state and `cosia gateway telegram unlock --stale-only` to remove stale process locks.
+The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks.
 
 ## Command Trigger Packs
 
@@ -591,12 +608,16 @@ cosia tool npm-test
 cosia tool npm-typecheck
 ```
 
-These commands execute through the same Tool Registry and Policy Engine used by model tool calls. `git_diff --path` is restricted to workspace paths, `git_log` is capped at 50 commits, and npm tools only run the fixed `test` or `typecheck` package scripts.
+These commands execute through the same Tool Registry and Policy Engine used by model tool calls. `read_file`, `write_file`, and `search_files` are core runtime tools. Git and NPM tools are bundled extension tools: runtime config can enable or disable them, but cannot change their permission, workspace boundary, command behavior, or security behavior. `git_diff --path` is restricted to workspace paths, `git_log` is capped at 50 commits, and NPM tools use the `project_check` permission class to run only the fixed `test` or `typecheck` package scripts.
+
+Provider schemas list registered model-exposed tools, while prompt contracts show only tools available for the current run after agent allowlists, runtime config, and policy gates are applied. Runtime gates still reject unavailable tool calls and record the reason.
+
+Future cleanup candidates: package manager auto-detection, project-check artifact/cache reporting, tool output sensitivity classification, CLI-only/internal catalog examples, and `git_diff` output secret-like scan/redaction. Read-only does not mean safe-to-display.
 
 ## Roadmap
 
-- v0.26: Remote review UX, gateway reliability, review cleanup, and command trigger pack groundwork.
-- v0.27 decision checkpoint: keep polishing `status/start/chat/Telegram` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
+- v0.27.3: Generalized bundled tool catalog.
+- v0.28 decision checkpoint: keep polishing `status/start/chat/Telegram` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: optional automatic summary/archive after explicit workflows are validated.

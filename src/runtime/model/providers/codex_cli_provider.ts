@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { completeWithStructuredRetry } from "../model_provider.js";
 import { previewText, ProviderError, providerFailureHint } from "../provider_errors.js";
+import { modelExposedToolIds } from "../../tool_catalog.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
 
 type CodexCliProviderOptions = {
@@ -164,7 +165,7 @@ const agentStepJsonSchema = {
       enum: ["tool_call", "final"]
     },
     tool: {
-      enum: ["read_file", "write_file", "search_files", "git_status", "git_diff", "git_log", "npm_test", "npm_typecheck"]
+      enum: modelExposedToolIds
     },
     args: {
       type: "object",

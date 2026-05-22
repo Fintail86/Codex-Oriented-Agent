@@ -2,6 +2,19 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { ensureDir, readText, writeText } from "./fs_utils.js";
+import {
+  connectorsConfigSchema,
+  defaultRuntimeConfig,
+  ensureRuntimeDefaults,
+  extractLegacyRuntimeConfig,
+  loadRuntimeConfig,
+  modelConfigSchema,
+  normalizeRuntimeConfig,
+  promptBudgetSchema,
+  reviewRetentionSchema,
+  stripRuntimeConfig
+} from "./runtime_config.js";
+import { isBundledToolId } from "./tool_catalog.js";
 import { memoryScopeSchema, memoryTierSchema, riskLevelSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
 
 const policyToolSchema = z.object({
@@ -12,44 +25,6 @@ const policyToolSchema = z.object({
 
 const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
 const memoryPromotionPathPolicySchema = z.enum(["manual_or_low_risk", "manual_only", "deferred"]);
-const promptOverflowPolicySchema = z.literal("truncate_low_priority");
-const providerTypeSchema = z.enum(["codex-cli", "openai-compatible"]);
-const providerResponseFormatSchema = z.enum(["json_object"]).nullable();
-const providerConfigSchema = z.object({
-  type: providerTypeSchema.optional(),
-  enabled: z.boolean(),
-  sandbox: z.string().optional(),
-  baseUrl: z.string().nullable().default(null),
-  model: z.string().nullable().default(null),
-  apiKeyEnv: z.string().min(1).default("OPENAI_API_KEY"),
-  endpointPath: z.string().min(1).default("/chat/completions"),
-  timeoutMs: z.number().int().positive().default(120000),
-  structuredRetryCount: z.number().int().min(0).max(5).default(1),
-  maxPromptChars: z.number().int().positive().default(60000),
-  responseFormat: providerResponseFormatSchema.default(null),
-  extraHeaders: z.record(z.string(), z.string()).default({})
-});
-
-const telegramConnectorSchema = z.object({
-  enabled: z.boolean().default(false),
-  tokenEnv: z.string().min(1).default("TELEGRAM_BOT_TOKEN"),
-  allowedChatIds: z.array(z.string()).default([]),
-  defaultProvider: z.string().min(1).default("codex-cli"),
-  allowMutations: z.boolean().default(true),
-  blockDangerous: z.boolean().default(true),
-  messageChunkChars: z.number().int().positive().default(3500),
-  pollTimeoutMs: z.number().int().positive().default(30000),
-  maxConsecutiveFailures: z.number().int().positive().default(10),
-  backoffInitialMs: z.number().int().nonnegative().default(1000),
-  backoffMaxMs: z.number().int().positive().default(30000)
-});
-
-const reviewRetentionSchema = z.object({
-  discardedRetentionDays: z.number().int().nonnegative().default(7),
-  pendingWarningDays: z.number().int().nonnegative().default(14),
-  autoCleanupOnRead: z.boolean().default(true)
-});
-
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
   agents: z.object({
@@ -57,7 +32,7 @@ export const policyConfigSchema = z.object({
   }).default({
     defaultAgentId: "cosia-agent"
   }),
-  tools: z.record(toolNameSchema, policyToolSchema),
+  tools: z.partialRecord(toolNameSchema, policyToolSchema),
   disabledPermissions: z.array(toolPermissionSchema),
   overwrite: z.object({
     existingFileRequiresApproval: z.boolean()
@@ -69,6 +44,43 @@ export const policyConfigSchema = z.object({
   fileInspection: z.object({
     requiresReadFile: z.boolean(),
     triggerPhrases: z.array(z.string().min(1))
+  }),
+  codex: z.object({
+    protectedSourcePaths: z.array(z.string().min(1)).default([
+      "codex/SECURITY.md",
+      "codex/RULES.md",
+      "codex/SOUL.md",
+      "codex/USER.md",
+      "codex/POLICY.json"
+    ]),
+    protectedMirrorPaths: z.array(z.string().min(1)).default([
+      "codex/POLICY.md"
+    ]),
+    amendment: z.object({
+      canPropose: z.boolean().default(true),
+      requiresUserApproval: z.boolean().default(true),
+      approvedApplyOnly: z.boolean().default(true)
+    }).default({
+      canPropose: true,
+      requiresUserApproval: true,
+      approvedApplyOnly: true
+    })
+  }).default({
+    protectedSourcePaths: [
+      "codex/SECURITY.md",
+      "codex/RULES.md",
+      "codex/SOUL.md",
+      "codex/USER.md",
+      "codex/POLICY.json"
+    ],
+    protectedMirrorPaths: [
+      "codex/POLICY.md"
+    ],
+    amendment: {
+      canPropose: true,
+      requiresUserApproval: true,
+      approvedApplyOnly: true
+    }
   }),
   memory: z.object({
     longTermWrite: z.literal("candidate_promote_only"),
@@ -109,102 +121,10 @@ export const policyConfigSchema = z.object({
       denyKinds: ["security", "policy", "credential", "secret"]
     })
   }),
-  promptBudget: z.object({
-    maxPromptChars: z.number().int().positive(),
-    refMemoryMaxItems: z.number().int().positive(),
-    contextTailChars: z.number().int().positive(),
-    contextWarningChars: z.number().int().positive().default(30000),
-    contextCriticalChars: z.number().int().positive().default(60000),
-    toolResultsMaxChars: z.number().int().positive(),
-    skillMaxItems: z.number().int().positive().default(5),
-    skillMaxChars: z.number().int().positive().default(8000),
-    skillItemMaxChars: z.number().int().positive().default(2000),
-    overflowPolicy: promptOverflowPolicySchema
-  }).default({
-    maxPromptChars: 60000,
-    refMemoryMaxItems: 8,
-    contextTailChars: 6000,
-    contextWarningChars: 30000,
-    contextCriticalChars: 60000,
-    toolResultsMaxChars: 12000,
-    skillMaxItems: 5,
-    skillMaxChars: 8000,
-    skillItemMaxChars: 2000,
-    overflowPolicy: "truncate_low_priority"
-  }),
-  model: z.object({
-    defaultProvider: z.string().min(1),
-    providers: z.record(z.string(), providerConfigSchema)
-  }).default({
-    defaultProvider: "codex-cli",
-    providers: {
-      "codex-cli": {
-        type: "codex-cli",
-        enabled: true,
-        sandbox: "read-only",
-        baseUrl: null,
-        model: null,
-        apiKeyEnv: "OPENAI_API_KEY",
-        endpointPath: "/chat/completions",
-        timeoutMs: 120000,
-        structuredRetryCount: 1,
-        maxPromptChars: 60000,
-        responseFormat: null,
-        extraHeaders: {}
-      },
-      "openai-compatible": {
-        type: "openai-compatible",
-        enabled: false,
-        baseUrl: null,
-        model: null,
-        apiKeyEnv: "OPENAI_API_KEY",
-        endpointPath: "/chat/completions",
-        timeoutMs: 120000,
-        structuredRetryCount: 1,
-        maxPromptChars: 60000,
-        responseFormat: null,
-        extraHeaders: {}
-      },
-      openrouter: {
-        type: "openai-compatible",
-        enabled: false,
-        baseUrl: "https://openrouter.ai/api/v1",
-        model: null,
-        apiKeyEnv: "OPENROUTER_API_KEY",
-        endpointPath: "/chat/completions",
-        timeoutMs: 120000,
-        structuredRetryCount: 1,
-        maxPromptChars: 60000,
-        responseFormat: "json_object",
-        extraHeaders: {
-          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
-          "X-OpenRouter-Title": "COSIA"
-        }
-      }
-    }
-  }),
-  connectors: z.object({
-    telegram: telegramConnectorSchema
-  }).default({
-    telegram: {
-      enabled: false,
-      tokenEnv: "TELEGRAM_BOT_TOKEN",
-      allowedChatIds: [],
-      defaultProvider: "codex-cli",
-      allowMutations: true,
-      blockDangerous: true,
-      messageChunkChars: 3500,
-      pollTimeoutMs: 30000,
-      maxConsecutiveFailures: 10,
-      backoffInitialMs: 1000,
-      backoffMaxMs: 30000
-    }
-  }),
-  review: reviewRetentionSchema.default({
-    discardedRetentionDays: 7,
-    pendingWarningDays: 14,
-    autoCleanupOnRead: true
-  })
+  promptBudget: promptBudgetSchema.default(defaultRuntimeConfig.promptBudget),
+  model: modelConfigSchema.default(defaultRuntimeConfig.model),
+  connectors: connectorsConfigSchema.default(defaultRuntimeConfig.connectors),
+  review: reviewRetentionSchema.default(defaultRuntimeConfig.review)
 });
 
 export type PolicyConfig = z.infer<typeof policyConfigSchema>;
@@ -221,7 +141,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.26.0",
+  version: "0.27.3",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -237,31 +157,6 @@ export const defaultPolicy: PolicyConfig = {
       enabled: true
     },
     search_files: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    git_status: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    git_diff: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    git_log: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    npm_test: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    npm_typecheck: {
       permission: "read_only",
       workspace: "inside_only",
       enabled: true
@@ -294,6 +189,23 @@ export const defaultPolicy: PolicyConfig = {
       "from files"
     ]
   },
+  codex: {
+    protectedSourcePaths: [
+      "codex/SECURITY.md",
+      "codex/RULES.md",
+      "codex/SOUL.md",
+      "codex/USER.md",
+      "codex/POLICY.json"
+    ],
+    protectedMirrorPaths: [
+      "codex/POLICY.md"
+    ],
+    amendment: {
+      canPropose: true,
+      requiresUserApproval: true,
+      approvedApplyOnly: true
+    }
+  },
   memory: {
     longTermWrite: "candidate_promote_only",
     candidateTiers: ["core", "agent", "session"],
@@ -318,86 +230,10 @@ export const defaultPolicy: PolicyConfig = {
       denyKinds: ["security", "policy", "credential", "secret"]
     }
   },
-  promptBudget: {
-    maxPromptChars: 60000,
-    refMemoryMaxItems: 8,
-    contextTailChars: 6000,
-    contextWarningChars: 30000,
-    contextCriticalChars: 60000,
-    toolResultsMaxChars: 12000,
-    skillMaxItems: 5,
-    skillMaxChars: 8000,
-    skillItemMaxChars: 2000,
-    overflowPolicy: "truncate_low_priority"
-  },
-  model: {
-    defaultProvider: "codex-cli",
-    providers: {
-      "codex-cli": {
-        type: "codex-cli",
-        enabled: true,
-        sandbox: "read-only",
-        baseUrl: null,
-        model: null,
-        apiKeyEnv: "OPENAI_API_KEY",
-        endpointPath: "/chat/completions",
-        timeoutMs: 120000,
-        structuredRetryCount: 1,
-        maxPromptChars: 60000,
-        responseFormat: null,
-        extraHeaders: {}
-      },
-      "openai-compatible": {
-        type: "openai-compatible",
-        enabled: false,
-        baseUrl: null,
-        model: null,
-        apiKeyEnv: "OPENAI_API_KEY",
-        endpointPath: "/chat/completions",
-        timeoutMs: 120000,
-        structuredRetryCount: 1,
-        maxPromptChars: 60000,
-        responseFormat: null,
-        extraHeaders: {}
-      },
-      openrouter: {
-        type: "openai-compatible",
-        enabled: false,
-        baseUrl: "https://openrouter.ai/api/v1",
-        model: null,
-        apiKeyEnv: "OPENROUTER_API_KEY",
-        endpointPath: "/chat/completions",
-        timeoutMs: 120000,
-        structuredRetryCount: 1,
-        maxPromptChars: 60000,
-        responseFormat: "json_object",
-        extraHeaders: {
-          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
-          "X-OpenRouter-Title": "COSIA"
-        }
-      }
-    }
-  },
-  connectors: {
-    telegram: {
-      enabled: false,
-      tokenEnv: "TELEGRAM_BOT_TOKEN",
-      allowedChatIds: [],
-      defaultProvider: "codex-cli",
-      allowMutations: true,
-      blockDangerous: true,
-      messageChunkChars: 3500,
-      pollTimeoutMs: 30000,
-      maxConsecutiveFailures: 10,
-      backoffInitialMs: 1000,
-      backoffMaxMs: 30000
-    }
-  },
-  review: {
-    discardedRetentionDays: 7,
-    pendingWarningDays: 14,
-    autoCleanupOnRead: true
-  }
+  promptBudget: defaultRuntimeConfig.promptBudget,
+  model: defaultRuntimeConfig.model,
+  connectors: defaultRuntimeConfig.connectors,
+  review: defaultRuntimeConfig.review
 };
 
 export class PolicyManager {
@@ -406,8 +242,9 @@ export class PolicyManager {
   async ensurePolicyFiles(): Promise<string[]> {
     await ensureDir(this.codexDir());
     const created: string[] = [];
+    created.push(...await ensureRuntimeDefaults(this.workspaceRoot));
     if (!existsSync(this.policyJsonPath())) {
-      await writeText(this.policyJsonPath(), `${JSON.stringify(defaultPolicy, null, 2)}\n`);
+      await writeText(this.policyJsonPath(), `${JSON.stringify(policyLawJson(defaultPolicy), null, 2)}\n`);
       created.push("codex/POLICY.json");
     }
     if (!existsSync(this.policyMarkdownPath())) {
@@ -421,11 +258,18 @@ export class PolicyManager {
 
   async loadPolicy(): Promise<PolicyConfig> {
     const raw = JSON.parse(await readText(this.policyJsonPath())) as unknown;
-    return normalizePolicy(policyConfigSchema.parse(raw));
+    const runtime = await loadRuntimeConfig(this.workspaceRoot, raw);
+    return normalizePolicy(policyConfigSchema.parse({
+      ...(raw as Record<string, unknown>),
+      promptBudget: runtime.config.promptBudget,
+      model: runtime.config.model,
+      connectors: runtime.config.connectors,
+      review: runtime.config.review
+    }));
   }
 
   async savePolicy(policy: PolicyConfig): Promise<void> {
-    await writeText(this.policyJsonPath(), `${JSON.stringify(normalizePolicy(policyConfigSchema.parse(policy)), null, 2)}\n`);
+    await writeText(this.policyJsonPath(), `${JSON.stringify(policyLawJson(normalizePolicy(policyConfigSchema.parse(policy))), null, 2)}\n`);
   }
 
   async setDefaultAgent(agentId: string | null): Promise<PolicyConfig> {
@@ -544,9 +388,13 @@ export class PolicyManager {
       return;
     }
     const raw = JSON.parse(await readText(this.policyJsonPath())) as unknown;
-    const normalized = normalizePolicy(policyConfigSchema.parse(raw));
+    const legacy = extractLegacyRuntimeConfig(raw);
+    if (Object.keys(legacy).length) {
+      return;
+    }
+    const normalized = policyLawJson(normalizePolicy(policyConfigSchema.parse(raw)));
     if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
-      await this.savePolicy(normalized);
+      await writeText(this.policyJsonPath(), `${JSON.stringify(normalized, null, 2)}\n`);
     }
   }
 }
@@ -566,8 +414,12 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
   if (!providers.openrouter) {
     providers.openrouter = defaultPolicy.model.providers.openrouter;
   }
+  const tools = Object.fromEntries(
+    Object.entries(policy.tools).filter(([name]) => !isBundledToolId(name))
+  );
   return policyConfigSchema.parse({
     ...policy,
+    tools,
     model: {
       ...policy.model,
       providers
@@ -585,6 +437,20 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
   });
 }
 
+export function policyLawJson(policy: PolicyConfig): Record<string, unknown> {
+  return stripRuntimeConfig({
+    version: policy.version,
+    agents: policy.agents,
+    tools: policy.tools,
+    disabledPermissions: policy.disabledPermissions,
+    overwrite: policy.overwrite,
+    requireTools: policy.requireTools,
+    fileInspection: policy.fileInspection,
+    codex: policy.codex,
+    memory: policy.memory
+  });
+}
+
 function defaultProviderType(id: string): "codex-cli" | "openai-compatible" {
   return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
 }
@@ -596,7 +462,7 @@ export function renderPolicyMarkdown(policy: PolicyConfig): string {
 
   return `# POLICY
 
-This file mirrors \`codex/POLICY.json\`. The JSON file is the runtime source of truth.
+This file mirrors \`codex/POLICY.json\`. The JSON file is the Codex law source of truth. Runtime settings live in \`config/runtime.defaults.json\` and optional \`config/runtime.local.json\`.
 
 ## Version
 
@@ -606,7 +472,7 @@ This file mirrors \`codex/POLICY.json\`. The JSON file is the runtime source of 
 
 - Default agent: \`${policy.agents.defaultAgentId ?? "none"}\`
 
-## Tools
+## Core Runtime Tools
 
 ${enabledTools}
 
@@ -627,6 +493,14 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 
 - Requires \`read_file\` for explicit file-inspection requests: \`${policy.fileInspection.requiresReadFile}\`
 
+## Codex Boundary
+
+- Protected source paths: ${policy.codex.protectedSourcePaths.map((path) => `\`${path}\``).join(", ")}
+- Protected generated mirrors: ${policy.codex.protectedMirrorPaths.map((path) => `\`${path}\``).join(", ")}
+- COSIA may propose Codex amendments: \`${policy.codex.amendment.canPropose}\`
+- User review and approval required: \`${policy.codex.amendment.requiresUserApproval}\`
+- Only approved amendment apply flow may modify protected Codex paths: \`${policy.codex.amendment.approvedApplyOnly}\`
+
 ## Memory
 
 - Long-term memory write policy: \`${policy.memory.longTermWrite}\`
@@ -640,44 +514,11 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Auto promotion tiers: ${policy.memory.autoPromotion.allowTiers.map((tier) => `\`${tier}\``).join(", ")}
 - Auto promotion requires no conflict: \`${policy.memory.autoPromotion.requireNoConflict}\`
 
-## Prompt Budget
+## Runtime Config
 
-- Max prompt chars: \`${policy.promptBudget.maxPromptChars}\`
-- Reference memory max items: \`${policy.promptBudget.refMemoryMaxItems}\`
-- Context tail chars: \`${policy.promptBudget.contextTailChars}\`
-- Context warning chars: \`${policy.promptBudget.contextWarningChars}\`
-- Context critical chars: \`${policy.promptBudget.contextCriticalChars}\`
-- Tool results max chars: \`${policy.promptBudget.toolResultsMaxChars}\`
-- Skill max items: \`${policy.promptBudget.skillMaxItems}\`
-- Skill max chars: \`${policy.promptBudget.skillMaxChars}\`
-- Skill item max chars: \`${policy.promptBudget.skillItemMaxChars}\`
-- Overflow policy: \`${policy.promptBudget.overflowPolicy}\`
-
-## Model Providers
-
-- Default provider: \`${policy.model.defaultProvider}\`
-- Configured providers:
-${Object.entries(policy.model.providers).map(([id, config]) => `  - \`${id}\`: type \`${config.type ?? defaultProviderType(id)}\`, ${config.enabled ? "enabled" : "disabled"}, timeout \`${config.timeoutMs}\`, retry \`${config.structuredRetryCount}\`, max prompt chars \`${config.maxPromptChars}\`, model ${config.model ? `\`${config.model}\`` : "`unset`"}, baseUrl ${config.baseUrl ? "`set`" : "`unset`"}, responseFormat ${config.responseFormat ? `\`${config.responseFormat}\`` : "`none`"}`).join("\n")}
-
-## Connectors
-
-### Telegram
-
-- Enabled: \`${policy.connectors.telegram.enabled}\`
-- Token env: \`${policy.connectors.telegram.tokenEnv}\`
-- Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length ? policy.connectors.telegram.allowedChatIds.map((id) => `\`${id}\``).join(", ") : "`none`"}
-- Default provider: \`${policy.connectors.telegram.defaultProvider}\`
-- Mutations allowed: \`${policy.connectors.telegram.allowMutations}\`
-- Dangerous commands blocked: \`${policy.connectors.telegram.blockDangerous}\`
-- Message chunk chars: \`${policy.connectors.telegram.messageChunkChars}\`
-- Poll timeout ms: \`${policy.connectors.telegram.pollTimeoutMs}\`
-- Max consecutive failures: \`${policy.connectors.telegram.maxConsecutiveFailures}\`
-
-## Review Queue
-
-- Discarded retention days: \`${policy.review.discardedRetentionDays}\`
-- Pending warning days: \`${policy.review.pendingWarningDays}\`
-- Auto cleanup on read: \`${policy.review.autoCleanupOnRead}\`
+- Operational settings are not Codex law.
+- Provider details, gateway connector settings, prompt budgets, bundled tool enablement, and review retention live in \`config/runtime.defaults.json\` and optional ignored \`config/runtime.local.json\`.
+- Runtime config cannot relax disabled permissions, dangerous command blocks, protected Codex path rules, or Codex amendment approval requirements.
 `;
 }
 
@@ -687,7 +528,7 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     .join(", ");
   return [
     `Policy ${policy.version}`,
-    `Tools: ${toolSummary}`,
+    `Core tools: ${toolSummary}`,
     `Disabled permissions: ${policy.disabledPermissions.join(", ")}`,
     `Overwrite approval: ${policy.overwrite.existingFileRequiresApproval ? "required" : "not required"}`,
     `Long-term memory: ${policy.memory.longTermWrite}`,

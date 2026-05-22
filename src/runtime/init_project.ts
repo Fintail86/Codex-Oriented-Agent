@@ -5,10 +5,11 @@ import { MemoryManager } from "./memory_manager.js";
 import { PolicyManager } from "./policy_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { AgentManager } from "./agent_manager.js";
+import { ensureRuntimeDefaults } from "./runtime_config.js";
 
 export async function initProject(workspaceRoot: string): Promise<string[]> {
   const created: string[] = [];
-  for (const dir of ["codex", "agents", "sessions", "memory", "skills"]) {
+  for (const dir of ["codex", "agents", "sessions", "memory", "skills", "config"]) {
     await ensureDir(join(workspaceRoot, dir));
     created.push(`${dir}/`);
   }
@@ -19,6 +20,7 @@ export async function initProject(workspaceRoot: string): Promise<string[]> {
     }
   }
   const policyManager = new PolicyManager(workspaceRoot);
+  created.push(...await ensureRuntimeDefaults(workspaceRoot));
   created.push(...await policyManager.ensurePolicyFiles());
   const policy = await policyManager.loadPolicy();
   created.push(...await new AgentManager(workspaceRoot).ensureDefaultAgent(policy.agents.defaultAgentId));

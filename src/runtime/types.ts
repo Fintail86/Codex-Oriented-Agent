@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { toolNameValues } from "./tool_catalog.js";
 
 export const memoryScopeSchema = z.enum([
   "global",
@@ -24,6 +25,7 @@ export type MemoryTier = z.infer<typeof memoryTierSchema>;
 export const toolPermissionSchema = z.enum([
   "read_only",
   "write_local",
+  "project_check",
   "destructive",
   "network",
   "external_send",
@@ -32,16 +34,7 @@ export const toolPermissionSchema = z.enum([
 
 export type ToolPermission = z.infer<typeof toolPermissionSchema>;
 
-export const toolNameSchema = z.enum([
-  "read_file",
-  "write_file",
-  "search_files",
-  "git_status",
-  "git_diff",
-  "git_log",
-  "npm_test",
-  "npm_typecheck"
-]);
+export const toolNameSchema = z.enum(toolNameValues);
 export type ToolName = z.infer<typeof toolNameSchema>;
 
 export const agentIdentitySchema = z.object({

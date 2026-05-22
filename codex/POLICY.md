@@ -1,25 +1,20 @@
 # POLICY
 
-This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of truth.
+This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of truth. Runtime settings live in `config/runtime.defaults.json` and optional `config/runtime.local.json`.
 
 ## Version
 
-- Policy version: `0.26.0`
+- Policy version: `0.27.3`
 
 ## Agents
 
 - Default agent: `cosia-agent`
 
-## Tools
+## Core Runtime Tools
 
 - `read_file`: enabled, permission `read_only`, workspace `inside_only`
 - `write_file`: enabled, permission `write_local`, workspace `inside_only`
 - `search_files`: enabled, permission `read_only`, workspace `inside_only`
-- `git_status`: enabled, permission `read_only`, workspace `inside_only`
-- `git_diff`: enabled, permission `read_only`, workspace `inside_only`
-- `git_log`: enabled, permission `read_only`, workspace `inside_only`
-- `npm_test`: enabled, permission `read_only`, workspace `inside_only`
-- `npm_typecheck`: enabled, permission `read_only`, workspace `inside_only`
 
 ## Disabled Permissions
 
@@ -41,6 +36,14 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 - Requires `read_file` for explicit file-inspection requests: `true`
 
+## Codex Boundary
+
+- Protected source paths: `codex/SECURITY.md`, `codex/RULES.md`, `codex/SOUL.md`, `codex/USER.md`, `codex/POLICY.json`
+- Protected generated mirrors: `codex/POLICY.md`
+- COSIA may propose Codex amendments: `true`
+- User review and approval required: `true`
+- Only approved amendment apply flow may modify protected Codex paths: `true`
+
 ## Memory
 
 - Long-term memory write policy: `candidate_promote_only`
@@ -54,43 +57,8 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Auto promotion tiers: `session`
 - Auto promotion requires no conflict: `true`
 
-## Prompt Budget
+## Runtime Config
 
-- Max prompt chars: `60000`
-- Reference memory max items: `8`
-- Context tail chars: `6000`
-- Context warning chars: `30000`
-- Context critical chars: `60000`
-- Tool results max chars: `12000`
-- Skill max items: `5`
-- Skill max chars: `8000`
-- Skill item max chars: `2000`
-- Overflow policy: `truncate_low_priority`
-
-## Model Providers
-
-- Default provider: `codex-cli`
-- Configured providers:
-  - `codex-cli`: type `codex-cli`, enabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `unset`, responseFormat `none`
-  - `openai-compatible`: type `openai-compatible`, disabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `unset`, responseFormat `none`
-  - `openrouter`: type `openai-compatible`, enabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `google/gemini-3.5-flash`, baseUrl `set`, responseFormat `json_object`
-
-## Connectors
-
-### Telegram
-
-- Enabled: `true`
-- Token env: `TELEGRAM_BOT_TOKEN`
-- Allowed chat ids: `120274824`
-- Default provider: `codex-cli`
-- Mutations allowed: `true`
-- Dangerous commands blocked: `true`
-- Message chunk chars: `3500`
-- Poll timeout ms: `30000`
-- Max consecutive failures: `10`
-
-## Review Queue
-
-- Discarded retention days: `7`
-- Pending warning days: `14`
-- Auto cleanup on read: `true`
+- Operational settings are not Codex law.
+- Provider details, gateway connector settings, prompt budgets, bundled tool enablement, and review retention live in `config/runtime.defaults.json` and optional ignored `config/runtime.local.json`.
+- Runtime config cannot relax disabled permissions, dangerous command blocks, protected Codex path rules, or Codex amendment approval requirements.

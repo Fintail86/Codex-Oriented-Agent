@@ -13,6 +13,8 @@ export type GatewayLockRecord = {
   command?: string;
   heartbeatAt?: string;
   heartbeatAtMs?: number;
+  startedAt?: string;
+  startedAtMs?: number;
   createdAt: string;
   expiresAt?: string;
   createdAtMs: number;
@@ -49,6 +51,10 @@ export function gatewayLocksDir(workspaceRoot: string): string {
   return join(gatewayRoot(workspaceRoot), "locks");
 }
 
+export function gatewayProcessLockPath(workspaceRoot: string): string {
+  return join(gatewayRoot(workspaceRoot), "process.lock");
+}
+
 export function telegramProcessLockPath(workspaceRoot: string): string {
   return join(telegramGatewayDir(workspaceRoot), "process.lock");
 }
@@ -59,14 +65,14 @@ export function sessionLockPath(workspaceRoot: string, sessionId: string): strin
 
 export async function acquireGatewayProcessLock(
   workspaceRoot: string,
-  owner = "telegram",
+  owner = "gateway",
   now: () => number = () => Date.now(),
   metadata: { gatewayId?: string; command?: string } = {}
 ): Promise<GatewayLockRecord> {
-  await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
-  const path = telegramProcessLockPath(workspaceRoot);
+  await mkdir(gatewayRoot(workspaceRoot), { recursive: true });
+  const path = gatewayProcessLockPath(workspaceRoot);
   if (await pathExists(path)) {
-    throw new GatewayLockError("Telegram gateway is already running for this workspace.", await readLock(path));
+    throw new GatewayLockError("COSIA gateway is already running for this workspace.", await readLock(path));
   }
   const createdAtMs = now();
   const record: GatewayLockRecord = {
@@ -75,11 +81,13 @@ export async function acquireGatewayProcessLock(
     owner,
     pid: process.pid,
     workspacePath: workspaceRoot,
-    gatewayId: metadata.gatewayId ?? "telegram",
-    command: metadata.command ?? "cosia gateway telegram start",
+    gatewayId: metadata.gatewayId ?? "gateway",
+    command: metadata.command ?? "cosia gateway start",
     createdAt: new Date(createdAtMs).toISOString(),
+    startedAt: new Date(createdAtMs).toISOString(),
     heartbeatAt: new Date(createdAtMs).toISOString(),
     createdAtMs,
+    startedAtMs: createdAtMs,
     heartbeatAtMs: createdAtMs
   };
   await writeJson(path, record);
@@ -87,10 +95,18 @@ export async function acquireGatewayProcessLock(
 }
 
 export async function releaseGatewayProcessLock(workspaceRoot: string, lock: GatewayLockRecord): Promise<boolean> {
-  return releaseLock(telegramProcessLockPath(workspaceRoot), lock);
+  return releaseLock(gatewayProcessLockPath(workspaceRoot), lock);
 }
 
 export async function readGatewayProcessLock(workspaceRoot: string): Promise<GatewayLockRecord | undefined> {
+  const path = gatewayProcessLockPath(workspaceRoot);
+  if (!(await pathExists(path))) {
+    return undefined;
+  }
+  return readLock(path);
+}
+
+export async function readLegacyTelegramProcessLock(workspaceRoot: string): Promise<GatewayLockRecord | undefined> {
   const path = telegramProcessLockPath(workspaceRoot);
   if (!(await pathExists(path))) {
     return undefined;
@@ -103,7 +119,7 @@ export async function heartbeatGatewayProcessLock(
   lock: GatewayLockRecord,
   now: () => number = () => Date.now()
 ): Promise<boolean> {
-  const path = telegramProcessLockPath(workspaceRoot);
+  const path = gatewayProcessLockPath(workspaceRoot);
   if (!(await pathExists(path))) {
     return false;
   }
@@ -121,6 +137,15 @@ export async function heartbeatGatewayProcessLock(
 }
 
 export async function removeGatewayProcessLock(workspaceRoot: string): Promise<boolean> {
+  const path = gatewayProcessLockPath(workspaceRoot);
+  if (!(await pathExists(path))) {
+    return false;
+  }
+  await rm(path, { force: true });
+  return true;
+}
+
+export async function removeLegacyTelegramProcessLock(workspaceRoot: string): Promise<boolean> {
   const path = telegramProcessLockPath(workspaceRoot);
   if (!(await pathExists(path))) {
     return false;
@@ -129,14 +154,20 @@ export async function removeGatewayProcessLock(workspaceRoot: string): Promise<b
   return true;
 }
 
-export function isGatewayProcessLockStale(record: GatewayLockRecord | undefined, workspaceRoot: string, nowMs: number, staleAfterMs = 120000): boolean {
+export function isGatewayProcessLockStale(
+  record: GatewayLockRecord | undefined,
+  workspaceRoot: string,
+  nowMs: number,
+  staleAfterMs = 120000,
+  expectedGatewayId = "gateway"
+): boolean {
   if (!record) {
     return false;
   }
   const heartbeatAtMs = record.heartbeatAtMs ?? record.createdAtMs;
   const heartbeatStale = nowMs - heartbeatAtMs > staleAfterMs;
   const workspaceMismatch = Boolean(record.workspacePath && record.workspacePath !== workspaceRoot);
-  const gatewayMismatch = Boolean(record.gatewayId && record.gatewayId !== "telegram");
+  const gatewayMismatch = Boolean(record.gatewayId && record.gatewayId !== expectedGatewayId);
   return workspaceMismatch || gatewayMismatch || heartbeatStale || !isProcessPresent(record.pid);
 }
 

@@ -152,11 +152,11 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
       action: "Run `cosia start`, then use `/review`."
     } : undefined,
     gatewayLockStale ? {
-      id: "gateway.telegram.stale_lock",
+      id: "gateway.stale_lock",
       severity: "warning",
-      title: "Telegram gateway stale lock",
-      detail: "A Telegram gateway process lock appears stale.",
-      action: "Run `cosia gateway telegram unlock --stale-only`."
+      title: "Gateway stale lock",
+      detail: "A gateway process lock appears stale.",
+      action: "Run `cosia gateway unlock --stale-only`."
     } : undefined,
     policy?.connectors.telegram.enabled && !process.env[policy.connectors.telegram.tokenEnv] ? {
       id: "gateway.telegram.missing_token",

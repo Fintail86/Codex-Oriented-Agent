@@ -7,8 +7,9 @@ import {
   acquireGatewayProcessLock,
   heartbeatGatewayProcessLock,
   isGatewayProcessLockStale,
+  readLegacyTelegramProcessLock,
   readGatewayProcessLock,
-  removeGatewayProcessLock,
+  removeLegacyTelegramProcessLock,
   releaseGatewayProcessLock,
   telegramGatewayDir
 } from "./gateway_locks.js";
@@ -37,6 +38,8 @@ export type TelegramStartOptions = {
   once?: boolean;
   fetchImpl?: FetchLike;
   now?: () => number;
+  command?: string;
+  stopRequested?: () => boolean | Promise<boolean>;
 };
 
 export type TelegramUpdate = {
@@ -223,9 +226,9 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
 
   await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
   const client = new TelegramApiClient(token, options.fetchImpl);
-  const lock = await acquireGatewayProcessLock(workspaceRoot, "telegram-gateway", options.now, {
-    gatewayId: "telegram",
-    command: "cosia gateway telegram start"
+  const lock = await acquireGatewayProcessLock(workspaceRoot, "gateway", options.now, {
+    gatewayId: "gateway",
+    command: options.command ?? "cosia gateway telegram start"
   });
   let cleanupStarted = false;
   let shutdownRequested = false;
@@ -253,12 +256,24 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
     let state = await loadTelegramGatewayState(workspaceRoot);
     let consecutiveFailures = 0;
     while (!shutdownRequested) {
+      if (await shouldStop(options)) {
+        shutdownRequested = true;
+        break;
+      }
       try {
         await heartbeatGatewayProcessLock(workspaceRoot, lock, options.now);
         const updates = await client.getUpdates(state.nextOffset, config.pollTimeoutMs);
+        if (await shouldStop(options)) {
+          shutdownRequested = true;
+          break;
+        }
         consecutiveFailures = 0;
         for (const update of updates) {
           if (shutdownRequested) break;
+          if (await shouldStop(options)) {
+            shutdownRequested = true;
+            break;
+          }
           await heartbeatGatewayProcessLock(workspaceRoot, lock, options.now);
           state = await processTelegramUpdate(workspaceRoot, policy, client, state, update, {
             providerId: options.providerId ?? config.defaultProvider,
@@ -274,6 +289,10 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
         }
         if (options.once) break;
       } catch (error) {
+        if (await shouldStop(options)) {
+          shutdownRequested = true;
+          break;
+        }
         consecutiveFailures += 1;
         state.failureCount = consecutiveFailures;
         state.lastFailure = (error as Error).message;
@@ -292,6 +311,10 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
           config.backoffMaxMs,
           config.backoffInitialMs * (2 ** Math.max(0, consecutiveFailures - 1))
         );
+        if (await shouldStop(options)) {
+          shutdownRequested = true;
+          break;
+        }
         await delay(backoff);
       }
     }
@@ -417,15 +440,24 @@ export async function saveTelegramGatewayState(workspaceRoot: string, state: Tel
 export async function formatGatewayStatus(workspaceRoot: string, options: { json?: boolean } = {}): Promise<string> {
   const state = await loadTelegramGatewayState(workspaceRoot);
   const lock = await readGatewayProcessLock(workspaceRoot);
+  const legacyLock = await readLegacyTelegramProcessLock(workspaceRoot);
   const processLocked = Boolean(lock);
   const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now());
+  const legacyLockStale = isGatewayProcessLockStale(legacyLock, workspaceRoot, Date.now(), 120000, "telegram");
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const report = {
+    supervisor: {
+      processLock: processLocked,
+      lockStale,
+      lock
+    },
     telegram: {
       enabled: policy.connectors.telegram.enabled,
       processLock: processLocked,
       lockStale,
       lock,
+      legacyProcessLock: Boolean(legacyLock),
+      legacyLockStale,
       allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
       activeChats: Object.keys(state.chats).length,
       nextOffset: state.nextOffset,
@@ -448,20 +480,21 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
     `  Failure count: ${state.failureCount}`,
-    state.lastFailure ? `  Last failure: ${state.lastFailure}` : undefined
+    state.lastFailure ? `  Last failure: ${state.lastFailure}` : undefined,
+    legacyLock ? `  Legacy lock: present${legacyLockStale ? " stale" : ""}` : undefined
   ].filter(Boolean).join("\n");
 }
 
 export async function unlockStaleTelegramGateway(workspaceRoot: string, options: { staleOnly?: boolean } = {}): Promise<{ removed: boolean; reason: string }> {
-  const lock = await readGatewayProcessLock(workspaceRoot);
+  const lock = await readLegacyTelegramProcessLock(workspaceRoot);
   if (!lock) {
     return { removed: false, reason: "no process lock" };
   }
-  const stale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now());
+  const stale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now(), 120000, "telegram");
   if (options.staleOnly && !stale) {
     return { removed: false, reason: "lock is not stale" };
   }
-  const removed = await removeGatewayProcessLock(workspaceRoot);
+  const removed = await removeLegacyTelegramProcessLock(workspaceRoot);
   return { removed, reason: stale ? "stale lock removed" : "lock removed" };
 }
 
@@ -582,4 +615,8 @@ function registerGatewaySignals(onSignal: () => void): () => void {
     process.off("SIGINT", handler);
     process.off("SIGTERM", handler);
   };
+}
+
+async function shouldStop(options: TelegramStartOptions): Promise<boolean> {
+  return Boolean(await options.stopRequested?.());
 }

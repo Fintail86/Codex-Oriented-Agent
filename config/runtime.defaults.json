@@ -1,0 +1,101 @@
+{
+  "promptBudget": {
+    "maxPromptChars": 60000,
+    "refMemoryMaxItems": 8,
+    "contextTailChars": 6000,
+    "contextWarningChars": 30000,
+    "contextCriticalChars": 60000,
+    "toolResultsMaxChars": 12000,
+    "skillMaxItems": 5,
+    "skillMaxChars": 8000,
+    "skillItemMaxChars": 2000,
+    "overflowPolicy": "truncate_low_priority"
+  },
+  "model": {
+    "defaultProvider": "codex-cli",
+    "providers": {
+      "codex-cli": {
+        "type": "codex-cli",
+        "enabled": true,
+        "sandbox": "read-only",
+        "baseUrl": null,
+        "model": null,
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000,
+        "responseFormat": null,
+        "extraHeaders": {}
+      },
+      "openai-compatible": {
+        "type": "openai-compatible",
+        "enabled": false,
+        "baseUrl": null,
+        "model": null,
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000,
+        "responseFormat": null,
+        "extraHeaders": {}
+      },
+      "openrouter": {
+        "type": "openai-compatible",
+        "enabled": false,
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "model": null,
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000,
+        "responseFormat": "json_object",
+        "extraHeaders": {
+          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
+          "X-OpenRouter-Title": "COSIA"
+        }
+      }
+    }
+  },
+  "connectors": {
+    "telegram": {
+      "enabled": false,
+      "tokenEnv": "TELEGRAM_BOT_TOKEN",
+      "allowedChatIds": [],
+      "defaultProvider": "codex-cli",
+      "allowMutations": true,
+      "blockDangerous": true,
+      "messageChunkChars": 3500,
+      "pollTimeoutMs": 30000,
+      "maxConsecutiveFailures": 10,
+      "backoffInitialMs": 1000,
+      "backoffMaxMs": 30000
+    }
+  },
+  "review": {
+    "discardedRetentionDays": 7,
+    "pendingWarningDays": 14,
+    "autoCleanupOnRead": true
+  },
+  "tools": {
+    "bundled": {
+      "git_status": {
+        "enabled": true
+      },
+      "git_diff": {
+        "enabled": true
+      },
+      "git_log": {
+        "enabled": true
+      },
+      "npm_test": {
+        "enabled": true
+      },
+      "npm_typecheck": {
+        "enabled": true
+      }
+    }
+  }
+}

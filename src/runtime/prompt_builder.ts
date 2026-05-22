@@ -2,8 +2,10 @@ import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readText } from "./fs_utils.js";
 import type { PolicyConfig } from "./policy_manager.js";
+import { loadRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
 import { SkillManager, type SkillSelectionManifest } from "./skill_manager.js";
-import type { AgentManifest, SessionMetadata } from "./types.js";
+import { isBundledToolId, toolCatalog } from "./tool_catalog.js";
+import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
 
 type PromptInput = {
   workspaceRoot: string;
@@ -139,7 +141,7 @@ export async function buildPromptBundle(input: PromptInput): Promise<PromptBuild
   };
   const staticBlocks = input.staticBlocks ?? await loadPromptStaticBlocks(input);
   const dynamicBlocks = await loadDynamicBlocks(input, budget);
-  const runtimeBlocks = runtimePromptBlocks(input);
+  const runtimeBlocks = await runtimePromptBlocks(input);
   const requestBlock: PromptBlock = {
     title: "CURRENT USER REQUEST",
     content: input.userPrompt,
@@ -220,7 +222,9 @@ async function loadDynamicBlocks(
   return filtered;
 }
 
-function runtimePromptBlocks(input: PromptInput): PromptBlock[] {
+async function runtimePromptBlocks(input: PromptInput): Promise<PromptBlock[]> {
+  const runtime = await loadRuntimeConfig(input.workspaceRoot);
+  const availableTools = effectiveAvailableModelTools(input.agent.allowedTools, input.policy, runtime.config);
   const requireToolsText = input.requireTools
     ? `# REQUIRE-TOOLS MODE
 
@@ -248,7 +252,7 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
   const blocks: PromptBlock[] = [
     {
       title: "RUNTIME OUTPUT CONTRACT",
-      content: outputContract(input.agent.allowedTools),
+      content: outputContract(availableTools),
       required: true,
       source: "runtime"
     },
@@ -270,6 +274,30 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
     }
   ];
   return blocks.filter((block) => block.content.trim().length > 0);
+}
+
+function effectiveAvailableModelTools(
+  allowedTools: ToolName[],
+  policy: PolicyConfig | undefined,
+  runtime: RuntimeConfig
+): ToolName[] {
+  return allowedTools.filter((tool) => {
+    const entry = toolCatalog[tool];
+    if (!entry || entry.exposure !== "model") {
+      return false;
+    }
+    if (isBundledToolId(tool)) {
+      if (!runtime.tools.bundled[tool]?.enabled) {
+        return false;
+      }
+    } else if (policy) {
+      const toolPolicy = policy.tools[tool];
+      if (!toolPolicy?.enabled || toolPolicy.permission !== entry.permission) {
+        return false;
+      }
+    }
+    return !(policy?.disabledPermissions ?? []).includes(entry.permission);
+  });
 }
 
 function assembleWithBudget(
@@ -348,7 +376,7 @@ For a search tool call:
 For a final answer:
 {"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":""},"content":"...","memoryCandidates":[],"skillCandidates":[]}
 
-Allowed tools for this agent: ${allowedTools.join(", ")}
+Available tools for this run: ${allowedTools.join(", ") || "none"}
 Maximum tool loop depth: 5`;
 }
 

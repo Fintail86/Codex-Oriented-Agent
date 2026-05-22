@@ -1,0 +1,84 @@
+{
+  "status.show": [
+    "상태",
+    "현황",
+    "진단",
+    "상태 보여줘",
+    "상태 확인"
+  ],
+  "review.list": [
+    "리뷰",
+    "후보",
+    "리뷰 보여줘",
+    "리뷰 목록",
+    "검토"
+  ],
+  "review.next": [
+    "다음 리뷰",
+    "다음 후보"
+  ],
+  "review.conflicted_memory": [
+    "컨플릭트 메모리",
+    "충돌 메모리",
+    "충돌 후보"
+  ],
+  "review.stats": [
+    "리뷰 통계",
+    "후보 통계",
+    "리뷰 상태"
+  ],
+  "review.discard": [
+    "리뷰 디스카드",
+    "후보 디스카드",
+    "디스카드"
+  ],
+  "review.discard_conflicts": [
+    "컨플릭트 메모리 디스카드",
+    "충돌 메모리 디스카드",
+    "중복 메모리 정리"
+  ],
+  "review.promote_skill": [
+    "스킬 후보 승격",
+    "스킬 승격"
+  ],
+  "review.cleanup": [
+    "리뷰 정리",
+    "후보 정리",
+    "디스카드 정리"
+  ],
+  "memory.search": [
+    "메모리 검색",
+    "기억 검색",
+    "메모리 찾아줘"
+  ],
+  "session.list": [
+    "세션 목록",
+    "세션 보여줘"
+  ],
+  "session.summary": [
+    "세션 요약",
+    "요약 보여줘"
+  ],
+  "context.status": [
+    "컨텍스트 상태",
+    "문맥 상태"
+  ],
+  "provider.check": [
+    "프로바이더",
+    "provider 확인",
+    "모델 확인"
+  ],
+  "tool.git_status": [
+    "git 상태",
+    "깃 상태"
+  ],
+  "policy.check": [
+    "정책 검사",
+    "policy 검사",
+    "정책 확인"
+  ],
+  "skill.list": [
+    "스킬 목록",
+    "스킬 보여줘"
+  ]
+}

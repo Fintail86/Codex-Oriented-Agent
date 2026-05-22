@@ -1,6 +1,9 @@
 import { stat } from "node:fs/promises";
+import { relative } from "node:path";
 import { resolveInside } from "./fs_utils.js";
 import { defaultPolicy, type PolicyConfig } from "./policy_manager.js";
+import { defaultRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
+import { isBundledToolId } from "./tool_catalog.js";
 import type { ToolDefinition, ToolName } from "./types.js";
 
 export type PolicyDecision = {
@@ -17,17 +20,23 @@ export type RuntimePolicyState = {
 };
 
 export class PolicyEngine {
-  constructor(private readonly policy: PolicyConfig = defaultPolicy) {}
+  constructor(
+    private readonly policy: PolicyConfig = defaultPolicy,
+    private readonly runtimeConfig: RuntimeConfig = defaultRuntimeConfig
+  ) {}
 
   evaluate(tool: ToolDefinition, args: unknown, workspaceRoot: string): PolicyDecision {
     const toolPolicy = this.policy.tools[tool.name];
-    if (!toolPolicy) {
+    const bundledToolConfig = isBundledToolId(tool.name) ? this.runtimeConfig.tools.bundled[tool.name] : undefined;
+    if (isBundledToolId(tool.name)) {
+      if (!bundledToolConfig?.enabled) {
+        return { allowed: false, ruleId: "tool.config_disabled", reason: `Bundled tool is disabled by runtime config: ${tool.name}` };
+      }
+    } else if (!toolPolicy) {
       return { allowed: false, ruleId: "tool.unconfigured", reason: `Tool is not configured by policy: ${tool.name}` };
-    }
-    if (!toolPolicy.enabled) {
+    } else if (!toolPolicy.enabled) {
       return { allowed: false, ruleId: "tool.disabled", reason: `Tool is disabled by policy: ${tool.name}` };
-    }
-    if (toolPolicy.permission !== tool.permission) {
+    } else if (toolPolicy.permission !== tool.permission) {
       return {
         allowed: false,
         ruleId: "tool.permission_mismatch",
@@ -42,6 +51,9 @@ export class PolicyEngine {
     }
     if (tool.permission === "write_local") {
       return this.evaluateWriteLocal(args, workspaceRoot);
+    }
+    if (tool.permission === "project_check") {
+      return { allowed: true, ruleId: "tool.project_check.fixed_script", reason: "Allowed fixed project check script." };
     }
     return { allowed: false, ruleId: "permission.unsupported", reason: `Unsupported permission: ${tool.permission}` };
   }
@@ -67,6 +79,10 @@ export class PolicyEngine {
       return boundary;
     }
     const resolved = resolveInside(workspaceRoot, path);
+    const protectedDecision = this.evaluateProtectedCodexPath(workspaceRoot, resolved);
+    if (!protectedDecision.allowed) {
+      return protectedDecision;
+    }
     return {
       allowed: true,
       ruleId: "tool.write_local.workspace",
@@ -154,8 +170,32 @@ export class PolicyEngine {
     return undefined;
   }
 
+  private evaluateProtectedCodexPath(workspaceRoot: string, resolvedPath: string): PolicyDecision {
+    const normalized = normalizeRelativePath(relative(workspaceRoot, resolvedPath));
+    const protectedPaths = [
+      ...(this.policy.codex?.protectedSourcePaths ?? []),
+      ...(this.policy.codex?.protectedMirrorPaths ?? [])
+    ].map(normalizeRelativePath);
+    if (protectedPaths.includes(normalized)) {
+      return {
+        allowed: false,
+        ruleId: "codex.protected_path",
+        reason: `Generic write_file cannot modify protected Codex path: ${normalized}. Use an approved Codex amendment apply flow.`
+      };
+    }
+    return {
+      allowed: true,
+      ruleId: "codex.protected_path.allowed",
+      reason: "Path is not a protected Codex path."
+    };
+  }
+
   private asksForActualFiles(prompt: string): boolean {
     const normalized = prompt.toLowerCase();
     return this.policy.fileInspection.triggerPhrases.some((needle) => normalized.includes(needle.toLowerCase()));
   }
+}
+
+function normalizeRelativePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 }

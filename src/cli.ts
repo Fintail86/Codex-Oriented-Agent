@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import {
@@ -15,6 +16,7 @@ import { checkProvider, createProvider, listProviders } from "./runtime/model/pr
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
+import { applyRuntimeConfigMigration, buildRuntimeConfigMigration, formatConfigCheck, formatConfigShow } from "./runtime/runtime_config.js";
 import type { PromptManifest } from "./runtime/prompt_builder.js";
 import { runChatRepl } from "./runtime/repl.js";
 import { formatReviewCleanup, formatReviewInbox, formatReviewStats, ReviewInboxService } from "./runtime/review_inbox.js";
@@ -23,11 +25,13 @@ import { SessionManager } from "./runtime/session_manager.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
 import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
-import { checkTelegramGateway, formatGatewayStatus, formatTelegramCheck, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
+import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult, restartGateway, startGateway, stopGateway, unlockStaleGateway } from "./runtime/gateway_supervisor.js";
+import { checkTelegramGateway, formatTelegramCheck, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
 import { COSIA_VERSION } from "./runtime/version.js";
+import { readText } from "./runtime/fs_utils.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
 
 const program = new Command();
@@ -92,6 +96,49 @@ doctor
 
 const providerCommand = program.command("provider").description("Inspect model providers.");
 
+const configCommand = program.command("config").description("Inspect and migrate runtime configuration.");
+
+configCommand
+  .command("show")
+  .description("Show merged and effective runtime configuration.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const rawPolicy = await readRawPolicy(workspaceRoot);
+      console.log(await formatConfigShow(workspaceRoot, rawPolicy));
+    });
+  });
+
+configCommand
+  .command("check")
+  .description("Validate runtime configuration and secret-like values.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const rawPolicy = await readRawPolicy(workspaceRoot);
+      console.log(await formatConfigCheck(workspaceRoot, rawPolicy));
+    });
+  });
+
+configCommand
+  .command("migrate")
+  .option("--from-policy", "Split legacy runtime settings from codex/POLICY.json.", false)
+  .option("--yes", "Apply migration. Without this, only preview.", false)
+  .description("Preview or apply runtime config split migration.")
+  .action(async (options: { fromPolicy: boolean; yes: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (!options.fromPolicy) {
+        throw new Error("Only --from-policy migration is supported.");
+      }
+      const result = options.yes
+        ? await applyRuntimeConfigMigration(workspaceRoot)
+        : await buildRuntimeConfigMigration(workspaceRoot);
+      console.log(result.preview);
+      if (options.yes) {
+        await new PolicyManager(workspaceRoot).syncMarkdown();
+        console.log("Applied runtime config migration.");
+      }
+    });
+  });
+
 providerCommand
   .command("list")
   .description("List configured model providers.")
@@ -139,12 +186,74 @@ providerCommand
 const gateway = program.command("gateway").description("Manage COSIA external gateway connectors.");
 
 gateway
+  .command("start")
+  .option("--connector <connector>", "Connector to start. v0.26.1 supports telegram.")
+  .option("--model-provider <provider>", "Model provider for gateway chat messages.")
+  .option("--once", "Process one update batch and exit.", false)
+  .description("Start the COSIA gateway supervisor.")
+  .action(async (options: { connector?: string; modelProvider?: string; once: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (options.connector && options.connector !== "telegram") {
+        throw new Error(`Unsupported gateway connector: ${options.connector}`);
+      }
+      await startGateway(workspaceRoot, {
+        connector: options.connector as "telegram" | undefined,
+        modelProvider: options.modelProvider,
+        once: options.once
+      });
+    });
+  });
+
+gateway
+  .command("stop")
+  .option("--timeout-ms <ms>", "Milliseconds to wait for cooperative shutdown.", "10000")
+  .description("Request cooperative gateway shutdown.")
+  .action(async (options: { timeoutMs: string }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatGatewayStopResult(await stopGateway(workspaceRoot, {
+        timeoutMs: parseIntegerOption(options.timeoutMs, "--timeout-ms")
+      })));
+    });
+  });
+
+gateway
+  .command("restart")
+  .option("--connector <connector>", "Connector to restart. v0.26.1 supports telegram.")
+  .option("--model-provider <provider>", "Model provider for gateway chat messages.")
+  .option("--timeout-ms <ms>", "Milliseconds to wait for cooperative shutdown.", "10000")
+  .option("--once", "After stopping, process one update batch and exit.", false)
+  .description("Cooperatively stop and then start the gateway supervisor.")
+  .action(async (options: { connector?: string; modelProvider?: string; timeoutMs: string; once: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (options.connector && options.connector !== "telegram") {
+        throw new Error(`Unsupported gateway connector: ${options.connector}`);
+      }
+      await restartGateway(workspaceRoot, {
+        connector: options.connector as "telegram" | undefined,
+        modelProvider: options.modelProvider,
+        timeoutMs: parseIntegerOption(options.timeoutMs, "--timeout-ms"),
+        once: options.once
+      });
+    });
+  });
+
+gateway
   .command("status")
   .option("--json", "Print structured JSON gateway status.", false)
   .description("Show gateway connector state.")
   .action(async (options: { json: boolean }) => {
     await main(async (workspaceRoot) => {
       console.log(await formatGatewayStatus(workspaceRoot, { json: options.json }));
+    });
+  });
+
+gateway
+  .command("unlock")
+  .option("--stale-only", "Only remove stale gateway process locks.", false)
+  .description("Remove a stale top-level gateway process lock.")
+  .action(async (options: { staleOnly: boolean }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatGatewayUnlockResult(await unlockStaleGateway(workspaceRoot, { staleOnly: options.staleOnly })));
     });
   });
 
@@ -163,12 +272,13 @@ telegram
   .command("start")
   .option("--provider <provider>", "Provider for Telegram chat messages.")
   .option("--once", "Process one update batch and exit.", false)
-  .description("Start Telegram long polling gateway.")
+  .description("Debug: start Telegram long polling directly. Normal use: cosia gateway start.")
   .action(async (options: { provider?: string; once: boolean }) => {
     await main(async (workspaceRoot) => {
       await startTelegramGateway(workspaceRoot, {
         providerId: options.provider,
-        once: options.once
+        once: options.once,
+        command: "cosia gateway telegram start"
       });
     });
   });
@@ -1983,4 +2093,8 @@ async function runCliTool(workspaceRoot: string, name: ToolName, args: Record<st
   if (!result.ok) {
     process.exitCode = 1;
   }
+}
+
+async function readRawPolicy(workspaceRoot: string): Promise<unknown> {
+  return JSON.parse(await readText(join(workspaceRoot, "codex", "POLICY.json"))) as unknown;
 }

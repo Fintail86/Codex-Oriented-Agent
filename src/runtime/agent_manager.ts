@@ -3,10 +3,8 @@ import { join } from "node:path";
 import { ensureDir, pathExists, readText, writeTextIfMissing } from "./fs_utils.js";
 import {
   architectAgentTemplates,
-  architectAllowedTools,
   architectManifest,
   cosiaAgentTemplates,
-  cosiaAllowedTools,
   cosiaManifest
 } from "./templates.js";
 import { agentManifestSchema, type AgentManifest } from "./types.js";
@@ -281,9 +279,7 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
     : isCosia
       ? cosiaManifest(manifest.id)
       : undefined;
-  const allowedTools = template
-    ? [...new Set([...manifest.allowedTools, ...(isArchitect ? architectAllowedTools : cosiaAllowedTools)])]
-    : manifest.allowedTools;
+  const allowedTools = manifest.allowedTools;
   const preferredSkills = manifest.preferredSkills ?? [];
   const blockedSkills = manifest.blockedSkills ?? [];
   const skillWeights = manifest.skillWeights ?? {};

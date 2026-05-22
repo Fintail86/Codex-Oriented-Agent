@@ -1,5 +1,5 @@
 {
-  "version": "0.26.0",
+  "version": "0.27.3",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -15,31 +15,6 @@
       "enabled": true
     },
     "search_files": {
-      "permission": "read_only",
-      "workspace": "inside_only",
-      "enabled": true
-    },
-    "git_status": {
-      "permission": "read_only",
-      "workspace": "inside_only",
-      "enabled": true
-    },
-    "git_diff": {
-      "permission": "read_only",
-      "workspace": "inside_only",
-      "enabled": true
-    },
-    "git_log": {
-      "permission": "read_only",
-      "workspace": "inside_only",
-      "enabled": true
-    },
-    "npm_test": {
-      "permission": "read_only",
-      "workspace": "inside_only",
-      "enabled": true
-    },
-    "npm_typecheck": {
       "permission": "read_only",
       "workspace": "inside_only",
       "enabled": true
@@ -79,6 +54,23 @@
       "from the file",
       "from files"
     ]
+  },
+  "codex": {
+    "protectedSourcePaths": [
+      "codex/SECURITY.md",
+      "codex/RULES.md",
+      "codex/SOUL.md",
+      "codex/USER.md",
+      "codex/POLICY.json"
+    ],
+    "protectedMirrorPaths": [
+      "codex/POLICY.md"
+    ],
+    "amendment": {
+      "canPropose": true,
+      "requiresUserApproval": true,
+      "approvedApplyOnly": true
+    }
   },
   "memory": {
     "longTermWrite": "candidate_promote_only",
@@ -137,87 +129,5 @@
         "secret"
       ]
     }
-  },
-  "promptBudget": {
-    "maxPromptChars": 60000,
-    "refMemoryMaxItems": 8,
-    "contextTailChars": 6000,
-    "contextWarningChars": 30000,
-    "contextCriticalChars": 60000,
-    "toolResultsMaxChars": 12000,
-    "skillMaxItems": 5,
-    "skillMaxChars": 8000,
-    "skillItemMaxChars": 2000,
-    "overflowPolicy": "truncate_low_priority"
-  },
-  "model": {
-    "defaultProvider": "codex-cli",
-    "providers": {
-      "codex-cli": {
-        "type": "codex-cli",
-        "enabled": true,
-        "sandbox": "read-only",
-        "baseUrl": null,
-        "model": null,
-        "apiKeyEnv": "OPENAI_API_KEY",
-        "endpointPath": "/chat/completions",
-        "timeoutMs": 120000,
-        "structuredRetryCount": 1,
-        "maxPromptChars": 60000,
-        "responseFormat": null,
-        "extraHeaders": {}
-      },
-      "openai-compatible": {
-        "type": "openai-compatible",
-        "enabled": false,
-        "baseUrl": null,
-        "model": null,
-        "apiKeyEnv": "OPENAI_API_KEY",
-        "endpointPath": "/chat/completions",
-        "timeoutMs": 120000,
-        "structuredRetryCount": 1,
-        "maxPromptChars": 60000,
-        "responseFormat": null,
-        "extraHeaders": {}
-      },
-      "openrouter": {
-        "type": "openai-compatible",
-        "enabled": true,
-        "baseUrl": "https://openrouter.ai/api/v1",
-        "model": "google/gemini-3.5-flash",
-        "apiKeyEnv": "OPENROUTER_API_KEY",
-        "endpointPath": "/chat/completions",
-        "timeoutMs": 120000,
-        "structuredRetryCount": 1,
-        "maxPromptChars": 60000,
-        "responseFormat": "json_object",
-        "extraHeaders": {
-          "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
-          "X-OpenRouter-Title": "COSIA"
-        }
-      }
-    }
-  },
-  "connectors": {
-    "telegram": {
-      "enabled": true,
-      "tokenEnv": "TELEGRAM_BOT_TOKEN",
-      "allowedChatIds": [
-        "120274824"
-      ],
-      "defaultProvider": "codex-cli",
-      "allowMutations": true,
-      "blockDangerous": true,
-      "messageChunkChars": 3500,
-      "pollTimeoutMs": 30000,
-      "maxConsecutiveFailures": 10,
-      "backoffInitialMs": 1000,
-      "backoffMaxMs": 30000
-    }
-  },
-  "review": {
-    "discardedRetentionDays": 7,
-    "pendingWarningDays": 14,
-    "autoCleanupOnRead": true
   }
 }

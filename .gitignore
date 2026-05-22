@@ -7,3 +7,4 @@ sessions/*
 *.log
 Docs/
 .cosia-gateway/
+config/runtime.local.json
