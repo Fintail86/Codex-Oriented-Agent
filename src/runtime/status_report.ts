@@ -139,14 +139,14 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
       severity: "warning",
       title: "Pending memory review",
       detail: "Memory candidates are waiting for review.",
-      action: "Run `cosia memory candidate review --pending`."
+      action: "Run `cosia start`, then use `/review`."
     } : undefined,
     pendingSkillCandidatesCount > 0 ? {
       id: "skills.pending",
       severity: "warning",
       title: "Pending skill review",
       detail: "Skill candidates are waiting for review.",
-      action: "Run `cosia skill candidate list`."
+      action: "Run `cosia start`, then use `/review`."
     } : undefined,
     activeSessions.length === 0 ? {
       id: "sessions.none_active",

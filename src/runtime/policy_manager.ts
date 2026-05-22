@@ -30,6 +30,20 @@ const providerConfigSchema = z.object({
   extraHeaders: z.record(z.string(), z.string()).default({})
 });
 
+const telegramConnectorSchema = z.object({
+  enabled: z.boolean().default(false),
+  tokenEnv: z.string().min(1).default("TELEGRAM_BOT_TOKEN"),
+  allowedChatIds: z.array(z.string()).default([]),
+  defaultProvider: z.string().min(1).default("codex-cli"),
+  allowMutations: z.boolean().default(true),
+  blockDangerous: z.boolean().default(true),
+  messageChunkChars: z.number().int().positive().default(3500),
+  pollTimeoutMs: z.number().int().positive().default(30000),
+  maxConsecutiveFailures: z.number().int().positive().default(10),
+  backoffInitialMs: z.number().int().nonnegative().default(1000),
+  backoffMaxMs: z.number().int().positive().default(30000)
+});
+
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
   agents: z.object({
@@ -162,6 +176,23 @@ export const policyConfigSchema = z.object({
         }
       }
     }
+  }),
+  connectors: z.object({
+    telegram: telegramConnectorSchema
+  }).default({
+    telegram: {
+      enabled: false,
+      tokenEnv: "TELEGRAM_BOT_TOKEN",
+      allowedChatIds: [],
+      defaultProvider: "codex-cli",
+      allowMutations: true,
+      blockDangerous: true,
+      messageChunkChars: 3500,
+      pollTimeoutMs: 30000,
+      maxConsecutiveFailures: 10,
+      backoffInitialMs: 1000,
+      backoffMaxMs: 30000
+    }
   })
 });
 
@@ -179,7 +210,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.19.1",
+  version: "0.22.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -334,6 +365,21 @@ export const defaultPolicy: PolicyConfig = {
           "X-OpenRouter-Title": "COSIA"
         }
       }
+    }
+  },
+  connectors: {
+    telegram: {
+      enabled: false,
+      tokenEnv: "TELEGRAM_BOT_TOKEN",
+      allowedChatIds: [],
+      defaultProvider: "codex-cli",
+      allowMutations: true,
+      blockDangerous: true,
+      messageChunkChars: 3500,
+      pollTimeoutMs: 30000,
+      maxConsecutiveFailures: 10,
+      backoffInitialMs: 1000,
+      backoffMaxMs: 30000
     }
   }
 };
@@ -509,6 +555,12 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
     model: {
       ...policy.model,
       providers
+    },
+    connectors: {
+      telegram: {
+        ...defaultPolicy.connectors.telegram,
+        ...policy.connectors?.telegram
+      }
     }
   });
 }
@@ -586,6 +638,20 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Default provider: \`${policy.model.defaultProvider}\`
 - Configured providers:
 ${Object.entries(policy.model.providers).map(([id, config]) => `  - \`${id}\`: type \`${config.type ?? defaultProviderType(id)}\`, ${config.enabled ? "enabled" : "disabled"}, timeout \`${config.timeoutMs}\`, retry \`${config.structuredRetryCount}\`, max prompt chars \`${config.maxPromptChars}\`, model ${config.model ? `\`${config.model}\`` : "`unset`"}, baseUrl ${config.baseUrl ? "`set`" : "`unset`"}, responseFormat ${config.responseFormat ? `\`${config.responseFormat}\`` : "`none`"}`).join("\n")}
+
+## Connectors
+
+### Telegram
+
+- Enabled: \`${policy.connectors.telegram.enabled}\`
+- Token env: \`${policy.connectors.telegram.tokenEnv}\`
+- Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length ? policy.connectors.telegram.allowedChatIds.map((id) => `\`${id}\``).join(", ") : "`none`"}
+- Default provider: \`${policy.connectors.telegram.defaultProvider}\`
+- Mutations allowed: \`${policy.connectors.telegram.allowMutations}\`
+- Dangerous commands blocked: \`${policy.connectors.telegram.blockDangerous}\`
+- Message chunk chars: \`${policy.connectors.telegram.messageChunkChars}\`
+- Poll timeout ms: \`${policy.connectors.telegram.pollTimeoutMs}\`
+- Max consecutive failures: \`${policy.connectors.telegram.maxConsecutiveFailures}\`
 `;
 }
 
@@ -603,7 +669,8 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Memory auto promotion: ${policy.memory.autoPromotion.mode}`,
     `Prompt budget: ${policy.promptBudget.maxPromptChars} chars`,
     `Default agent: ${policy.agents.defaultAgentId ?? "none"}`,
-    `Default provider: ${policy.model.defaultProvider}`
+    `Default provider: ${policy.model.defaultProvider}`,
+    `Telegram connector: ${policy.connectors.telegram.enabled ? "enabled" : "disabled"}`
   ].join("\n");
 }
 

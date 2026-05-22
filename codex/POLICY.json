@@ -1,5 +1,5 @@
 {
-  "version": "0.19.1",
+  "version": "0.22.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -196,6 +196,23 @@
           "X-OpenRouter-Title": "COSIA"
         }
       }
+    }
+  },
+  "connectors": {
+    "telegram": {
+      "enabled": true,
+      "tokenEnv": "TELEGRAM_BOT_TOKEN",
+      "allowedChatIds": [
+        "120274824"
+      ],
+      "defaultProvider": "codex-cli",
+      "allowMutations": true,
+      "blockDangerous": true,
+      "messageChunkChars": 3500,
+      "pollTimeoutMs": 30000,
+      "maxConsecutiveFailures": 10,
+      "backoffInitialMs": 1000,
+      "backoffMaxMs": 30000
     }
   }
 }

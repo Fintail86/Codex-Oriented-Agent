@@ -19,12 +19,19 @@ import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_a
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
+import { chunkTelegramMessage } from "../src/runtime/gateway_format.js";
+import { sessionLockPath, withSessionLock } from "../src/runtime/gateway_locks.js";
+import { pathExists } from "../src/runtime/fs_utils.js";
+import { interpretHashCommand, validateInterpreterResult } from "../src/runtime/command_interpreter.js";
+import { parseHashCommand, retrieveCommandCandidates } from "../src/runtime/command_intent.js";
 import { formatChatHelp, runChatRepl } from "../src/runtime/repl.js";
+import { formatReviewInbox, ReviewInboxService } from "../src/runtime/review_inbox.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
 import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
+import { checkTelegramGateway, loadTelegramGatewayState, processTelegramUpdate, saveTelegramGatewayState, startTelegramGateway } from "../src/runtime/telegram_gateway.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import type { ModelProvider } from "../src/runtime/types.js";
 import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspace.js";
@@ -113,7 +120,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.19.1\"");
+    expect(policyJson).toContain("\"version\": \"0.22.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -1054,6 +1061,38 @@ describe("memory", () => {
 
     const all = await memory.listCandidates(true);
     expect(all.map((item) => item.record?.status)).toEqual(["promoted", "discarded"]);
+  });
+
+  it("automatically cleans discarded memory candidates after seven days", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Discard cleanup");
+    const memory = new MemoryManager(root);
+    await memory.appendCandidates([{
+      tier: "session",
+      kind: "note",
+      content: "Discarded candidate should expire.",
+      importance: 2,
+      confidence: 0.5
+    }], session, "run-cleanup", "cosia-agent");
+    const candidate = (await memory.listCandidates())[0].record;
+    expect(candidate).toBeTruthy();
+    await memory.discardCandidate(candidate!.id, "cleanup test");
+
+    const db = new DatabaseSync(join(root, "memory", "longterm.sqlite"));
+    try {
+      const record = (await memory.getCandidate(candidate!.id)).record!;
+      const oldRecord = {
+        ...record,
+        reviewedAt: "2026-01-01T00:00:00.000Z"
+      };
+      db.prepare("UPDATE memory_candidates SET record_json = ?, reviewed_at = ? WHERE id = ?")
+        .run(JSON.stringify(oldRecord), oldRecord.reviewedAt, oldRecord.id);
+    } finally {
+      db.close();
+    }
+
+    expect((await memory.listCandidates(true)).some((entry) => entry.displayId === candidate!.id)).toBe(false);
   });
 
   it("migrates JSONL candidate and promotion queues into SQLite once", async () => {
@@ -2199,7 +2238,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.19.1");
+    expect(emptyReport.version).toBe("0.22.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -2290,6 +2329,80 @@ describe("status and listing", () => {
     expect(sessionFromChoice("q", sessionList, recommendation.session)).toBe("quit");
   });
 
+  it("builds a combined review inbox for pending memory and skill candidates", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Review inbox service");
+    const memory = new MemoryManager(root);
+    memory.addMemory({
+      tier: "core",
+      kind: "note",
+      content: "Duplicate review candidate content."
+    });
+    await memory.appendCandidates([{
+      tier: "core",
+      kind: "note",
+      content: "duplicate review candidate content",
+      importance: 3,
+      confidence: 0.8
+    }], session, "run-review", "cosia-agent");
+    const [skillCandidate] = new SkillManager(root).appendCandidates([{
+      agentId: "cosia-agent",
+      skillName: "Review Inbox Skill",
+      reason: "Exercise review inbox.",
+      content: "Use this skill when testing review inbox commands.",
+      triggers: ["review inbox"]
+    }], session, "run-review", "cosia-agent");
+
+    const review = new ReviewInboxService(root);
+    const inbox = await review.list();
+    expect(inbox).toMatchObject({ totalPending: 2, memoryPending: 1, skillPending: 1 });
+    expect(inbox.items.find((item) => item.type === "memory")?.conflictCount).toBeGreaterThan(0);
+    expect(inbox.items.find((item) => item.type === "skill")?.id).toBe(skillCandidate.id);
+    expect(formatReviewInbox(inbox)).toContain("Prefer id prefixes");
+    expect((await review.resolve("1")).id).toBe(inbox.items[0].id);
+    expect((await review.resolve(skillCandidate.id.slice(0, 8))).id).toBe(skillCandidate.id);
+  });
+
+  it("previews and applies bulk discard for conflicted memory candidates", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Review bulk discard");
+    const memory = new MemoryManager(root);
+    memory.addMemory({
+      tier: "core",
+      kind: "note",
+      content: "Bulk conflict candidate content."
+    });
+    const records = await memory.appendCandidates([
+      {
+        tier: "core",
+        kind: "note",
+        content: "bulk conflict candidate content",
+        importance: 3,
+        confidence: 0.8
+      },
+      {
+        tier: "session",
+        ownerId: session.id,
+        kind: "note",
+        content: "No conflict candidate content",
+        importance: 2,
+        confidence: 0.7
+      }
+    ], session, "run-review", "cosia-agent");
+    const review = new ReviewInboxService(root);
+
+    const preview = await review.discardConflictingMemoryCandidates("bulk cleanup");
+    expect(preview).toMatchObject({ applied: false, matched: 1, discarded: 0 });
+    expect((await memory.getCandidate(records[0].id)).record?.status).toBe("pending");
+
+    const applied = await review.discardConflictingMemoryCandidates("bulk cleanup", { yes: true });
+    expect(applied).toMatchObject({ applied: true, matched: 1, discarded: 1 });
+    expect((await memory.getCandidate(records[0].id)).record?.status).toBe("discarded");
+    expect((await memory.getCandidate(records[1].id)).record?.status).toBe("pending");
+  });
+
   it("runs shared chat REPL commands and exits gracefully", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
@@ -2318,11 +2431,317 @@ describe("status and listing", () => {
 
     expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
     expect(formatChatHelp()).toContain("/context status");
+    expect(formatChatHelp()).toContain("/review discard-conflicts");
     expect(output.read()).toContain("COSIA chat commands");
     expect(output.read()).toContain(`Session: ${session.id}`);
     expect(output.read()).toContain("# SESSION SUMMARY");
     expect(output.read()).toContain("Context:");
     expect(errorOutput.read()).toContain("Type /help for commands");
+  });
+
+  it("handles review inbox commands inside the shared chat REPL", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Review REPL test");
+    const memory = new MemoryManager(root);
+    memory.addMemory({
+      tier: "core",
+      kind: "note",
+      content: "Memory review conflict content."
+    });
+    const [memoryCandidate] = await memory.appendCandidates([{
+      tier: "core",
+      kind: "note",
+      content: "memory review conflict content",
+      importance: 3,
+      confidence: 0.8
+    }], session, "run-review", "cosia-agent");
+    const [skillCandidate] = new SkillManager(root).appendCandidates([{
+      agentId: "cosia-agent",
+      skillName: "Review Command Skill",
+      reason: "Exercise review commands.",
+      content: "Use this skill to test review command preview.",
+      triggers: ["review command"]
+    }], session, "run-review", "cosia-agent");
+    const input = new PassThrough();
+    const output = captureWritable();
+    const errorOutput = captureWritable();
+
+    const resultPromise = runChatRepl({
+      workspaceRoot: root,
+      sessionId: session.id,
+      providerId: "mock",
+      input,
+      output: output.stream,
+      errorOutput: errorOutput.stream
+    });
+    const feedInput = async () => {
+      for (const line of [
+        "/review",
+        "/review memory",
+        "/review skill",
+        "/review show 1",
+        `/review show ${skillCandidate.id.slice(0, 8)}`,
+        `/review conflicts ${memoryCandidate.id.slice(0, 8)}`,
+        `/review conflicts ${skillCandidate.id.slice(0, 8)}`,
+        `/review promote ${memoryCandidate.id.slice(0, 8)}`,
+        `/review promote ${memoryCandidate.id.slice(0, 8)} --replace 1`,
+        `/review promote ${skillCandidate.id.slice(0, 8)}`,
+        `/review discard ${skillCandidate.id.slice(0, 8)} --reason "not useful"`,
+        `/review discard-conflicts --reason "bulk cleanup"`,
+        "/review next",
+        "/exit"
+      ]) {
+        input.write(`${line}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      input.end();
+    };
+    await feedInput();
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
+    const text = output.read();
+    expect(text).toContain("Review Inbox");
+    expect(text).toContain("Skill candidates do not have memory conflicts.");
+    expect(text).toContain("--replace 1");
+    expect(text).toContain("Memory candidate conflicts detected");
+    expect(text).toContain("Promoted memory candidate");
+    expect(text).toContain("Skill file:");
+    expect(text).toContain("Discarded skill candidate");
+    expect(text).toContain("Tip: indexes are temporary");
+    expect((await new MemoryManager(root).getCandidate(memoryCandidate.id)).record?.status).toBe("promoted");
+    expect(new SkillManager(root).getCandidate(skillCandidate.id).record.status).toBe("discarded");
+  });
+
+  it("parses hash natural command arguments deterministically", () => {
+    expect(parseHashCommand("#show status")).toMatchObject({
+      type: "matched",
+      commandId: "status.show"
+    });
+    expect(parseHashCommand("#show review")).toMatchObject({
+      type: "matched",
+      commandId: "review.list"
+    });
+    expect(parseHashCommand("#리뷰 3번 디스카드해 이유는 중복")).toMatchObject({
+      type: "matched",
+      commandId: "review.discard",
+      args: { target: "3", reason: "중복" }
+    });
+    expect(parseHashCommand("#리뷰 b5038e0e 디스카드해 이유는 중복")).toMatchObject({
+      type: "matched",
+      commandId: "review.discard",
+      args: { target: "b5038e0e", reason: "중복" }
+    });
+    expect(parseHashCommand("#메모리 검색 required provider")).toMatchObject({
+      type: "matched",
+      commandId: "memory.search",
+      args: { query: "required provider" }
+    });
+    expect(parseHashCommand("#memory search required provider")).toMatchObject({
+      type: "matched",
+      commandId: "memory.search",
+      args: { query: "required provider" }
+    });
+    expect(parseHashCommand("#컨플릭트 메모리 전부 디스카드해")).toMatchObject({
+      type: "needs_input",
+      commandId: "review.discard_conflicts"
+    });
+    expect(parseHashCommand("#컨플릭트 메모리 전부 디스카드해 사유는 테스트 중복")).toMatchObject({
+      type: "matched",
+      commandId: "review.discard_conflicts",
+      args: { reason: "테스트 중복" }
+    });
+    expect(parseHashCommand("#리뷰 3번 디스카드해 사유는 중복")).toMatchObject({
+      type: "matched",
+      commandId: "review.discard",
+      args: { target: "3", reason: "중복" }
+    });
+    expect(parseHashCommand("#discard all conflicting memories because duplicate")).toMatchObject({
+      type: "matched",
+      commandId: "review.discard_conflicts",
+      args: { reason: "duplicate" }
+    });
+    expect(parseHashCommand("#메모리 정리")).toMatchObject({
+      type: "ambiguous"
+    });
+  });
+
+  it("retrieves command candidates and validates LLM command interpreter output", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    const candidates = retrieveCommandCandidates("#please discard duplicate conflicting memories because duplicate");
+    expect(candidates.map((candidate) => candidate.commandId)).toContain("review.discard_conflicts");
+
+    let capturedPrompt = "";
+    const interpreted = await interpretHashCommand({
+      input: "#please discard duplicate conflicting memories because duplicate",
+      candidates,
+      workspaceRoot: root,
+      providerId: "mock",
+      policy,
+      sessionId: "session-test",
+      completePrompt: async (prompt) => {
+        capturedPrompt = prompt;
+        return JSON.stringify({
+          type: "matched",
+          commandId: "review.discard_conflicts",
+          confidence: "high",
+          args: { reason: "duplicate" }
+        });
+      }
+    });
+
+    expect(interpreted).toMatchObject({
+      type: "matched",
+      commandId: "review.discard_conflicts",
+      args: { reason: "duplicate" }
+    });
+    expect(capturedPrompt).toContain("Return ONLY raw JSON.");
+    expect(capturedPrompt).toContain("Do not wrap in ```json.");
+    expect(capturedPrompt).toContain("review.discard_conflicts");
+    expect(capturedPrompt).not.toContain("doctor.reset");
+
+    expect(validateInterpreterResult(JSON.stringify({
+      type: "matched",
+      commandId: "doctor.reset",
+      confidence: "high",
+      args: {}
+    }), candidates)).toMatchObject({
+      type: "ambiguous"
+    });
+  });
+
+  it("retries malformed command interpreter JSON once", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    const candidates = retrieveCommandCandidates("#please show current workspace status");
+    let attempts = 0;
+    let retryPrompt = "";
+    const interpreted = await interpretHashCommand({
+      input: "#please show current workspace status",
+      candidates,
+      workspaceRoot: root,
+      providerId: "mock",
+      policy,
+      sessionId: "session-test",
+      completePrompt: async (prompt) => {
+        attempts += 1;
+        retryPrompt = prompt;
+        return attempts === 1
+          ? "not-json"
+          : JSON.stringify({
+              type: "matched",
+              commandId: "status.show",
+              confidence: "high",
+              args: {}
+            });
+      }
+    });
+
+    expect(attempts).toBe(2);
+    expect(retryPrompt).toContain("You returned invalid JSON.");
+    expect(retryPrompt).toContain("not-json");
+    expect(interpreted).toMatchObject({
+      type: "matched",
+      commandId: "status.show"
+    });
+  });
+
+  it("handles hash natural commands with pending preview, cancellation, expiration, and escape", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Hash command REPL test");
+    const memory = new MemoryManager(root);
+    memory.addMemory({
+      tier: "core",
+      kind: "note",
+      content: "Hash command conflict content."
+    });
+    const [candidate] = await memory.appendCandidates([{
+      tier: "core",
+      kind: "note",
+      content: "hash command conflict content",
+      importance: 3,
+      confidence: 0.8
+    }], session, "run-hash", "cosia-agent");
+    const input = new PassThrough();
+    const output = captureWritable();
+    const errorOutput = captureWritable();
+    let fakeNow = Date.parse("2026-05-20T00:00:00.000Z");
+
+    const resultPromise = runChatRepl({
+      workspaceRoot: root,
+      sessionId: session.id,
+      providerId: "mock",
+      input,
+      output: output.stream,
+      errorOutput: errorOutput.stream,
+      now: () => fakeNow
+    });
+    const waitForOutput = async (needle: string) => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (output.read().includes(needle)) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      throw new Error(`Timed out waiting for output: ${needle}`);
+    };
+    const waitForOutputCount = async (needle: string, count: number) => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const matches = output.read().split(needle).length - 1;
+        if (matches >= count) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      throw new Error(`Timed out waiting for ${count} outputs: ${needle}`);
+    };
+    const feedInput = async () => {
+      for (const line of [
+        "#상태 보여줘",
+        "#show status",
+        "#리뷰 보여줘",
+        "#memory search required provider",
+        "#컨플릭트 메모리 전부 디스카드해 이유는 중복",
+        "#대기중인 작업 보여줘",
+        "#취소",
+        "#컨플릭트 메모리 전부 디스카드해 이유는 중복"
+      ]) {
+        input.write(`${line}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      await waitForOutput("Pending command cancelled.");
+      await waitForOutputCount("Run #적용 to proceed", 2);
+      fakeNow += 5 * 60 * 1000 + 1;
+      input.write("#적용\n");
+      await waitForOutput("[EXPIRED]");
+      for (const line of [
+        "#컨플릭트 메모리 전부 디스카드해 이유는 중복",
+        "#적용",
+        "\\#상태 보여줘",
+        "/exit"
+      ]) {
+        input.write(`${line}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      input.end();
+    };
+    await feedInput();
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({ turns: 1, endedBy: "exit" });
+    const text = output.read();
+    expect(text).toContain("COSIA");
+    expect(text).toContain("Review Inbox");
+    expect(text).toContain("[PREVIEW]");
+    expect(text).toContain("Pending command: review.discard_conflicts");
+    expect(text).toContain("[EXPIRED]");
+    expect(text).toContain("[SUCCESS] Discarded 1 memory candidates.");
+    expect(text).toContain("Mock response");
+    expect((await new MemoryManager(root).getCandidate(candidate.id)).record?.status).toBe("discarded");
+    expect(formatChatHelp()).toContain("Natural commands");
   });
 
   it("prints MVP acceptance checklist and documents expected outcomes", async () => {
@@ -2331,12 +2750,228 @@ describe("status and listing", () => {
     expect(checklist).toContain("[ ] 1. Environment and build");
     expect(checklist).toContain("mock: regression only");
     expect(checklist).toContain("codex-cli: required MVP acceptance provider");
+    expect(checklist).toContain("[ ] 8. Review inbox");
     expect(checklist).toContain("Command:");
     expect(checklist).toContain("Expected:");
 
     const acceptance = await readFile(join(process.cwd(), "MVP_ACCEPTANCE.md"), "utf8");
     expect(acceptance).toContain("codex-cli");
     expect(acceptance).toContain("mock");
-    expect((acceptance.match(/Expected Outcome:/g) ?? []).length).toBeGreaterThanOrEqual(10);
+    expect(acceptance).toContain("Review Inbox");
+    expect((acceptance.match(/Expected Outcome:/g) ?? []).length).toBeGreaterThanOrEqual(11);
+  });
+
+  it("repairs Telegram connector policy defaults and checks disabled/missing states", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    expect(policy.connectors.telegram).toMatchObject({
+      enabled: false,
+      tokenEnv: "TELEGRAM_BOT_TOKEN",
+      allowedChatIds: [],
+      defaultProvider: "codex-cli"
+    });
+
+    expect(await checkTelegramGateway(root)).toMatchObject({
+      ok: false,
+      reason: "disabled"
+    });
+
+    await new PolicyManager(root).savePolicy({
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true
+        }
+      }
+    });
+    expect(await checkTelegramGateway(root)).toMatchObject({
+      ok: false,
+      reason: "missing_allowed_chat_ids"
+    });
+
+    const enabledPolicy = await new PolicyManager(root).loadPolicy();
+    await new PolicyManager(root).savePolicy({
+      ...enabledPolicy,
+      connectors: {
+        telegram: {
+          ...enabledPolicy.connectors.telegram,
+          allowedChatIds: ["123"]
+        }
+      }
+    });
+
+    const previousToken = process.env.TELEGRAM_BOT_TOKEN;
+    process.env.TELEGRAM_BOT_TOKEN = "bad-token";
+    try {
+      expect(await checkTelegramGateway(root, {
+        fetchImpl: async () => jsonResponse({
+          ok: false,
+          error_code: 404,
+          description: "Not Found"
+        }, 404)
+      })).toMatchObject({
+        ok: false,
+        reason: "auth_failed"
+      });
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.TELEGRAM_BOT_TOKEN;
+      } else {
+        process.env.TELEGRAM_BOT_TOKEN = previousToken;
+      }
+    }
+  });
+
+  it("processes Telegram updates with allowlist checks, state, chunks, and hash commands", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          defaultProvider: "mock",
+          messageChunkChars: 120
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {},
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 999 },
+        text: "/status"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Unauthorized");
+    expect(state.chats["999"]).toBeUndefined();
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        text: "#상태 보여줘"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(state.chats["123"]).toBeDefined();
+    expect(sent.some((message) => message.chatId === "123" && message.text.includes("COSIA"))).toBe(true);
+
+    const sentBeforeBatch = sent.length;
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        text: "/help\n/sessions\n#상태 보여줘"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    const batchMessages = sent.slice(sentBeforeBatch).map((message) => message.text).join("\n");
+    expect(batchMessages).toContain("COSIA Telegram Gateway commands");
+    expect(batchMessages).toContain("No sessions. Use /new <goal>.");
+    expect(batchMessages).toContain("COSIA");
+
+    const chunks = chunkTelegramMessage(`one\n\n${"x".repeat(80)}\n${"y".repeat(80)}`, 90);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[1]).toContain("[continued 2/");
+  });
+
+  it("runs Telegram long polling once, uses stored offset, and persists next offset", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    await policyManager.savePolicy({
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          defaultProvider: "mock"
+        }
+      }
+    });
+    await saveTelegramGatewayState(root, {
+      nextOffset: 10,
+      chats: {},
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    });
+    const previousToken = process.env.TELEGRAM_BOT_TOKEN;
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      requests.push({ url: String(url), body });
+      if (String(url).endsWith("/getMe")) {
+        return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getUpdates")) {
+        return jsonResponse({
+          ok: true,
+          result: [{
+            update_id: 11,
+            message: {
+              chat: { id: 123 },
+              text: "/status"
+            }
+          }]
+        });
+      }
+      if (String(url).endsWith("/sendMessage")) {
+        return jsonResponse({ ok: true, result: { message_id: 1 } });
+      }
+      return jsonResponse({ ok: false, description: "unknown" }, 404);
+    };
+    try {
+      await startTelegramGateway(root, {
+        providerId: "mock",
+        once: true,
+        fetchImpl
+      });
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.TELEGRAM_BOT_TOKEN;
+      } else {
+        process.env.TELEGRAM_BOT_TOKEN = previousToken;
+      }
+    }
+
+    const getUpdatesRequest = requests.find((request) => request.url.endsWith("/getUpdates"));
+    expect(getUpdatesRequest?.body.offset).toBe(10);
+    const state = await loadTelegramGatewayState(root);
+    expect(state.nextOffset).toBe(12);
+    expect(state.chats["123"]).toBeDefined();
+    expect(await pathExists(join(root, ".cosia-gateway", "telegram", "process.lock"))).toBe(false);
+  });
+
+  it("releases session locks when async work rejects", async () => {
+    const root = await initializedWorkspace();
+    await expect(withSessionLock(root, "session_lock_test", {
+      owner: "test"
+    }, async () => {
+      throw new Error("boom");
+    })).rejects.toThrow("boom");
+    expect(await pathExists(sessionLockPath(root, "session_lock_test"))).toBe(false);
   });
 });

@@ -16,11 +16,13 @@ import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import type { PromptManifest } from "./runtime/prompt_builder.js";
 import { runChatRepl } from "./runtime/repl.js";
+import { formatReviewInbox, ReviewInboxService } from "./runtime/review_inbox.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
 import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
+import { checkTelegramGateway, formatGatewayStatus, formatTelegramCheck, startTelegramGateway } from "./runtime/telegram_gateway.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
@@ -133,6 +135,42 @@ providerCommand
     });
   });
 
+const gateway = program.command("gateway").description("Manage COSIA external gateway connectors.");
+
+gateway
+  .command("status")
+  .description("Show gateway connector state.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      console.log(await formatGatewayStatus(workspaceRoot));
+    });
+  });
+
+const telegram = gateway.command("telegram").description("Manage the Telegram remote console connector.");
+
+telegram
+  .command("check")
+  .description("Check Telegram connector policy, token env, allowlist, and getMe.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      console.log(formatTelegramCheck(await checkTelegramGateway(workspaceRoot)));
+    });
+  });
+
+telegram
+  .command("start")
+  .option("--provider <provider>", "Provider for Telegram chat messages.")
+  .option("--once", "Process one update batch and exit.", false)
+  .description("Start Telegram long polling gateway.")
+  .action(async (options: { provider?: string; once: boolean }) => {
+    await main(async (workspaceRoot) => {
+      await startTelegramGateway(workspaceRoot, {
+        providerId: options.provider,
+        once: options.once
+      });
+    });
+  });
+
 const mvp = program.command("mvp").description("MVP acceptance helpers.");
 
 mvp
@@ -140,6 +178,21 @@ mvp
   .description("Print the manual COSIA MVP acceptance checklist.")
   .action(() => {
     console.log(formatMvpChecklist());
+  });
+
+program
+  .command("review")
+  .option("--memory", "Show pending memory candidates only.", false)
+  .option("--skill", "Show pending skill candidates only.", false)
+  .description("Show the read-only memory and skill review inbox.")
+  .action(async (options: { memory: boolean; skill: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (options.memory && options.skill) {
+        throw new Error("Use at most one filter: --memory or --skill.");
+      }
+      const filter = options.memory ? "memory" : options.skill ? "skill" : "all";
+      console.log(formatReviewInbox(await new ReviewInboxService(workspaceRoot).list(filter)));
+    });
   });
 
 program
@@ -1426,6 +1479,9 @@ program
       console.log(`\nSelected session: ${selectedSession.id}`);
       console.log(`Provider: ${report.providerId}`);
       console.log(`Assigned agent: ${selectedSession.assignedAgentId ?? "none"}`);
+      if (report.pendingCandidatesCount > 0 || report.pendingSkillCandidatesCount > 0) {
+        console.log(`Review inbox: ${report.pendingCandidatesCount} memory, ${report.pendingSkillCandidatesCount} skill pending. In chat, use /review.`);
+      }
       const chatCommand = `cosia chat --session ${selectedSession.id} --provider ${report.providerId}`;
       if (!enterChat) {
         console.log(`Next: ${chatCommand}`);
@@ -1463,17 +1519,20 @@ program
   .description("Run a session turn.")
   .action(async (options: { session: string; prompt: string; agent?: string; provider?: string; providerTimeoutMs?: string; approveOverwrite: boolean; requireTools: boolean; skill?: string[] }) => {
     await main(async (workspaceRoot) => {
-      const content = await runSession(workspaceRoot, {
-        sessionId: options.session,
-        prompt: options.prompt,
-        agentId: options.agent,
-        providerId: options.provider,
-        providerTimeoutMs: options.providerTimeoutMs ? Number.parseInt(options.providerTimeoutMs, 10) : undefined,
-        approveOverwriteFiles: options.approveOverwrite,
-        requireTools: options.requireTools,
-        manualSkillIds: options.skill,
-        onEvent: (message) => console.error(`[cosia] ${message}`)
-      });
+      const { withSessionLock } = await import("./runtime/gateway_locks.js");
+      const content = await withSessionLock(workspaceRoot, options.session, {
+        owner: "cli:run"
+      }, async () => runSession(workspaceRoot, {
+          sessionId: options.session,
+          prompt: options.prompt,
+          agentId: options.agent,
+          providerId: options.provider,
+          providerTimeoutMs: options.providerTimeoutMs ? Number.parseInt(options.providerTimeoutMs, 10) : undefined,
+          approveOverwriteFiles: options.approveOverwrite,
+          requireTools: options.requireTools,
+          manualSkillIds: options.skill,
+          onEvent: (message) => console.error(`[cosia] ${message}`)
+        }));
       console.log(content);
     });
   });

@@ -6,3 +6,4 @@ memory/*
 sessions/*
 *.log
 Docs/
+.cosia-gateway/

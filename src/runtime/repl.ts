@@ -1,9 +1,23 @@
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 import { AgentManager } from "./agent_manager.js";
+import {
+  applyPendingCommand,
+  executeReadOnlyCommand,
+  formatAmbiguousCommand,
+  formatNeedsInput,
+  formatPendingCommand,
+  isPendingExpired,
+  previewMutationCommand,
+  type PendingCommand
+} from "./command_catalog.js";
+import { interpretHashCommand } from "./command_interpreter.js";
+import { parseHashCommand, retrieveCommandCandidates } from "./command_intent.js";
+import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import { PolicyManager } from "./policy_manager.js";
 import { loadPromptStaticBlocks } from "./prompt_builder.js";
+import { formatReviewBatchDiscard, formatReviewInbox, formatReviewNext, formatReviewUpdate, ReviewInboxService, type ReviewFilter, type ReviewPromoteOptions } from "./review_inbox.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
@@ -20,6 +34,7 @@ export type ChatReplOptions = {
   input?: Readable;
   output?: Writable;
   errorOutput?: Writable;
+  now?: () => number;
 };
 
 export type ChatReplResult = {
@@ -42,6 +57,30 @@ export function formatChatHelp(): string {
     "  /skills use <id>                           Manually include a skill.",
     "  /skills drop <id>                          Remove a manually selected skill.",
     "  /skills clear                              Clear manual skill selections.",
+    "  /review                                    Show pending memory and skill review items.",
+    "  /review memory|skill                       Filter the review inbox.",
+    "  /review show <index|id>                    Show a review item. Prefer id prefixes.",
+    "  /review conflicts <index|id>               Show memory conflicts for a review item.",
+    "  /review promote <index|id> [options]       Promote memory or preview/apply skill candidates.",
+    "                                             Memory conflicts can use --replace 1 or --merge 1.",
+    "  /review discard <index|id> --reason \"...\"  Discard a review item.",
+    "  /review discard-conflicts --reason \"...\" [--yes]",
+    "                                             Preview/apply discard for all conflicted memory candidates.",
+    "  /review next                               Show the oldest pending review item.",
+    "",
+    "Natural commands:",
+    "  #상태 보여줘                              Run a COSIA status command.",
+    "  #show status                              English hash commands are supported.",
+    "  #리뷰 보여줘                              Show the review inbox.",
+    "  #리뷰 3번 디스카드해 이유는 중복          Preview discarding a review item.",
+    "  #discard all conflicting memories because duplicate",
+    "                                             Preview discarding conflicted memory candidates.",
+    "  #컨플릭트 메모리 전부 디스카드해 이유는 중복",
+    "                                             Preview discarding conflicted memory candidates.",
+    "  #적용                                     Apply the current pending preview.",
+    "  #취소                                     Cancel the current pending preview.",
+    "  #대기중인 작업 보여줘                     Show the pending preview and remaining time.",
+    "  \\#해시로 시작하는 문장                    Send a leading # to the model conversation.",
     "  /exit                                      Leave chat."
   ].join("\n");
 }
@@ -50,6 +89,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const errorOutput = options.errorOutput ?? process.stderr;
+  const now = options.now ?? (() => Date.now());
   const sessions = new SessionManager(options.workspaceRoot);
   const session = await sessions.loadSession(options.sessionId);
   await sessions.ensureSessionSupportFiles(session.id);
@@ -68,16 +108,19 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
     : options.providerId;
   const memory = new MemoryManager(options.workspaceRoot);
   const skills = new SkillManager(options.workspaceRoot);
+  const reviewInbox = new ReviewInboxService(options.workspaceRoot);
   await memory.writeReferenceMemory(session, session.goal, agent.id);
   const staticBlocks = await loadPromptStaticBlocks({ workspaceRoot: options.workspaceRoot, agent, session });
   const history: Array<{ prompt: string; response: string }> = [];
   let lastPrompt = session.goal;
   const manualSkills = new Set(options.manualSkillIds ?? []);
+  let pendingCommand: PendingCommand | undefined;
   const rl = createInterface({ input, output });
   let endedBy: ChatReplResult["endedBy"] = "eof";
 
   writeLine(errorOutput, `[cosia] chat started: ${session.id}`);
   writeLine(errorOutput, "[cosia] Type /help for commands. Type /exit to leave.");
+  writeLine(errorOutput, "[cosia] Use # for natural runtime commands, e.g. #상태 보여줘.");
   const lineIterator = rl[Symbol.asyncIterator]();
   try {
     while (true) {
@@ -88,7 +131,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         break;
       }
       const line = next.value;
-      const prompt = line.trim();
+      let prompt = line.trim();
       if (!prompt) {
         continue;
       }
@@ -224,25 +267,140 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         writeLine(errorOutput, "[cosia] cleared manual skills");
         continue;
       }
+      if (prompt === "/review" || prompt.startsWith("/review ")) {
+        try {
+          await handleReviewCommand(prompt, reviewInbox, output);
+        } catch (error) {
+          writeLine(output, (error as Error).message);
+        }
+        continue;
+      }
+      if (prompt.startsWith("\\#")) {
+        prompt = prompt.slice(1);
+      } else if (prompt.startsWith("#")) {
+        let intent = parseHashCommand(prompt);
+        const commandContext = {
+          workspaceRoot: options.workspaceRoot,
+          session,
+          agent,
+          providerId,
+          policy,
+          sessions,
+          memory,
+          skills,
+          reviewInbox,
+          now
+        };
+        if (intent.type === "no_match") {
+          const candidates = retrieveCommandCandidates(prompt);
+          if (candidates.length === 0) {
+            writeLine(output, "[BLOCKED] Natural command not recognized.");
+            writeLine(output, "Try #상태 보여줘, #show status, #리뷰 보여줘, or type /help.");
+            continue;
+          }
+          try {
+            intent = await interpretHashCommand({
+              input: prompt,
+              candidates,
+              workspaceRoot: options.workspaceRoot,
+              providerId,
+              policy,
+              sessionId: session.id,
+              providerTimeoutMs: options.providerTimeoutMs
+            });
+          } catch (error) {
+            writeLine(output, `[FAILED] Command interpreter failed: ${(error as Error).message}`);
+            writeLine(output, "Try an exact slash command like /review, or a direct hash command like #상태 보여줘.");
+            continue;
+          }
+        }
+        if (intent.type === "needs_input") {
+          writeLine(output, formatNeedsInput(intent.commandId, intent.missing, intent.hint));
+          continue;
+        }
+        if (intent.type === "ambiguous") {
+          writeLine(output, formatAmbiguousCommand(intent.candidates, intent.hint));
+          continue;
+        }
+        if (intent.type === "no_match") {
+          writeLine(output, "[BLOCKED] Natural command not recognized.");
+          writeLine(output, "Try #상태 보여줘, #show status, #리뷰 보여줘, or type /help.");
+          continue;
+        }
+        if (intent.commandId === "pending.apply") {
+          if (!pendingCommand) {
+            writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
+            continue;
+          }
+          if (isPendingExpired(pendingCommand, now)) {
+            pendingCommand = undefined;
+            writeLine(output, "[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.");
+            continue;
+          }
+          try {
+            writeLine(output, await withSessionLock(options.workspaceRoot, session.id, {
+              owner: "cli:chat"
+            }, async () => applyPendingCommand(pendingCommand!, commandContext)));
+          } catch (error) {
+            writeLine(output, `[FAILED] ${(error as Error).message}`);
+          }
+          pendingCommand = undefined;
+          continue;
+        }
+        if (intent.commandId === "pending.cancel") {
+          pendingCommand = undefined;
+          writeLine(output, "[SUCCESS] Pending command cancelled.");
+          continue;
+        }
+        if (intent.commandId === "pending.show") {
+          if (!pendingCommand) {
+            writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
+            continue;
+          }
+          if (isPendingExpired(pendingCommand, now)) {
+            pendingCommand = undefined;
+            writeLine(output, "[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.");
+            continue;
+          }
+          writeLine(output, formatPendingCommand(pendingCommand, now));
+          continue;
+        }
+        const readOnlyOutput = await executeReadOnlyCommand(intent, commandContext);
+        if (readOnlyOutput !== undefined) {
+          writeLine(output, readOnlyOutput);
+          continue;
+        }
+        const preview = await previewMutationCommand(intent, commandContext);
+        if (preview) {
+          pendingCommand = preview.pending;
+          writeLine(output, preview.output);
+          continue;
+        }
+        writeLine(output, "[BLOCKED] This natural command is recognized but not executable yet.");
+        writeLine(output, "Use the equivalent slash or CLI command shown in /help.");
+        continue;
+      }
 
       let shouldRefreshMemory = false;
-      const content = await runSession(options.workspaceRoot, {
-        sessionId: session.id,
-        prompt,
-        agentId: agent.id,
-        providerId,
-        providerTimeoutMs: options.providerTimeoutMs,
-        approveOverwriteFiles: options.approveOverwriteFiles,
-        requireTools: options.requireTools,
-        promptStaticBlocks: staticBlocks,
-        manualSkillIds: [...manualSkills],
-        refreshReferenceMemory: false,
-        refreshReferenceMemoryAfterRun: false,
-        onMemoryReview: (summary) => {
-          shouldRefreshMemory = summary.autoPromoted > 0;
-        },
-        onEvent: (message) => writeLine(errorOutput, `[cosia] ${message}`)
-      });
+      const content = await withSessionLock(options.workspaceRoot, session.id, {
+        owner: "cli:chat"
+      }, async () => runSession(options.workspaceRoot, {
+          sessionId: session.id,
+          prompt,
+          agentId: agent.id,
+          providerId,
+          providerTimeoutMs: options.providerTimeoutMs,
+          approveOverwriteFiles: options.approveOverwriteFiles,
+          requireTools: options.requireTools,
+          promptStaticBlocks: staticBlocks,
+          manualSkillIds: [...manualSkills],
+          refreshReferenceMemory: false,
+          refreshReferenceMemoryAfterRun: false,
+          onMemoryReview: (summary) => {
+            shouldRefreshMemory = summary.autoPromoted > 0;
+          },
+          onEvent: (message) => writeLine(errorOutput, `[cosia] ${message}`)
+        }));
       history.push({ prompt, response: content });
       lastPrompt = prompt;
       writeLine(output, content);
@@ -255,6 +413,81 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
     rl.close();
   }
   return { turns: history.length, endedBy };
+}
+
+async function handleReviewCommand(prompt: string, reviewInbox: ReviewInboxService, output: Writable): Promise<void> {
+  if (prompt === "/review" || prompt === "/review memory" || prompt === "/review skill") {
+    const filter: ReviewFilter = prompt === "/review memory" ? "memory" : prompt === "/review skill" ? "skill" : "all";
+    writeLine(output, formatReviewInbox(await reviewInbox.list(filter)));
+    return;
+  }
+  if (prompt === "/review next") {
+    const inbox = await reviewInbox.list("all");
+    writeLine(output, formatReviewNext(inbox.items[0]));
+    return;
+  }
+  if (prompt.startsWith("/review show ")) {
+    const ref = prompt.slice("/review show ".length).trim();
+    writeLine(output, await reviewInbox.formatItemDetail(ref));
+    return;
+  }
+  if (prompt.startsWith("/review conflicts ")) {
+    const ref = prompt.slice("/review conflicts ".length).trim();
+    writeLine(output, await reviewInbox.formatConflicts(ref));
+    return;
+  }
+  if (prompt.startsWith("/review promote ")) {
+    const tokens = parseCommandLineArgs(prompt.slice("/review promote ".length));
+    const ref = tokens.find((token) => !token.startsWith("--"));
+    if (!ref) {
+      throw new Error("Usage: /review promote <index|id> [--yes] [--force] [--replace <memory-id>] [--merge <memory-id>] [--content \"<content>\"] [--prefer-for <agent-id>] [--confirm-high-risk \"<phrase>\"]");
+    }
+    const flags = parseFlagArgs(tokens);
+    const options: ReviewPromoteOptions = {
+      yes: flags.yes === "true",
+      force: flags.force === "true",
+      replaceMemoryId: flags.replace,
+      mergeMemoryId: flags.merge,
+      mergeContent: flags.content,
+      preferFor: flags["prefer-for"],
+      confirmHighRisk: flags["confirm-high-risk"]
+    };
+    const result = await reviewInbox.promote(ref, options);
+    writeLine(output, result.output);
+    writeLine(output, formatReviewUpdate(result.inbox));
+    return;
+  }
+  if (prompt.startsWith("/review discard-conflicts")) {
+    const tokens = parseCommandLineArgs(prompt.slice("/review discard-conflicts".length));
+    const flags = parseFlagArgs(tokens);
+    if (!flags.reason) {
+      throw new Error("Usage: /review discard-conflicts --reason \"<reason>\" [--yes]");
+    }
+    const result = await reviewInbox.discardConflictingMemoryCandidates(flags.reason, {
+      yes: flags.yes === "true"
+    });
+    writeLine(output, formatReviewBatchDiscard(result));
+    if (result.applied) {
+      writeLine(output, formatReviewUpdate(result.inbox));
+    }
+    return;
+  }
+  if (prompt.startsWith("/review discard ")) {
+    const tokens = parseCommandLineArgs(prompt.slice("/review discard ".length));
+    const ref = tokens.find((token) => !token.startsWith("--"));
+    if (!ref) {
+      throw new Error("Usage: /review discard <index|id> --reason \"<reason>\"");
+    }
+    const flags = parseFlagArgs(tokens);
+    if (!flags.reason) {
+      throw new Error("Usage: /review discard <index|id> --reason \"<reason>\"");
+    }
+    const result = await reviewInbox.discard(ref, flags.reason);
+    writeLine(output, result.output);
+    writeLine(output, formatReviewUpdate(result.inbox));
+    return;
+  }
+  throw new Error(`Unknown review command. Try /review or /help: ${prompt}`);
 }
 
 function writeLine(stream: Writable, value = ""): void {

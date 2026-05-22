@@ -144,6 +144,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         for (const line of formatMemoryReviewSummary(summary).split(/\r?\n/).slice(1)) {
           options.onEvent?.(line);
         }
+        options.onEvent?.("review: use /review in chat or `cosia review`.");
       }
       const skillCandidates = skills.appendCandidates(output.step.skillCandidates, session, runId, agent.id);
       if (skillCandidates.length) {
@@ -151,6 +152,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         for (const candidate of skillCandidates) {
           options.onEvent?.(`skill candidate: ${candidate.id.slice(0, 8)} ${candidate.riskLevel} ${candidate.agentId}/${candidate.skillId}`);
         }
+        options.onEvent?.("review: use /review in chat or `cosia review`.");
       }
       break;
     }

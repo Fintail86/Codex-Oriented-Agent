@@ -1,10 +1,10 @@
-# COSIA v0.19.1
+# COSIA v0.21.1
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.19.1 polishes the MVP UX Foundation: `status` is the home view, `doctor` diagnoses and safely repairs/reset runtime state, and `start` now enters the same full chat REPL as `cosia chat`.
+v0.21.1 polishes hash natural commands in chat: exact `/review` commands remain canonical, high-confidence `#상태 보여줘` / `#show status` commands run immediately, broader `#` requests can be interpreted by the active provider against a limited command shortlist, and ordinary text still goes to the model conversation.
 
 ## Requirements
 
@@ -375,14 +375,93 @@ cosia session context compact <session-id> --keep-last 5 --reason "Summary captu
 /skills use <skill-id>
 /skills drop <skill-id>
 /skills clear
+#상태 보여줘
+#리뷰 보여줘
+#리뷰 3번 디스카드해 이유는 중복
+#컨플릭트 메모리 전부 디스카드해 이유는 중복
+#적용
+#취소
+\#해시로 시작하는 일반 대화
 /exit
 ```
+
+`/` commands are exact REPL commands. `#` commands are deterministic natural runtime commands: read-only commands execute immediately, while mutating commands create a five-minute `[PREVIEW]` pending action that must be applied with `#적용` or cancelled with `#취소`. Ordinary text without `#` is sent to the configured model provider. Prefix `\#` when a model prompt should literally start with `#`.
 
 Chat history is durable through `CONTEXT_MEMORY.md`; the in-process REPL history is only a display/cache aid. `REF_MEMORY.md` is generated once when chat starts, then refreshed by `/memory refresh` or after memory auto-promotion. `SESSION_SUMMARY.md` is included in prompt assembly and can be updated manually or by explicit `--from-context` summary preview/apply.
 
 `context compact` is preview-first. It splits `CONTEXT_MEMORY.md` only on `## Run ...` headings, keeps the newest run blocks, and moves older whole run blocks into `CONTEXT_ARCHIVE.md`. Use `--yes` to apply. By default, compaction is blocked while `SESSION_SUMMARY.md` is still the placeholder; pass `--allow-empty-summary` only when intentionally archiving without a summary.
 
 Manual skills selected with `--skill` or `/skills use` are included even when they have no triggers. Trigger-matched skills are selected automatically from the global skill toolbox, then biased by the current agent's preferences and capped by the prompt budget.
+
+## Review Inbox
+
+Pending memory and skill candidates can be reviewed from the shared chat REPL:
+
+```text
+/review
+/review memory
+/review skill
+/review show <id-prefix>
+/review conflicts <id-prefix>
+/review promote <id-prefix> --replace 1
+/review promote <id-prefix> --yes
+/review discard <id-prefix> --reason "Not useful"
+/review discard-conflicts --reason "Duplicate mock candidates" --yes
+/review next
+```
+
+The inbox shows temporary numeric indexes and stable id prefixes. Prefer id prefixes in commands because indexes can shift after a promote or discard. For memory conflicts, `/review conflicts <id-prefix>` numbers the target memories so a follow-up can use `--replace 1` or `--merge 1 --content "<merged content>"` instead of typing a full target memory id.
+
+`cosia review`, `cosia review --memory`, and `cosia review --skill` print the same pending queue as read-only CLI summaries. Discarded memory candidates are retained for seven days for traceability, then automatically cleaned when the candidate queue is read.
+
+The chat REPL also accepts hash natural commands for the common review flow:
+
+```text
+#리뷰 보여줘
+#컨플릭트 메모리 전부 디스카드해 이유는 중복
+#적용
+```
+
+Hash mutation previews expire after five minutes, so re-run the hash command if `[EXPIRED]` appears.
+
+## Gateway / Telegram Remote Console
+
+Telegram is an optional Gateway connector. It does not add new model, tool, or policy permissions; it routes allowed Telegram chat messages into the existing COSIA runtime.
+
+Setup:
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN="..."
+cosia policy check --repair
+cosia gateway telegram check
+cosia gateway telegram start --provider codex-cli
+```
+
+`codex/POLICY.json` must enable the connector and list allowed chat ids:
+
+```json
+"connectors": {
+  "telegram": {
+    "enabled": true,
+    "allowedChatIds": ["123456789"]
+  }
+}
+```
+
+Useful Telegram commands:
+
+```text
+/status
+/sessions
+/use <session-id>
+/new <goal>
+/review
+/apply
+#상태 보여줘
+#리뷰 보여줘
+```
+
+The gateway stores local process, offset, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default.
 
 ## Skill Candidate Review
 

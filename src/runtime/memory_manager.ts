@@ -136,6 +136,14 @@ export type PromoteCandidateOptions = {
   mergeContent?: string;
 };
 
+export type CandidateCleanupResult = {
+  olderThanDays: number;
+  cutoff: string;
+  deleted: number;
+  retainedDiscarded: number;
+  applied: boolean;
+};
+
 export type MemoryTierPromotionMode = "promote" | "force" | "replace" | "merge" | "skill_candidate";
 
 export type MemoryTierPromotionTarget = MemoryTier | "skill_candidate";
@@ -808,6 +816,52 @@ export class MemoryManager {
     return discarded;
   }
 
+  cleanupDiscardedCandidates(options: { olderThanDays?: number; apply?: boolean } = {}): CandidateCleanupResult {
+    const olderThanDays = options.olderThanDays ?? 7;
+    const apply = options.apply ?? true;
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    this.ensureQueueStorage();
+    const db = this.open();
+    try {
+      const rows = db.prepare("SELECT id, record_json FROM memory_candidates ORDER BY created_at ASC, rowid ASC").all() as CandidateRow[];
+      const records = rows.map((row) => memoryCandidateRecordSchema.parse(JSON.parse(row.record_json)));
+      const expired = records.filter((record) => {
+        if (record.status !== "discarded") {
+          return false;
+        }
+        const referenceTime = record.reviewedAt ?? record.createdAt;
+        return referenceTime < cutoff;
+      });
+      const retainedDiscarded = records.filter((record) => record.status === "discarded").length - expired.length;
+      if (apply && expired.length) {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const statement = db.prepare("DELETE FROM memory_candidates WHERE id = ?");
+          for (const record of expired) {
+            statement.run(record.id);
+          }
+          db.exec("COMMIT");
+        } catch (error) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            // Preserve the original error.
+          }
+          throw error;
+        }
+      }
+      return {
+        olderThanDays,
+        cutoff,
+        deleted: apply ? expired.length : 0,
+        retainedDiscarded,
+        applied: apply
+      };
+    } finally {
+      db.close();
+    }
+  }
+
   async countPendingCandidates(): Promise<number> {
     return (await this.listCandidates(false)).filter((candidate) => candidate.record?.status === "pending").length;
   }
@@ -1207,6 +1261,7 @@ export class MemoryManager {
     this.ensureQueueStorage();
     const db = this.open();
     try {
+      cleanupDiscardedCandidateRows(db, 7);
       const rows = db.prepare("SELECT id, record_json FROM memory_candidates ORDER BY created_at ASC, rowid ASC").all() as CandidateRow[];
       return rows.map((row, index) => candidateToView(memoryCandidateRecordSchema.parse(JSON.parse(row.record_json)), index + 1));
     } finally {
@@ -1690,6 +1745,33 @@ function upsertCandidateRow(db: DatabaseSync, record: MemoryCandidateRecord): vo
     JSON.stringify(normalized),
     now
   );
+}
+
+function cleanupDiscardedCandidateRows(db: DatabaseSync, olderThanDays: number): number {
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+  const rows = db.prepare("SELECT id, record_json FROM memory_candidates").all() as CandidateRow[];
+  const expired = rows
+    .map((row) => memoryCandidateRecordSchema.parse(JSON.parse(row.record_json)))
+    .filter((record) => record.status === "discarded" && (record.reviewedAt ?? record.createdAt) < cutoff);
+  if (!expired.length) {
+    return 0;
+  }
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const statement = db.prepare("DELETE FROM memory_candidates WHERE id = ?");
+    for (const record of expired) {
+      statement.run(record.id);
+    }
+    db.exec("COMMIT");
+    return expired.length;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // Preserve the original error.
+    }
+    throw error;
+  }
 }
 
 function upsertPromotionRow(db: DatabaseSync, record: AutoPromotionRecord): void {

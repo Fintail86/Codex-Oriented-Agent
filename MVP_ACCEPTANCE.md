@@ -8,6 +8,30 @@ This checklist defines when COSIA's MVP is considered usable. Passing `mock` tes
 - `codex-cli`: required MVP acceptance provider.
 - `openrouter` / `openai-compatible`: optional provider acceptance.
 
+## Chat Command Layers
+
+Purpose: distinguish exact commands, natural runtime commands, and normal model conversation.
+
+Command:
+
+```text
+/review
+#상태 보여줘
+#show status
+#리뷰 3번 디스카드해 이유는 중복
+#discard all conflicting memories because duplicate
+#적용
+\#This line is sent to the model with a leading hash.
+```
+
+Expected Outcome:
+
+- `/` commands execute exact REPL commands.
+- High-confidence `#` commands run through the deterministic runtime command layer without an extra provider call.
+- Broader `#` commands are interpreted by the active provider only against a limited command shortlist.
+- Mutating `#` commands show `[PREVIEW]` and require `#적용`.
+- Normal text without `#` is sent to the configured provider.
+
 ## 1. Environment and Build
 
 Purpose: verify the machine can build and run COSIA.
@@ -186,7 +210,35 @@ Failure Hint:
 
 - If no skills exist, this step may still pass as a readable empty list; skill candidate promotion can be tested separately.
 
-## 8. Context Maintenance
+## 8. Review Inbox
+
+Purpose: verify pending memory and skill candidates can be inspected from the unified review queue.
+
+Command:
+
+```powershell
+cosia review
+cosia review --memory
+cosia review --skill
+cosia chat --session <session-id> --provider codex-cli
+# inside chat:
+# /review
+# /review next
+# /review show <id-prefix>
+```
+
+Expected Outcome:
+
+- `cosia review` prints a compact pending queue or a clear empty state.
+- Review rows include both a temporary index and a stable id prefix.
+- `/review` works inside chat without invoking the model.
+- Help text recommends id prefixes because indexes are temporary.
+
+Failure Hint:
+
+- If there are no pending candidates, create one through a mock regression run or continue after the next model-proposed candidate appears.
+
+## 9. Context Maintenance
 
 Purpose: verify long sessions can be summarized and compacted explicitly.
 
@@ -209,7 +261,7 @@ Failure Hint:
 
 - If compact is blocked, write a summary first or intentionally pass `--allow-empty-summary`.
 
-## 9. Regression Checks
+## 10. Regression Checks
 
 Purpose: verify implementation safety.
 
@@ -231,7 +283,7 @@ Failure Hint:
 
 - Fix failing regression tests before treating the MVP as accepted.
 
-## 10. Optional Provider Acceptance
+## 11. Optional Provider Acceptance
 
 Purpose: verify optional API providers when configured.
 
@@ -249,3 +301,27 @@ Expected Outcome:
 Failure Hint:
 
 - Optional provider failure does not block MVP acceptance unless the user's deployment requires that provider.
+
+## 12. Optional Telegram Gateway Acceptance
+
+Purpose: verify the remote console gateway when a Telegram bot is configured.
+
+Command:
+
+```powershell
+$env:TELEGRAM_BOT_TOKEN="..."
+cosia gateway status
+cosia gateway telegram check
+cosia gateway telegram start --provider codex-cli --once
+```
+
+Expected Outcome:
+
+- `gateway status` prints Telegram connector state and stored offset information.
+- `gateway telegram check` succeeds when `connectors.telegram.enabled=true`, `allowedChatIds` contains the Telegram chat id, and the token env is set.
+- `start --once` processes one update batch, stores the next offset, and exits without leaving a process lock.
+- Unauthorized chat ids do not reach COSIA runtime.
+
+Failure Hint:
+
+- Telegram gateway acceptance is optional for local MVP acceptance. If it fails, check `TELEGRAM_BOT_TOKEN`, `connectors.telegram.allowedChatIds`, and `.cosia-gateway/telegram/state.json`.

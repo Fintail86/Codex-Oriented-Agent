@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.19.1`
+- Policy version: `0.22.0`
 
 ## Agents
 
@@ -74,3 +74,17 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
   - `codex-cli`: type `codex-cli`, enabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `unset`, responseFormat `none`
   - `openai-compatible`: type `openai-compatible`, disabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `unset`, baseUrl `unset`, responseFormat `none`
   - `openrouter`: type `openai-compatible`, enabled, timeout `120000`, retry `1`, max prompt chars `60000`, model `google/gemini-3.5-flash`, baseUrl `set`, responseFormat `json_object`
+
+## Connectors
+
+### Telegram
+
+- Enabled: `true`
+- Token env: `TELEGRAM_BOT_TOKEN`
+- Allowed chat ids: `120274824`
+- Default provider: `codex-cli`
+- Mutations allowed: `true`
+- Dangerous commands blocked: `true`
+- Message chunk chars: `3500`
+- Poll timeout ms: `30000`
+- Max consecutive failures: `10`
