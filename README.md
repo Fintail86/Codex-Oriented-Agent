@@ -1,10 +1,10 @@
-# COSIA v0.21.1
+# COSIA v0.26.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated tools, governed memory promotion, prompt budgeting, session chat, controlled Git/NPM tools, a global skill toolbox, and a Codex CLI model provider.
 
-v0.21.1 polishes hash natural commands in chat: exact `/review` commands remain canonical, high-confidence `#상태 보여줘` / `#show status` commands run immediately, broader `#` requests can be interpreted by the active provider against a limited command shortlist, and ordinary text still goes to the model conversation.
+v0.26.0 focuses on remote review UX and operational upkeep: Telegram Gateway review shortcuts keep preview/apply gates intact, gateway state gains stronger diagnostics, discarded review candidates can be cleaned after retention, and hash-command triggers move toward language-pack based management.
 
 ## Requirements
 
@@ -408,11 +408,13 @@ Pending memory and skill candidates can be reviewed from the shared chat REPL:
 /review discard <id-prefix> --reason "Not useful"
 /review discard-conflicts --reason "Duplicate mock candidates" --yes
 /review next
+/review stats
+/review cleanup
 ```
 
 The inbox shows temporary numeric indexes and stable id prefixes. Prefer id prefixes in commands because indexes can shift after a promote or discard. For memory conflicts, `/review conflicts <id-prefix>` numbers the target memories so a follow-up can use `--replace 1` or `--merge 1 --content "<merged content>"` instead of typing a full target memory id.
 
-`cosia review`, `cosia review --memory`, and `cosia review --skill` print the same pending queue as read-only CLI summaries. Discarded memory candidates are retained for seven days for traceability, then automatically cleaned when the candidate queue is read.
+`cosia review`, `cosia review --memory`, and `cosia review --skill` print the same pending queue as read-only CLI summaries. `cosia review stats` reports pending, discarded, and cleanup-eligible items. `cosia review cleanup` is preview-first and only removes discarded candidates after the configured retention window when re-run with `--yes`; pending candidates are never auto-deleted.
 
 The chat REPL also accepts hash natural commands for the common review flow:
 
@@ -461,7 +463,20 @@ Useful Telegram commands:
 #리뷰 보여줘
 ```
 
-The gateway stores local process, offset, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default.
+Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply` or `#적용`, and stale previews are rejected if the target or conflict state changed.
+
+The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default. Use `cosia gateway status --json` for structured gateway state and `cosia gateway telegram unlock --stale-only` to remove stale process locks.
+
+## Command Trigger Packs
+
+Hash natural commands are backed by the command catalog and Korean trigger metadata. The canonical command metadata stays in source, while local override files can live under `config/`.
+
+```powershell
+cosia command triggers check
+cosia command triggers sync --locale ko
+```
+
+Trigger checks warn about short automatic triggers and duplicate triggers. User override trigger packs are intended to take precedence over built-in locale metadata as this surface grows.
 
 ## Skill Candidate Review
 
@@ -580,7 +595,8 @@ These commands execute through the same Tool Registry and Policy Engine used by 
 
 ## Roadmap
 
-- v0.17: MVP acceptance polish and release checklist.
+- v0.26: Remote review UX, gateway reliability, review cleanup, and command trigger pack groundwork.
+- v0.27 decision checkpoint: keep polishing `status/start/chat/Telegram` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: optional automatic summary/archive after explicit workflows are validated.

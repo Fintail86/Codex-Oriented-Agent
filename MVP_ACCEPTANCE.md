@@ -220,6 +220,8 @@ Command:
 cosia review
 cosia review --memory
 cosia review --skill
+cosia review stats
+cosia review cleanup
 cosia chat --session <session-id> --provider codex-cli
 # inside chat:
 # /review
@@ -231,6 +233,8 @@ Expected Outcome:
 
 - `cosia review` prints a compact pending queue or a clear empty state.
 - Review rows include both a temporary index and a stable id prefix.
+- `review stats` reports pending/discarded counts and cleanup recommendations.
+- `review cleanup` previews discarded-candidate cleanup without changing state unless `--yes` is used.
 - `/review` works inside chat without invoking the model.
 - Help text recommends id prefixes because indexes are temporary.
 
@@ -311,6 +315,7 @@ Command:
 ```powershell
 $env:TELEGRAM_BOT_TOKEN="..."
 cosia gateway status
+cosia gateway status --json
 cosia gateway telegram check
 cosia gateway telegram start --provider codex-cli --once
 ```
@@ -318,9 +323,33 @@ cosia gateway telegram start --provider codex-cli --once
 Expected Outcome:
 
 - `gateway status` prints Telegram connector state and stored offset information.
+- `gateway status --json` prints structured gateway state including lock and offset fields.
 - `gateway telegram check` succeeds when `connectors.telegram.enabled=true`, `allowedChatIds` contains the Telegram chat id, and the token env is set.
 - `start --once` processes one update batch, stores the next offset, and exits without leaving a process lock.
 - Unauthorized chat ids do not reach COSIA runtime.
+- Telegram review shortcuts create previews only; `/apply` is still required for mutations.
+
+## 13. Command Trigger Packs
+
+Purpose: verify hash-command trigger packs can be inspected and synced without affecting normal slash commands.
+
+Command:
+
+```powershell
+cosia command triggers check
+cosia command triggers sync --locale ko
+cosia command triggers check
+```
+
+Expected Outcome:
+
+- Trigger check prints the locale, command count, and any short/duplicate trigger warnings.
+- Sync creates or updates `config/command_triggers.ko.json` without changing runtime state.
+- Existing `#상태 보여줘`, `/review`, and ordinary chat behavior remain unchanged.
+
+Failure Hint:
+
+- Short-trigger warnings are allowed; they are safety diagnostics, not automatic failures.
 
 Failure Hint:
 

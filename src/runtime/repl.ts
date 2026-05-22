@@ -17,7 +17,7 @@ import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import { PolicyManager } from "./policy_manager.js";
 import { loadPromptStaticBlocks } from "./prompt_builder.js";
-import { formatReviewBatchDiscard, formatReviewInbox, formatReviewNext, formatReviewUpdate, ReviewInboxService, type ReviewFilter, type ReviewPromoteOptions } from "./review_inbox.js";
+import { formatReviewBatchDiscard, formatReviewCleanup, formatReviewInbox, formatReviewNext, formatReviewStats, formatReviewUpdate, ReviewInboxService, type ReviewFilter, type ReviewPromoteOptions } from "./review_inbox.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
@@ -66,6 +66,8 @@ export function formatChatHelp(): string {
     "  /review discard <index|id> --reason \"...\"  Discard a review item.",
     "  /review discard-conflicts --reason \"...\" [--yes]",
     "                                             Preview/apply discard for all conflicted memory candidates.",
+    "  /review stats                              Show review queue statistics.",
+    "  /review cleanup                            Preview discarded candidate cleanup.",
     "  /review next                               Show the oldest pending review item.",
     "",
     "Natural commands:",
@@ -289,10 +291,13 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           memory,
           skills,
           reviewInbox,
-          now
+          now,
+          previewScope: {
+            sessionId: session.id
+          }
         };
         if (intent.type === "no_match") {
-          const candidates = retrieveCommandCandidates(prompt);
+          const candidates = retrieveCommandCandidates(prompt, 8, options.workspaceRoot);
           if (candidates.length === 0) {
             writeLine(output, "[BLOCKED] Natural command not recognized.");
             writeLine(output, "Try #상태 보여줘, #show status, #리뷰 보여줘, or type /help.");
@@ -424,6 +429,14 @@ async function handleReviewCommand(prompt: string, reviewInbox: ReviewInboxServi
   if (prompt === "/review next") {
     const inbox = await reviewInbox.list("all");
     writeLine(output, formatReviewNext(inbox.items[0]));
+    return;
+  }
+  if (prompt === "/review stats") {
+    writeLine(output, formatReviewStats(await reviewInbox.stats()));
+    return;
+  }
+  if (prompt === "/review cleanup") {
+    writeLine(output, formatReviewCleanup(await reviewInbox.cleanup({ yes: false })));
     return;
   }
   if (prompt.startsWith("/review show ")) {

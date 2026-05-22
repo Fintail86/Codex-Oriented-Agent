@@ -1,5 +1,5 @@
 {
-  "version": "0.22.0",
+  "version": "0.26.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -214,5 +214,10 @@
       "backoffInitialMs": 1000,
       "backoffMaxMs": 30000
     }
+  },
+  "review": {
+    "discardedRetentionDays": 7,
+    "pendingWarningDays": 14,
+    "autoCleanupOnRead": true
   }
 }

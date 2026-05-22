@@ -1,6 +1,7 @@
 import {
   formatMemoryConflicts,
   MemoryManager,
+  type CandidateCleanupResult,
   type MemoryConflict,
   type PromoteCandidateOptions
 } from "./memory_manager.js";
@@ -54,6 +55,35 @@ export type ReviewBatchDiscardResult = {
   discarded: number;
   items: ReviewInboxItem[];
   inbox: ReviewInbox;
+};
+
+export type ReviewStats = {
+  pending: number;
+  promoted: number;
+  discarded: number;
+  autoPromoted: number;
+  reverted: number;
+  memory: Record<string, number>;
+  skill: Record<string, number>;
+  oldestPendingAgeDays?: number;
+  cleanupEligibleDiscarded: number;
+  pendingOlderThanWarning: number;
+  discardedRetentionDays: number;
+  pendingWarningDays: number;
+};
+
+export type ReviewCleanupResult = {
+  applied: boolean;
+  olderThanDays: number;
+  memory: CandidateCleanupResult;
+  skill: {
+    olderThanDays: number;
+    cutoff: string;
+    eligible: number;
+    deleted: number;
+    retainedDiscarded: number;
+    applied: boolean;
+  };
 };
 
 const idPrefixLength = 8;
@@ -256,6 +286,50 @@ export class ReviewInboxService {
       inbox: await this.list("all")
     };
   }
+
+  async stats(options: { discardedRetentionDays?: number; pendingWarningDays?: number } = {}): Promise<ReviewStats> {
+    const discardedRetentionDays = options.discardedRetentionDays ?? 7;
+    const pendingWarningDays = options.pendingWarningDays ?? 14;
+    const [memoryCandidates, skillCandidates] = await Promise.all([
+      this.memory.listCandidates(true),
+      Promise.resolve(this.skills.listCandidates(true))
+    ]);
+    const memoryRecords = memoryCandidates.flatMap((candidate) => candidate.record ? [candidate.record] : []);
+    const skillRecords = skillCandidates.map((candidate) => candidate.record);
+    const all = [...memoryRecords, ...skillRecords];
+    const now = Date.now();
+    const pendingRecords = all.filter((record) => record.status === "pending");
+    const oldestPendingAgeDays = pendingRecords.length
+      ? Math.floor(Math.max(...pendingRecords.map((record) => now - Date.parse(record.createdAt))) / 86400000)
+      : undefined;
+    const warningCutoff = now - pendingWarningDays * 86400000;
+    const cleanupCutoff = now - discardedRetentionDays * 86400000;
+    return {
+      pending: countStatus(all, "pending"),
+      promoted: countStatus(all, "promoted"),
+      discarded: countStatus(all, "discarded"),
+      autoPromoted: countStatus(all, "auto_promoted"),
+      reverted: countStatus(all, "reverted"),
+      memory: statusCounts(memoryRecords),
+      skill: statusCounts(skillRecords),
+      oldestPendingAgeDays,
+      cleanupEligibleDiscarded: all.filter((record) => record.status === "discarded" && Date.parse(record.reviewedAt ?? record.createdAt) < cleanupCutoff).length,
+      pendingOlderThanWarning: pendingRecords.filter((record) => Date.parse(record.createdAt) < warningCutoff).length,
+      discardedRetentionDays,
+      pendingWarningDays
+    };
+  }
+
+  async cleanup(options: { olderThanDays?: number; yes?: boolean } = {}): Promise<ReviewCleanupResult> {
+    const olderThanDays = options.olderThanDays ?? 7;
+    const apply = options.yes === true;
+    return {
+      applied: apply,
+      olderThanDays,
+      memory: this.memory.cleanupDiscardedCandidates({ olderThanDays, apply }),
+      skill: this.skills.cleanupDiscardedCandidates({ olderThanDays, apply })
+    };
+  }
 }
 
 export function formatReviewInbox(inbox: ReviewInbox, title = "Review Inbox"): string {
@@ -332,6 +406,59 @@ export function formatReviewBatchDiscard(result: ReviewBatchDiscardResult): stri
   return lines.join("\n");
 }
 
+export function formatReviewStats(stats: ReviewStats): string {
+  const lines = [
+    "Review Queue Stats",
+    `Pending: ${stats.pending}`,
+    `Promoted: ${stats.promoted}`,
+    `Discarded: ${stats.discarded}`,
+    `Auto-promoted: ${stats.autoPromoted}`,
+    `Reverted: ${stats.reverted}`,
+    "",
+    `Memory: ${formatCounts(stats.memory)}`,
+    `Skill: ${formatCounts(stats.skill)}`,
+    `Oldest pending age: ${stats.oldestPendingAgeDays ?? "none"} day(s)`,
+    `Old pending >${stats.pendingWarningDays}d: ${stats.pendingOlderThanWarning}`,
+    `Cleanup eligible discarded >${stats.discardedRetentionDays}d: ${stats.cleanupEligibleDiscarded}`,
+    "",
+    "Recommended:",
+    stats.pending ? "  cosia review" : "  No pending review items.",
+    stats.cleanupEligibleDiscarded ? "  cosia review cleanup" : "  No cleanup needed."
+  ];
+  return lines.join("\n");
+}
+
+export function formatReviewCleanup(result: ReviewCleanupResult): string {
+  const totalEligible = result.memory.eligible + result.skill.eligible;
+  return [
+    result.applied ? "Review cleanup applied." : "Review cleanup preview. Re-run with --yes to apply.",
+    `Applied: ${result.applied}`,
+    `Retention days: ${result.olderThanDays}`,
+    `Memory discarded eligible: ${result.memory.eligible}`,
+    `Skill discarded eligible: ${result.skill.eligible}`,
+    `Memory discarded removed: ${result.memory.deleted}`,
+    `Skill discarded removed: ${result.skill.deleted}`,
+    `Total ${result.applied ? "removed" : "eligible"}: ${totalEligible}`,
+    `Retained discarded memory: ${result.memory.retainedDiscarded}`,
+    `Retained discarded skill: ${result.skill.retainedDiscarded}`
+  ].join("\n");
+}
+
+export function formatReviewInboxCompact(inbox: ReviewInbox, title = "Review Inbox"): string {
+  const lines = [
+    title,
+    `Pending: ${inbox.totalPending} (${inbox.memoryPending} memory, ${inbox.skillPending} skill)`
+  ];
+  for (const item of inbox.items.slice(0, 8)) {
+    lines.push(`${item.index}. ${item.type} ${item.idPrefix} ${item.risk} c:${item.conflictCount} ${item.summary}`);
+  }
+  if (inbox.items.length > 8) {
+    lines.push(`... ${inbox.items.length - 8} more`);
+  }
+  lines.push("Tip: use id prefixes. /review refreshes the inbox.");
+  return lines.join("\n");
+}
+
 function prefix(id: string): string {
   return id.slice(0, idPrefixLength);
 }
@@ -354,6 +481,23 @@ function resolveConflictTarget(item: ReviewInboxItem, value: string | undefined)
 function preview(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+}
+
+function statusCounts(records: Array<{ status: string }>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const record of records) {
+    counts[record.status] = (counts[record.status] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function countStatus(records: Array<{ status: string }>, status: string): number {
+  return records.filter((record) => record.status === status).length;
+}
+
+function formatCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts).sort(([left], [right]) => left.localeCompare(right));
+  return entries.length ? entries.map(([status, count]) => `${status}:${count}`).join(", ") : "none";
 }
 
 function pad(value: string, length: number): string {

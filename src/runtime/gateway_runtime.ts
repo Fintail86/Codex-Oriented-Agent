@@ -16,7 +16,7 @@ import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import { getStatusReport, formatStatusReport } from "./status_report.js";
-import { formatReviewInbox, formatReviewNext, formatReviewUpdate, ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
+import { formatReviewInbox, formatReviewNext, formatReviewStats, ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
@@ -35,6 +35,7 @@ export type GatewayMessageOptions = {
   policy: PolicyConfig;
   providerId: string;
   owner: string;
+  chatId?: string;
   now?: () => number;
 };
 
@@ -131,6 +132,59 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
     const filter: ReviewFilter = input === "/review memory" ? "memory" : input === "/review skill" ? "skill" : "all";
     return done(formatReviewInbox(await new ReviewInboxService(options.workspaceRoot).list(filter)), state);
   }
+  if (input === "/review stats") {
+    const inbox = new ReviewInboxService(options.workspaceRoot);
+    return done(formatReviewStats(await inbox.stats({
+      discardedRetentionDays: options.policy.review.discardedRetentionDays,
+      pendingWarningDays: options.policy.review.pendingWarningDays
+    })), state);
+  }
+  if (input === "/review cleanup") {
+    const ctx = await buildCatalogContext(options);
+    const preview = await previewMutationCommand({
+      type: "matched",
+      commandId: "review.cleanup",
+      confidence: "high",
+      args: {}
+    }, ctx);
+    return done(preview?.output ?? "[BLOCKED] Review cleanup is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
+  }
+  if (input === "/review next") {
+    const inbox = await new ReviewInboxService(options.workspaceRoot).list("all");
+    return done(formatReviewNext(inbox.items[0]), state);
+  }
+  if (input.startsWith("/review show ")) {
+    return done(await new ReviewInboxService(options.workspaceRoot).formatItemDetail(input.slice("/review show ".length).trim()), state);
+  }
+  if (input.startsWith("/review conflicts ")) {
+    return done(await new ReviewInboxService(options.workspaceRoot).formatConflicts(input.slice("/review conflicts ".length).trim()), state);
+  }
+  if (input.startsWith("/review promote ")) {
+    const parts = input.slice("/review promote ".length).trim().split(/\s+/);
+    const target = parts[0];
+    const ctx = await buildCatalogContext(options);
+    const preview = await previewMutationCommand({
+      type: "matched",
+      commandId: "review.promote_skill",
+      confidence: "high",
+      args: { target }
+    }, ctx);
+    return done(preview?.output ?? "[BLOCKED] Review promote preview is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
+  }
+  if (input.startsWith("/review discard ")) {
+    const match = input.match(/^\/review\s+discard\s+(\S+)(?:\s+--reason\s+(.+))?$/);
+    if (!match?.[2]) {
+      return done("[BLOCKED] Usage: /review discard <id> --reason <reason>", state);
+    }
+    const ctx = await buildCatalogContext(options);
+    const preview = await previewMutationCommand({
+      type: "matched",
+      commandId: "review.discard",
+      confidence: "high",
+      args: { target: match[1], reason: match[2].trim() }
+    }, ctx);
+    return done(preview?.output ?? "[BLOCKED] Review discard preview is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
+  }
   if (input === "/cancel") {
     return done("[SUCCESS] Pending command cancelled.", touch({ ...state, pendingCommand: undefined }));
   }
@@ -147,7 +201,7 @@ async function handleHashCommand(options: GatewayMessageOptions & {
 }): Promise<GatewayMessageResult> {
   let intent = parseHashCommand(options.input);
   if (intent.type === "no_match") {
-    const candidates = retrieveCommandCandidates(options.input);
+    const candidates = retrieveCommandCandidates(options.input, 8, options.workspaceRoot);
     if (!candidates.length) {
       return done("[BLOCKED] Natural command not recognized. Try #상태 보여줘, #리뷰 보여줘, or /help.", options.state);
     }
@@ -224,6 +278,13 @@ async function executeSessionFreeReadOnly(intent: Extract<ReturnType<typeof pars
         items: inbox.items.filter((item) => item.conflictCount > 0)
       }, "Conflicted Memory Review");
     }
+    case "review.stats": {
+      const inbox = new ReviewInboxService(options.workspaceRoot);
+      return formatReviewStats(await inbox.stats({
+        discardedRetentionDays: options.policy.review.discardedRetentionDays,
+        pendingWarningDays: options.policy.review.pendingWarningDays
+      }));
+    }
     case "memory.search":
       return new MemoryManager(options.workspaceRoot)
         .search(String(intent.args.query ?? ""), 8)
@@ -283,7 +344,11 @@ async function buildCatalogContext(options: GatewayMessageOptions & {
     memory: new MemoryManager(options.workspaceRoot),
     skills: new SkillManager(options.workspaceRoot),
     reviewInbox: new ReviewInboxService(options.workspaceRoot),
-    now: options.now
+    now: options.now,
+    previewScope: {
+      chatId: options.chatId,
+      sessionId: session.id
+    }
   };
 }
 

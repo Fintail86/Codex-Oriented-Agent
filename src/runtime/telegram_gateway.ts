@@ -1,14 +1,16 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { FetchLike } from "./model/providers/openai_compatible_provider.js";
 import { pathExists, writeText } from "./fs_utils.js";
 import {
   acquireGatewayProcessLock,
+  heartbeatGatewayProcessLock,
+  isGatewayProcessLockStale,
+  readGatewayProcessLock,
+  removeGatewayProcessLock,
   releaseGatewayProcessLock,
-  telegramGatewayDir,
-  telegramProcessLockPath,
-  type GatewayLockRecord
+  telegramGatewayDir
 } from "./gateway_locks.js";
 import { chunkTelegramMessage } from "./gateway_format.js";
 import { handleGatewayMessage, type GatewayChatState } from "./gateway_runtime.js";
@@ -45,6 +47,15 @@ export type TelegramUpdate = {
       id: number | string;
     };
   };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: {
+      chat: {
+        id: number | string;
+      };
+    };
+  };
 };
 
 type TelegramApiResponse<T> = {
@@ -64,7 +75,8 @@ class TelegramApiError extends Error {
 }
 
 export type TelegramMessageSender = {
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, options?: { replyMarkup?: unknown }): Promise<void>;
+  answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
 };
 
 class TelegramApiClient {
@@ -86,10 +98,18 @@ class TelegramApiClient {
     });
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string, options: { replyMarkup?: unknown } = {}): Promise<void> {
     await this.call("sendMessage", {
       chat_id: chatId,
-      text
+      text,
+      ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {})
+    });
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+    await this.call("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      ...(text ? { text } : {})
     });
   }
 
@@ -203,7 +223,10 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
 
   await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
   const client = new TelegramApiClient(token, options.fetchImpl);
-  const lock = await acquireGatewayProcessLock(workspaceRoot, "telegram-gateway", options.now);
+  const lock = await acquireGatewayProcessLock(workspaceRoot, "telegram-gateway", options.now, {
+    gatewayId: "telegram",
+    command: "cosia gateway telegram start"
+  });
   let cleanupStarted = false;
   let shutdownRequested = false;
   const unregister = registerGatewaySignals(() => {
@@ -226,17 +249,20 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
       pid: process.pid,
       startedAt: new Date().toISOString()
     });
+    await appendTelegramLog(workspaceRoot, "start", { pid: process.pid });
     let state = await loadTelegramGatewayState(workspaceRoot);
     let consecutiveFailures = 0;
     while (!shutdownRequested) {
       try {
+        await heartbeatGatewayProcessLock(workspaceRoot, lock, options.now);
         const updates = await client.getUpdates(state.nextOffset, config.pollTimeoutMs);
         consecutiveFailures = 0;
         for (const update of updates) {
           if (shutdownRequested) break;
+          await heartbeatGatewayProcessLock(workspaceRoot, lock, options.now);
           state = await processTelegramUpdate(workspaceRoot, policy, client, state, update, {
             providerId: options.providerId ?? config.defaultProvider,
-            owner: `telegram:${update.message?.chat.id ?? "unknown"}`,
+            owner: `telegram:${telegramUpdateChatId(update) ?? "unknown"}`,
             now: options.now
           });
           state.nextOffset = update.update_id + 1;
@@ -244,6 +270,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
           state.lastFailure = undefined;
           state.updatedAt = new Date().toISOString();
           await saveTelegramGatewayState(workspaceRoot, state);
+          await appendTelegramLog(workspaceRoot, "update", { updateId: update.update_id, nextOffset: state.nextOffset });
         }
         if (options.once) break;
       } catch (error) {
@@ -257,6 +284,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
           failureCount: consecutiveFailures,
           lastFailure: state.lastFailure
         });
+        await appendTelegramLog(workspaceRoot, "failure", { failureCount: consecutiveFailures, error: state.lastFailure });
         if (consecutiveFailures >= config.maxConsecutiveFailures || options.once) {
           break;
         }
@@ -269,6 +297,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
     }
   } finally {
     await cleanup();
+    await appendTelegramLog(workspaceRoot, "stop", {});
   }
 }
 
@@ -280,6 +309,49 @@ export async function processTelegramUpdate(
   update: TelegramUpdate,
   options: { providerId: string; owner: string; now?: () => number }
 ): Promise<TelegramGatewayState> {
+  const callback = update.callback_query;
+  if (callback) {
+    const chatId = String(callback.message?.chat.id ?? "");
+    if (!chatId || !policy.connectors.telegram.allowedChatIds.includes(chatId)) {
+      if (chatId) {
+        await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
+      }
+      if (client.answerCallbackQuery) {
+        await client.answerCallbackQuery(callback.id, "Unauthorized");
+      }
+      return state;
+    }
+    if (client.answerCallbackQuery) {
+      await client.answerCallbackQuery(callback.id);
+    }
+    const input = telegramCallbackInput(callback.data ?? "");
+    let chatState = state.chats[chatId] ?? {
+      providerId: options.providerId
+    };
+    const result = await handleGatewayMessage({
+      workspaceRoot,
+      input,
+      state: chatState,
+      policy,
+      providerId: chatState.providerId ?? options.providerId,
+      owner: options.owner,
+      chatId,
+      now: options.now
+    });
+    chatState = result.state;
+    for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
+      await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+    }
+    return {
+      ...state,
+      chats: {
+        ...state.chats,
+        [chatId]: chatState
+      },
+      updatedAt: new Date().toISOString()
+    };
+  }
+
   const message = update.message;
   if (!message?.text) {
     return state;
@@ -300,11 +372,12 @@ export async function processTelegramUpdate(
       policy,
       providerId: chatState.providerId ?? options.providerId,
       owner: options.owner,
+      chatId,
       now: options.now
     });
     chatState = result.state;
     for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-      await client.sendMessage(chatId, chunk);
+      await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
     }
   }
   return {
@@ -341,22 +414,55 @@ export async function saveTelegramGatewayState(workspaceRoot: string, state: Tel
   await writeFile(telegramStatePath(workspaceRoot), `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
-export async function formatGatewayStatus(workspaceRoot: string): Promise<string> {
+export async function formatGatewayStatus(workspaceRoot: string, options: { json?: boolean } = {}): Promise<string> {
   const state = await loadTelegramGatewayState(workspaceRoot);
-  const processLocked = await pathExists(telegramProcessLockPath(workspaceRoot));
+  const lock = await readGatewayProcessLock(workspaceRoot);
+  const processLocked = Boolean(lock);
+  const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now());
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const report = {
+    telegram: {
+      enabled: policy.connectors.telegram.enabled,
+      processLock: processLocked,
+      lockStale,
+      lock,
+      allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
+      activeChats: Object.keys(state.chats).length,
+      nextOffset: state.nextOffset,
+      failureCount: state.failureCount,
+      lastFailure: state.lastFailure
+    }
+  };
+  if (options.json) {
+    return JSON.stringify(report, null, 2);
+  }
   return [
     "COSIA Gateway Status",
     "",
     "Telegram",
     `  Enabled: ${policy.connectors.telegram.enabled}`,
     `  Process lock: ${processLocked ? "present" : "none"}`,
+    `  Lock stale: ${lockStale}`,
+    lock?.heartbeatAt ? `  Heartbeat: ${lock.heartbeatAt}` : undefined,
     `  Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length}`,
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
     `  Failure count: ${state.failureCount}`,
     state.lastFailure ? `  Last failure: ${state.lastFailure}` : undefined
   ].filter(Boolean).join("\n");
+}
+
+export async function unlockStaleTelegramGateway(workspaceRoot: string, options: { staleOnly?: boolean } = {}): Promise<{ removed: boolean; reason: string }> {
+  const lock = await readGatewayProcessLock(workspaceRoot);
+  if (!lock) {
+    return { removed: false, reason: "no process lock" };
+  }
+  const stale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now());
+  if (options.staleOnly && !stale) {
+    return { removed: false, reason: "lock is not stale" };
+  }
+  const removed = await removeGatewayProcessLock(workspaceRoot);
+  return { removed, reason: stale ? "stale lock removed" : "lock removed" };
 }
 
 export function formatTelegramCheck(result: TelegramGatewayCheck): string {
@@ -383,6 +489,71 @@ function splitTelegramInputs(text: string): string[] {
     return lines;
   }
   return [trimmed];
+}
+
+function telegramUpdateChatId(update: TelegramUpdate): string | undefined {
+  return update.message?.chat.id !== undefined
+    ? String(update.message.chat.id)
+    : update.callback_query?.message?.chat.id !== undefined
+      ? String(update.callback_query.message.chat.id)
+      : undefined;
+}
+
+function telegramCallbackInput(data: string): string {
+  const [scope, action, value] = data.split(":");
+  if (scope !== "review") {
+    return "/review";
+  }
+  switch (action) {
+    case "refresh":
+      return "/review";
+    case "next":
+      return "/review next";
+    case "show":
+      return `/review show ${value ?? ""}`.trim();
+    case "conflicts":
+      return `/review conflicts ${value ?? ""}`.trim();
+    case "discard":
+      return `/review discard ${value ?? ""} --reason Telegram review discard`.trim();
+    case "promote":
+      return `/review promote ${value ?? ""}`.trim();
+    default:
+      return "/review";
+  }
+}
+
+function telegramReplyOptions(input: string, output: string): { replyMarkup?: unknown } {
+  if (!input.startsWith("/review") && !input.startsWith("#리뷰")) {
+    return {};
+  }
+  const firstItem = output.match(/^\s*(?:1\.|\s*1\s+)\s+(memory|skill)\s+([a-zA-Z0-9]{8})/m);
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [
+    [
+      { text: "Refresh", callback_data: "review:refresh" },
+      { text: "Next", callback_data: "review:next" }
+    ]
+  ];
+  if (firstItem?.[2]) {
+    const id = firstItem[2];
+    buttons.push([
+      { text: "Show", callback_data: `review:show:${id}` },
+      { text: "Conflicts", callback_data: `review:conflicts:${id}` }
+    ]);
+    buttons.push([
+      { text: "Discard preview", callback_data: `review:discard:${id}` },
+      { text: "Promote preview", callback_data: `review:promote:${id}` }
+    ]);
+  }
+  return { replyMarkup: { inline_keyboard: buttons } };
+}
+
+async function appendTelegramLog(workspaceRoot: string, event: string, data: Record<string, unknown>): Promise<void> {
+  await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
+  await appendFile(join(telegramGatewayDir(workspaceRoot), "log.jsonl"), `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event,
+    ...data
+  })}\n`, "utf8");
 }
 
 async function writeTelegramStatus(workspaceRoot: string, status: Record<string, unknown>): Promise<void> {

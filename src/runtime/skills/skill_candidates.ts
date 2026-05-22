@@ -55,6 +55,15 @@ export type CreateSkillCandidateInput = {
   runId?: string;
 };
 
+export type SkillCandidateCleanupResult = {
+  olderThanDays: number;
+  cutoff: string;
+  eligible: number;
+  deleted: number;
+  retainedDiscarded: number;
+  applied: boolean;
+};
+
 export const highRiskConfirmPhrase = "PROMOTE HIGH RISK SKILL";
 
 export class SkillCandidateStore {
@@ -157,6 +166,47 @@ export class SkillCandidateStore {
       db.close();
     }
     return updated;
+  }
+
+  cleanupDiscardedCandidates(options: { olderThanDays?: number; apply?: boolean } = {}): SkillCandidateCleanupResult {
+    const olderThanDays = options.olderThanDays ?? 7;
+    const apply = options.apply ?? true;
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    const entries = this.readCandidateEntries();
+    const expired = entries
+      .map((entry) => entry.record)
+      .filter((record) => record.status === "discarded" && (record.reviewedAt ?? record.createdAt) < cutoff);
+    const retainedDiscarded = entries.filter((entry) => entry.record.status === "discarded").length - expired.length;
+    if (apply && expired.length) {
+      const db = this.open();
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const statement = db.prepare("DELETE FROM skill_candidates WHERE id = ?");
+          for (const record of expired) {
+            statement.run(record.id);
+          }
+          db.exec("COMMIT");
+        } catch (error) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            // Preserve original failure.
+          }
+          throw error;
+        }
+      } finally {
+        db.close();
+      }
+    }
+    return {
+      olderThanDays,
+      cutoff,
+      eligible: expired.length,
+      deleted: apply ? expired.length : 0,
+      retainedDiscarded,
+      applied: apply
+    };
   }
 
   promoteCandidate(candidateId: string, options: PromoteSkillOptions = {}): PromoteSkillResult {

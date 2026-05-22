@@ -5,6 +5,7 @@ import {
   type CreateSkillCandidateInput,
   type PromoteSkillOptions,
   type PromoteSkillResult,
+  type SkillCandidateCleanupResult,
   type SkillCandidateView
 } from "./skills/skill_candidates.js";
 import {
@@ -44,6 +45,7 @@ export type {
   SkillBudget,
   SkillCandidateView,
   CreateSkillCandidateInput,
+  SkillCandidateCleanupResult,
   SkillCheckResult,
   SkillMigrationResult,
   SkillPromptBlock,
@@ -101,6 +103,10 @@ export class SkillManager {
 
   discardCandidate(candidateId: string, reason: string): SkillCandidateRecord {
     return this.candidates.discardCandidate(candidateId, reason);
+  }
+
+  cleanupDiscardedCandidates(options: { olderThanDays?: number; apply?: boolean } = {}): SkillCandidateCleanupResult {
+    return this.candidates.cleanupDiscardedCandidates(options);
   }
 
   promoteCandidate(candidateId: string, options: PromoteSkillOptions = {}): PromoteSkillResult {

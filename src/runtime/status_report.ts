@@ -8,6 +8,7 @@ import type { SessionMetadata } from "./types.js";
 import { COSIA_VERSION } from "./version.js";
 import { pathExists } from "./fs_utils.js";
 import { join } from "node:path";
+import { isGatewayProcessLockStale, readGatewayProcessLock } from "./gateway_locks.js";
 
 export type StatusIssueSeverity = "critical" | "warning" | "info";
 
@@ -77,6 +78,8 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
   const defaultAgentId = policy?.agents.defaultAgentId ?? null;
   const defaultAgentExists = Boolean(defaultAgentId && agentIds.has(defaultAgentId));
   const pendingSkillCandidatesCount = countPendingSkillCandidates(workspaceRoot);
+  const gatewayLock = await readGatewayProcessLock(workspaceRoot);
+  const gatewayLockStale = isGatewayProcessLockStale(gatewayLock, workspaceRoot, Date.now());
   const issues = sortIssues([
     ...requiredStructure.filter((item) => !item.exists).map((item): StatusIssue => ({
       id: `missing_structure.${item.path}`,
@@ -147,6 +150,27 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
       title: "Pending skill review",
       detail: "Skill candidates are waiting for review.",
       action: "Run `cosia start`, then use `/review`."
+    } : undefined,
+    gatewayLockStale ? {
+      id: "gateway.telegram.stale_lock",
+      severity: "warning",
+      title: "Telegram gateway stale lock",
+      detail: "A Telegram gateway process lock appears stale.",
+      action: "Run `cosia gateway telegram unlock --stale-only`."
+    } : undefined,
+    policy?.connectors.telegram.enabled && !process.env[policy.connectors.telegram.tokenEnv] ? {
+      id: "gateway.telegram.missing_token",
+      severity: "warning",
+      title: "Telegram token env missing",
+      detail: `Telegram connector is enabled but ${policy.connectors.telegram.tokenEnv} is not set.`,
+      action: "Set the token env or disable the Telegram connector."
+    } : undefined,
+    policy?.connectors.telegram.enabled && policy.connectors.telegram.allowedChatIds.length === 0 ? {
+      id: "gateway.telegram.no_allowed_chats",
+      severity: "warning",
+      title: "Telegram allowlist is empty",
+      detail: "Telegram connector is enabled but no allowed chat ids are configured.",
+      action: "Add your chat id to connectors.telegram.allowedChatIds."
     } : undefined,
     activeSessions.length === 0 ? {
       id: "sessions.none_active",

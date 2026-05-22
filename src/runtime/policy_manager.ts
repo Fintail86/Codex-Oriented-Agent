@@ -44,6 +44,12 @@ const telegramConnectorSchema = z.object({
   backoffMaxMs: z.number().int().positive().default(30000)
 });
 
+const reviewRetentionSchema = z.object({
+  discardedRetentionDays: z.number().int().nonnegative().default(7),
+  pendingWarningDays: z.number().int().nonnegative().default(14),
+  autoCleanupOnRead: z.boolean().default(true)
+});
+
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
   agents: z.object({
@@ -193,6 +199,11 @@ export const policyConfigSchema = z.object({
       backoffInitialMs: 1000,
       backoffMaxMs: 30000
     }
+  }),
+  review: reviewRetentionSchema.default({
+    discardedRetentionDays: 7,
+    pendingWarningDays: 14,
+    autoCleanupOnRead: true
   })
 });
 
@@ -210,7 +221,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.22.0",
+  version: "0.26.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -381,6 +392,11 @@ export const defaultPolicy: PolicyConfig = {
       backoffInitialMs: 1000,
       backoffMaxMs: 30000
     }
+  },
+  review: {
+    discardedRetentionDays: 7,
+    pendingWarningDays: 14,
+    autoCleanupOnRead: true
   }
 };
 
@@ -561,6 +577,10 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
         ...defaultPolicy.connectors.telegram,
         ...policy.connectors?.telegram
       }
+    },
+    review: {
+      ...defaultPolicy.review,
+      ...policy.review
     }
   });
 }
@@ -652,6 +672,12 @@ ${Object.entries(policy.model.providers).map(([id, config]) => `  - \`${id}\`: t
 - Message chunk chars: \`${policy.connectors.telegram.messageChunkChars}\`
 - Poll timeout ms: \`${policy.connectors.telegram.pollTimeoutMs}\`
 - Max consecutive failures: \`${policy.connectors.telegram.maxConsecutiveFailures}\`
+
+## Review Queue
+
+- Discarded retention days: \`${policy.review.discardedRetentionDays}\`
+- Pending warning days: \`${policy.review.pendingWarningDays}\`
+- Auto cleanup on read: \`${policy.review.autoCleanupOnRead}\`
 `;
 }
 

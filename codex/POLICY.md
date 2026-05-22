@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 
 ## Version
 
-- Policy version: `0.22.0`
+- Policy version: `0.26.0`
 
 ## Agents
 
@@ -88,3 +88,9 @@ This file mirrors `codex/POLICY.json`. The JSON file is the runtime source of tr
 - Message chunk chars: `3500`
 - Poll timeout ms: `30000`
 - Max consecutive failures: `10`
+
+## Review Queue
+
+- Discarded retention days: `7`
+- Pending warning days: `14`
+- Auto cleanup on read: `true`

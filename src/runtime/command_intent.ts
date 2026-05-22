@@ -71,6 +71,17 @@ export const commandDefinitions: CommandDefinition[] = [
     }
   },
   {
+    commandId: "review.stats",
+    safety: "read_only",
+    description: "Show review queue statistics and cleanup recommendations.",
+    argsSchema: {},
+    examples: ["#리뷰 통계 보여줘", "#show review stats"],
+    triggers: {
+      ko: ["리뷰 통계", "후보 통계", "리뷰 상태"],
+      en: ["review stats", "review statistics", "review queue stats"]
+    }
+  },
+  {
     commandId: "review.discard",
     safety: "mutation",
     description: "Preview discarding one review item by index or id prefix.",
@@ -101,6 +112,17 @@ export const commandDefinitions: CommandDefinition[] = [
     triggers: {
       ko: ["스킬 후보 승격", "스킬 승격"],
       en: ["promote skill candidate", "promote skill"]
+    }
+  },
+  {
+    commandId: "review.cleanup",
+    safety: "mutation",
+    description: "Preview cleanup of discarded review candidates after retention.",
+    argsSchema: {},
+    examples: ["#리뷰 정리해", "#cleanup review queue"],
+    triggers: {
+      ko: ["리뷰 정리", "후보 정리", "디스카드 정리"],
+      en: ["cleanup review", "review cleanup", "cleanup review queue"]
     }
   },
   {
@@ -255,6 +277,18 @@ export function parseHashCommand(input: string): CommandIntentResult {
   if (/^(리뷰|리뷰\s*(보여줘|목록|확인)|전체\s*리뷰\s*(보여줘|목록|확인))$/.test(normalized)) {
     return matched("review.list", { filter: "all" });
   }
+  if (/^리뷰\s*(통계|상태)\s*(보여줘|확인|조회)?$/.test(normalized)) {
+    return matched("review.stats");
+  }
+  if (/^(review stats|show review stats|review statistics)$/.test(normalized)) {
+    return matched("review.stats");
+  }
+  if (/^(리뷰|후보|디스카드)\s*정리(해|해줘|진행)?$/.test(normalized)) {
+    return matched("review.cleanup");
+  }
+  if (/^(cleanup review|review cleanup|cleanup review queue)$/.test(normalized)) {
+    return matched("review.cleanup");
+  }
   if (/^(review|show review|review inbox|show review inbox)$/.test(normalized)) {
     return matched("review.list", { filter: "all" });
   }
@@ -316,16 +350,17 @@ export function parseHashCommand(input: string): CommandIntentResult {
   return { type: "no_match" };
 }
 
-export function retrieveCommandCandidates(input: string, limit = 8): CommandDefinition[] {
+export function retrieveCommandCandidates(input: string, limit = 8, workspaceRoot?: string): CommandDefinition[] {
   const body = input.trim().replace(/^#/, "").trim();
   const normalized = normalizeCommandText(body);
   if (!normalized) {
     return [];
   }
+  const triggerOverrides = workspaceRoot ? readTriggerOverrides(workspaceRoot, "ko") : {};
   const scored = commandDefinitions
     .map((definition) => ({
       definition,
-      score: scoreDefinition(normalized, definition)
+      score: scoreDefinition(normalized, definition, triggerOverrides[definition.commandId])
     }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.definition.commandId.localeCompare(b.definition.commandId));
@@ -375,9 +410,9 @@ function normalizeCommandText(value: string): string {
     .trim();
 }
 
-function scoreDefinition(normalized: string, definition: CommandDefinition): number {
+function scoreDefinition(normalized: string, definition: CommandDefinition, koOverride?: string[]): number {
   let score = 0;
-  for (const trigger of [...definition.triggers.ko, ...definition.triggers.en]) {
+  for (const trigger of [...(koOverride ?? definition.triggers.ko), ...definition.triggers.en]) {
     const normalizedTrigger = normalizeCommandText(trigger);
     if (!normalizedTrigger) {
       continue;
@@ -397,6 +432,28 @@ function scoreDefinition(normalized: string, definition: CommandDefinition): num
   return score;
 }
 
+function readTriggerOverrides(workspaceRoot: string, locale: string): Record<string, string[]> {
+  const path = join(workspaceRoot, "config", `command_triggers.${locale}.json`);
+  if (!existsSync(path)) {
+    return {};
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!raw || typeof raw !== "object") {
+      return {};
+    }
+    const pack: Record<string, string[]> = {};
+    for (const [commandId, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (Array.isArray(value)) {
+        pack[commandId] = value.filter((item): item is string => typeof item === "string");
+      }
+    }
+    return pack;
+  } catch {
+    return {};
+  }
+}
+
 function isAsciiWord(value: string): boolean {
   return /^[a-z0-9_-]+$/i.test(value);
 }
@@ -404,3 +461,5 @@ function isAsciiWord(value: string): boolean {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";

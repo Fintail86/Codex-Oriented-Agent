@@ -10,19 +10,20 @@ import { initProject } from "./runtime/init_project.js";
 import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, getDoctorReport, previewReset, repairDoctor, type ResetMode } from "./runtime/doctor.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatMvpChecklist } from "./runtime/mvp_checklist.js";
+import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "./runtime/command_triggers.js";
 import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
 import type { PromptManifest } from "./runtime/prompt_builder.js";
 import { runChatRepl } from "./runtime/repl.js";
-import { formatReviewInbox, ReviewInboxService } from "./runtime/review_inbox.js";
+import { formatReviewCleanup, formatReviewInbox, formatReviewStats, ReviewInboxService } from "./runtime/review_inbox.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
 import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
-import { checkTelegramGateway, formatGatewayStatus, formatTelegramCheck, startTelegramGateway } from "./runtime/telegram_gateway.js";
+import { checkTelegramGateway, formatGatewayStatus, formatTelegramCheck, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
@@ -139,10 +140,11 @@ const gateway = program.command("gateway").description("Manage COSIA external ga
 
 gateway
   .command("status")
+  .option("--json", "Print structured JSON gateway status.", false)
   .description("Show gateway connector state.")
-  .action(async () => {
+  .action(async (options: { json: boolean }) => {
     await main(async (workspaceRoot) => {
-      console.log(await formatGatewayStatus(workspaceRoot));
+      console.log(await formatGatewayStatus(workspaceRoot, { json: options.json }));
     });
   });
 
@@ -171,6 +173,21 @@ telegram
     });
   });
 
+telegram
+  .command("unlock")
+  .option("--stale-only", "Only remove stale gateway process locks.", false)
+  .description("Remove a stale Telegram gateway process lock.")
+  .action(async (options: { staleOnly: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const result = await unlockStaleTelegramGateway(workspaceRoot, { staleOnly: options.staleOnly });
+      console.log([
+        "Telegram gateway unlock",
+        `Removed: ${result.removed}`,
+        `Reason: ${result.reason}`
+      ].join("\n"));
+    });
+  });
+
 const mvp = program.command("mvp").description("MVP acceptance helpers.");
 
 mvp
@@ -180,7 +197,7 @@ mvp
     console.log(formatMvpChecklist());
   });
 
-program
+const reviewCommand = program
   .command("review")
   .option("--memory", "Show pending memory candidates only.", false)
   .option("--skill", "Show pending skill candidates only.", false)
@@ -192,6 +209,56 @@ program
       }
       const filter = options.memory ? "memory" : options.skill ? "skill" : "all";
       console.log(formatReviewInbox(await new ReviewInboxService(workspaceRoot).list(filter)));
+    });
+  });
+
+reviewCommand
+  .command("stats")
+  .description("Show review queue statistics and cleanup recommendations.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(formatReviewStats(await new ReviewInboxService(workspaceRoot).stats({
+        discardedRetentionDays: policy.review.discardedRetentionDays,
+        pendingWarningDays: policy.review.pendingWarningDays
+      })));
+    });
+  });
+
+reviewCommand
+  .command("cleanup")
+  .option("--yes", "Apply cleanup. Without this, only preview.", false)
+  .description("Clean up discarded review candidates after retention.")
+  .action(async (options: { yes: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(formatReviewCleanup(await new ReviewInboxService(workspaceRoot).cleanup({
+        olderThanDays: policy.review.discardedRetentionDays,
+        yes: options.yes
+      })));
+    });
+  });
+
+const commandCommand = program.command("command").description("Inspect runtime command metadata.");
+const triggerCommand = commandCommand.command("triggers").description("Manage hash command trigger packs.");
+
+triggerCommand
+  .command("check")
+  .option("--locale <locale>", "Locale to check.", "ko")
+  .description("Check command trigger pack conflicts and short triggers.")
+  .action(async (options: { locale: string }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatCommandTriggerCheck(checkCommandTriggers(workspaceRoot, options.locale)));
+    });
+  });
+
+triggerCommand
+  .command("sync")
+  .option("--locale <locale>", "Locale to sync.", "ko")
+  .description("Create or update a user command trigger override pack.")
+  .action(async (options: { locale: string }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatCommandTriggerSync(syncCommandTriggers(workspaceRoot, options.locale)));
     });
   });
 

@@ -9,8 +9,10 @@ import { ToolRegistry } from "./tool_registry.js";
 import { checkProvider, listProviders } from "./model/provider_registry.js";
 import {
   formatReviewBatchDiscard,
+  formatReviewCleanup,
   formatReviewInbox,
   formatReviewNext,
+  formatReviewStats,
   formatReviewUpdate,
   ReviewInboxService
 } from "./review_inbox.js";
@@ -28,6 +30,20 @@ export type PendingCommand = {
   expiresAt: string;
   createdAtMs: number;
   expiresAtMs: number;
+  scope?: {
+    chatId?: string;
+    sessionId?: string;
+  };
+  freshness?: {
+    targetType: "memory_candidate" | "skill_candidate" | "review_cleanup";
+    targetIds: string[];
+    snapshots: Array<{
+      id: string;
+      type: "memory" | "skill";
+      status: string;
+      conflictCount: number;
+    }>;
+  };
 };
 
 export type CommandCatalogContext = {
@@ -41,6 +57,10 @@ export type CommandCatalogContext = {
   skills: SkillManager;
   reviewInbox: ReviewInboxService;
   now: () => number;
+  previewScope?: {
+    chatId?: string;
+    sessionId?: string;
+  };
 };
 
 export async function executeReadOnlyCommand(intent: Extract<CommandIntentResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<string | undefined> {
@@ -60,6 +80,11 @@ export async function executeReadOnlyCommand(intent: Extract<CommandIntentResult
         items: inbox.items.filter((item) => item.conflictCount > 0)
       }, "Conflicted Memory Review");
     }
+    case "review.stats":
+      return formatReviewStats(await ctx.reviewInbox.stats({
+        discardedRetentionDays: ctx.policy.review.discardedRetentionDays,
+        pendingWarningDays: ctx.policy.review.pendingWarningDays
+      }));
     case "memory.search":
       return formatMemorySearch(ctx.memory.search(String(intent.args.query ?? ""), 8));
     case "session.list":
@@ -119,7 +144,7 @@ export async function previewMutationCommand(intent: Extract<CommandIntentResult
         "",
         "Run #적용 to proceed or #취소 to cancel."
       ].join("\n");
-      return { output, pending: createPendingCommand("review.discard", intent.args, "mutation", output, ctx.now) };
+      return { output, pending: createPendingCommand("review.discard", intent.args, "mutation", output, ctx.now, ctx, [item]) };
     }
     case "review.discard_conflicts": {
       const reason = String(intent.args.reason ?? "");
@@ -130,7 +155,7 @@ export async function previewMutationCommand(intent: Extract<CommandIntentResult
         "",
         "Run #적용 to proceed or #취소 to cancel."
       ].join("\n");
-      return { output, pending: createPendingCommand("review.discard_conflicts", intent.args, "mutation", output, ctx.now) };
+      return { output, pending: createPendingCommand("review.discard_conflicts", intent.args, "mutation", output, ctx.now, ctx, preview.items) };
     }
     case "review.promote_skill": {
       const target = String(intent.args.target ?? "");
@@ -150,7 +175,20 @@ export async function previewMutationCommand(intent: Extract<CommandIntentResult
         "",
         "Run #적용 to proceed or #취소 to cancel."
       ].join("\n");
-      return { output, pending: createPendingCommand("review.promote_skill", intent.args, "mutation", output, ctx.now) };
+      return { output, pending: createPendingCommand("review.promote_skill", intent.args, "mutation", output, ctx.now, ctx, [item]) };
+    }
+    case "review.cleanup": {
+      const result = await ctx.reviewInbox.cleanup({
+        olderThanDays: ctx.policy.review.discardedRetentionDays,
+        yes: false
+      });
+      const output = [
+        "[PREVIEW] Discarded review candidates eligible for cleanup.",
+        formatReviewCleanup(result),
+        "",
+        "Run #적용 to proceed or #취소 to cancel."
+      ].join("\n");
+      return { output, pending: createPendingCommand("review.cleanup", intent.args, "mutation", output, ctx.now, ctx, []) };
     }
     default:
       return undefined;
@@ -158,6 +196,7 @@ export async function previewMutationCommand(intent: Extract<CommandIntentResult
 }
 
 export async function applyPendingCommand(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
+  await validatePendingFreshness(pending, ctx);
   switch (pending.commandId) {
     case "review.discard": {
       const result = await ctx.reviewInbox.discard(String(pending.args.target ?? ""), String(pending.args.reason ?? ""));
@@ -175,6 +214,13 @@ export async function applyPendingCommand(pending: PendingCommand, ctx: CommandC
       const result = await ctx.reviewInbox.promote(String(pending.args.target ?? ""), { yes: true });
       return [`[SUCCESS] Skill promotion applied.`, result.output, formatReviewUpdate(result.inbox)].join("\n");
     }
+    case "review.cleanup": {
+      const result = await ctx.reviewInbox.cleanup({
+        olderThanDays: ctx.policy.review.discardedRetentionDays,
+        yes: true
+      });
+      return [`[SUCCESS] Review cleanup applied.`, formatReviewCleanup(result)].join("\n");
+    }
     default:
       return "[BLOCKED] This pending command cannot be applied.";
   }
@@ -185,7 +231,9 @@ export function createPendingCommand(
   args: Record<string, unknown>,
   safety: CommandSafety,
   preview: string,
-  now: () => number
+  now: () => number,
+  ctx?: CommandCatalogContext,
+  items: Array<{ id: string; type: "memory" | "skill"; status: string; conflictCount: number }> = []
 ): PendingCommand {
   const createdAtMs = now();
   const expiresAtMs = createdAtMs + pendingTtlMs;
@@ -198,7 +246,18 @@ export function createPendingCommand(
     createdAt: new Date(createdAtMs).toISOString(),
     expiresAt: new Date(expiresAtMs).toISOString(),
     createdAtMs,
-    expiresAtMs
+    expiresAtMs,
+    scope: ctx?.previewScope ?? { sessionId: ctx?.session.id },
+    freshness: {
+      targetType: items.length === 0 ? "review_cleanup" : items.some((item) => item.type === "skill") ? "skill_candidate" : "memory_candidate",
+      targetIds: items.map((item) => item.id),
+      snapshots: items.map((item) => ({
+        id: item.id,
+        type: item.type,
+        status: item.status,
+        conflictCount: item.conflictCount
+      }))
+    }
   };
 }
 
@@ -310,6 +369,29 @@ function formatSkillList(skills: SkillManager, agent: AgentManifest): string {
     const weight = agent.skillWeights?.[item.id] ? ` weight:${agent.skillWeights[item.id]}` : "";
     return `${item.id}\t${state}${weight}\t${item.manualOnly ? "manual-only" : `triggers:${item.triggers.join(",")}`}`;
   }).join("\n");
+}
+
+async function validatePendingFreshness(pending: PendingCommand, ctx: CommandCatalogContext): Promise<void> {
+  if (pending.scope?.chatId && ctx.previewScope?.chatId && pending.scope.chatId !== ctx.previewScope.chatId) {
+    throw new Error("[BLOCKED] Pending preview belongs to a different Telegram chat. Refresh the review inbox and try again.");
+  }
+  if (pending.scope?.sessionId && ctx.previewScope?.sessionId && pending.scope.sessionId !== ctx.previewScope.sessionId) {
+    throw new Error("[BLOCKED] Pending preview belongs to a different session. Refresh the review inbox and try again.");
+  }
+  const snapshots = pending.freshness?.snapshots ?? [];
+  if (!snapshots.length) {
+    return;
+  }
+  const inbox = await ctx.reviewInbox.list("all");
+  for (const snapshot of snapshots) {
+    const current = inbox.items.find((item) => item.id === snapshot.id);
+    if (!current) {
+      throw new Error(`[BLOCKED] Pending preview is stale. Target is no longer pending: ${snapshot.id.slice(0, 8)}. Refresh the review inbox and try again.`);
+    }
+    if (current.status !== snapshot.status || current.conflictCount !== snapshot.conflictCount) {
+      throw new Error(`[BLOCKED] Pending preview is stale. Target changed: ${snapshot.id.slice(0, 8)}. Refresh the review inbox and try again.`);
+    }
+  }
 }
 
 function randomId(): string {

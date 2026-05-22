@@ -139,6 +139,7 @@ export type PromoteCandidateOptions = {
 export type CandidateCleanupResult = {
   olderThanDays: number;
   cutoff: string;
+  eligible: number;
   deleted: number;
   retainedDiscarded: number;
   applied: boolean;
@@ -853,6 +854,7 @@ export class MemoryManager {
       return {
         olderThanDays,
         cutoff,
+        eligible: expired.length,
         deleted: apply ? expired.length : 0,
         retainedDiscarded,
         applied: apply

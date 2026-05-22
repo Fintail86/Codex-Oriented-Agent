@@ -120,7 +120,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.22.0\"");
+    expect(policyJson).toContain("\"version\": \"0.26.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     const cosiaAgent = await agents.loadAgent("cosia-agent");
     expect(cosiaAgent.identity.role).toContain("Default COSIA agent");
@@ -2238,7 +2238,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.22.0");
+    expect(emptyReport.version).toBe("0.26.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -2610,6 +2610,18 @@ describe("status and listing", () => {
     }), candidates)).toMatchObject({
       type: "ambiguous"
     });
+  });
+
+  it("uses user command trigger overrides before built-in Korean triggers", async () => {
+    const root = await initializedWorkspace();
+    await mkdir(join(root, "config"), { recursive: true });
+    await writeFile(join(root, "config", "command_triggers.ko.json"), JSON.stringify({
+      "status.show": ["상태 커스텀"],
+      "review.list": ["상태"]
+    }), "utf8");
+
+    expect(retrieveCommandCandidates("#상태 커스텀", 8, root)[0].commandId).toBe("status.show");
+    expect(retrieveCommandCandidates("#상태", 8, root)[0].commandId).toBe("review.list");
   });
 
   it("retries malformed command interpreter JSON once", async () => {

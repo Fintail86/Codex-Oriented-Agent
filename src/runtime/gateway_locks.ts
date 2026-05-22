@@ -8,6 +8,11 @@ export type GatewayLockRecord = {
   kind: "process" | "session";
   owner: string;
   pid: number;
+  workspacePath?: string;
+  gatewayId?: string;
+  command?: string;
+  heartbeatAt?: string;
+  heartbeatAtMs?: number;
   createdAt: string;
   expiresAt?: string;
   createdAtMs: number;
@@ -55,7 +60,8 @@ export function sessionLockPath(workspaceRoot: string, sessionId: string): strin
 export async function acquireGatewayProcessLock(
   workspaceRoot: string,
   owner = "telegram",
-  now: () => number = () => Date.now()
+  now: () => number = () => Date.now(),
+  metadata: { gatewayId?: string; command?: string } = {}
 ): Promise<GatewayLockRecord> {
   await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
   const path = telegramProcessLockPath(workspaceRoot);
@@ -68,8 +74,13 @@ export async function acquireGatewayProcessLock(
     kind: "process",
     owner,
     pid: process.pid,
+    workspacePath: workspaceRoot,
+    gatewayId: metadata.gatewayId ?? "telegram",
+    command: metadata.command ?? "cosia gateway telegram start",
     createdAt: new Date(createdAtMs).toISOString(),
-    createdAtMs
+    heartbeatAt: new Date(createdAtMs).toISOString(),
+    createdAtMs,
+    heartbeatAtMs: createdAtMs
   };
   await writeJson(path, record);
   return record;
@@ -77,6 +88,56 @@ export async function acquireGatewayProcessLock(
 
 export async function releaseGatewayProcessLock(workspaceRoot: string, lock: GatewayLockRecord): Promise<boolean> {
   return releaseLock(telegramProcessLockPath(workspaceRoot), lock);
+}
+
+export async function readGatewayProcessLock(workspaceRoot: string): Promise<GatewayLockRecord | undefined> {
+  const path = telegramProcessLockPath(workspaceRoot);
+  if (!(await pathExists(path))) {
+    return undefined;
+  }
+  return readLock(path);
+}
+
+export async function heartbeatGatewayProcessLock(
+  workspaceRoot: string,
+  lock: GatewayLockRecord,
+  now: () => number = () => Date.now()
+): Promise<boolean> {
+  const path = telegramProcessLockPath(workspaceRoot);
+  if (!(await pathExists(path))) {
+    return false;
+  }
+  const current = await readLock(path);
+  if (current.lockId !== lock.lockId) {
+    return false;
+  }
+  const heartbeatAtMs = now();
+  await writeJson(path, {
+    ...current,
+    heartbeatAt: new Date(heartbeatAtMs).toISOString(),
+    heartbeatAtMs
+  });
+  return true;
+}
+
+export async function removeGatewayProcessLock(workspaceRoot: string): Promise<boolean> {
+  const path = telegramProcessLockPath(workspaceRoot);
+  if (!(await pathExists(path))) {
+    return false;
+  }
+  await rm(path, { force: true });
+  return true;
+}
+
+export function isGatewayProcessLockStale(record: GatewayLockRecord | undefined, workspaceRoot: string, nowMs: number, staleAfterMs = 120000): boolean {
+  if (!record) {
+    return false;
+  }
+  const heartbeatAtMs = record.heartbeatAtMs ?? record.createdAtMs;
+  const heartbeatStale = nowMs - heartbeatAtMs > staleAfterMs;
+  const workspaceMismatch = Boolean(record.workspacePath && record.workspacePath !== workspaceRoot);
+  const gatewayMismatch = Boolean(record.gatewayId && record.gatewayId !== "telegram");
+  return workspaceMismatch || gatewayMismatch || heartbeatStale || !isProcessPresent(record.pid);
 }
 
 export async function acquireSessionLock(
@@ -158,6 +219,19 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 
 function isStale(record: GatewayLockRecord, nowMs: number): boolean {
   return typeof record.expiresAtMs === "number" && record.expiresAtMs <= nowMs;
+}
+
+function isProcessPresent(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EPERM";
+  }
 }
 
 function sanitizeLockName(value: string): string {
