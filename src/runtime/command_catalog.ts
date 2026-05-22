@@ -6,6 +6,7 @@ import { MemoryManager } from "./memory_manager.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
+import { isToolId } from "./tool_catalog.js";
 import { checkProvider, listProviders } from "./model/provider_registry.js";
 import {
   formatReviewBatchDiscard,
@@ -110,8 +111,16 @@ export async function executeReadOnlyCommand(intent: Extract<CommandIntentResult
         formatProviderList(ctx.policy)
       ].filter(Boolean).join("\n");
     }
-    case "tool.git_status":
-      return executeTool("git_status", {}, ctx);
+    case "tool.run": {
+      const toolId = String(intent.args.toolId ?? "");
+      if (!isToolId(toolId)) {
+        return `[FAILED] Unknown tool: ${toolId}`;
+      }
+      const toolArgs = intent.args.toolArgs && typeof intent.args.toolArgs === "object" && !Array.isArray(intent.args.toolArgs)
+        ? intent.args.toolArgs as Record<string, unknown>
+        : {};
+      return executeTool(toolId, toolArgs, ctx);
+    }
     case "policy.check": {
       const policyManager = new PolicyManager(ctx.workspaceRoot);
       const check = await policyManager.checkPolicy(false, false);

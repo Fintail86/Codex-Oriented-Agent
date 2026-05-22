@@ -1,5 +1,10 @@
 import { parseModelOutput } from "../model_provider.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
+import { modelExposedToolIds } from "../../tool_catalog.js";
+
+const finalAfterToolResultPattern = new RegExp(
+  `Tool: (${modelExposedToolIds.filter((tool) => tool !== "write_file").map(escapeRegex).join("|")})`
+);
 
 export class MockProvider implements ModelProvider {
   readonly id = "mock";
@@ -18,7 +23,7 @@ export class MockProvider implements ModelProvider {
       }));
     }
 
-    if (input.prompt.match(/Tool: (read_file|search_files|git_status|git_diff|git_log|npm_test|npm_typecheck)/)) {
+    if (finalAfterToolResultPattern.test(input.prompt)) {
       return parseModelOutput(JSON.stringify({
         type: "final",
         content: `Mock response for ${input.sessionId}.`,
@@ -99,6 +104,10 @@ export class MockProvider implements ModelProvider {
       skillCandidates: mockSkillCandidates(input.prompt)
     }));
   }
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function mockToolArgs(tool: string, value: string): Record<string, unknown> {

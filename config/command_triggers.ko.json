@@ -68,7 +68,7 @@
     "provider 확인",
     "모델 확인"
   ],
-  "tool.git_status": [
+  "tool.run": [
     "git 상태",
     "깃 상태"
   ],

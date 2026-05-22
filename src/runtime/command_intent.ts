@@ -1,3 +1,5 @@
+import { isToolId } from "./tool_catalog.js";
+
 export type CommandSafety =
   | "read_only"
   | "preview_mutation"
@@ -181,10 +183,10 @@ export const commandDefinitions: CommandDefinition[] = [
     }
   },
   {
-    commandId: "tool.git_status",
+    commandId: "tool.run",
     safety: "read_only",
-    description: "Run the policy-gated git status tool.",
-    argsSchema: {},
+    description: "Run a policy-gated catalog tool.",
+    argsSchema: { required: ["toolId"], optional: ["toolArgs"] },
     examples: ["#git 상태 보여줘", "#git status"],
     triggers: {
       ko: ["git 상태", "깃 상태"],
@@ -327,10 +329,10 @@ export function parseHashCommand(input: string): CommandIntentResult {
     return matched("provider.check");
   }
   if (/^git\s*상태\s*(보여줘|확인|조회)?$/.test(normalized)) {
-    return matched("tool.git_status");
+    return matched("tool.run", { toolId: "git_status", toolArgs: {} });
   }
   if (/^git\s+status$/.test(normalized)) {
-    return matched("tool.git_status");
+    return matched("tool.run", { toolId: "git_status", toolArgs: {} });
   }
   if (/^policy\s*(검사|확인|체크)?$/.test(normalized) || /^정책\s*(검사|확인|체크)?$/.test(normalized)) {
     return matched("policy.check");
@@ -387,6 +389,9 @@ export function validateCommandArgs(commandId: string, args: Record<string, unkn
   }
   if (commandId === "review.list" && args.filter !== undefined && !["all", "memory", "skill"].includes(String(args.filter))) {
     return needsInput(commandId, ["filter"], "Filter must be one of: all, memory, skill.");
+  }
+  if (commandId === "tool.run" && !isToolId(String(args.toolId ?? ""))) {
+    return needsInput(commandId, ["toolId"], "Tool must be a registered ToolCatalog id.");
   }
   return undefined;
 }

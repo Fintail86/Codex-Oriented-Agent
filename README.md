@@ -63,7 +63,8 @@ cosia session create --agent architect-agent --goal "Design the COSIA runtime MV
 cosia memory add --tier core --content "COSIA uses Codex / Agent / Session layers." --importance 5 --confidence 0.9
 cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 cosia chat --session <session-id>
-cosia tool git-status
+cosia tool list
+cosia tool run git_status
 cosia provider list
 cosia provider check codex-cli
 cosia provider check openrouter
@@ -242,11 +243,13 @@ cosia policy check
 cosia policy check --repair
 cosia policy sync
 cosia policy audit --session <session-id> --limit <n>
-cosia tool git-status
-cosia tool git-diff --path <path>
-cosia tool git-log --max-count <n>
-cosia tool npm-test
-cosia tool npm-typecheck
+cosia tool list
+cosia tool run <tool-id> --args "{...}"
+cosia tool run git_status
+cosia tool run git_diff --args "{\"path\":\"<path>\"}"
+cosia tool run git_log --args "{\"maxCount\":20}"
+cosia tool run npm_test
+cosia tool run npm_typecheck
 cosia status
 cosia session list
 cosia session show <session-id>
@@ -601,14 +604,17 @@ npm test
 ## Controlled Tools
 
 ```powershell
-cosia tool git-status
-cosia tool git-diff --path src/runtime/tool_registry.ts
-cosia tool git-log --max-count 20
-cosia tool npm-test
-cosia tool npm-typecheck
+cosia tool list
+cosia tool run git_status
+cosia tool run git_diff --args "{\"path\":\"src/runtime/tool_registry.ts\"}"
+cosia tool run git_log --args "{\"maxCount\":20}"
+cosia tool run npm_test
+cosia tool run npm_typecheck
 ```
 
-These commands execute through the same Tool Registry and Policy Engine used by model tool calls. `read_file`, `write_file`, and `search_files` are core runtime tools. Git and NPM tools are bundled extension tools: runtime config can enable or disable them, but cannot change their permission, workspace boundary, command behavior, or security behavior. `git_diff --path` is restricted to workspace paths, `git_log` is capped at 50 commits, and NPM tools use the `project_check` permission class to run only the fixed `test` or `typecheck` package scripts.
+These commands execute through the same Tool Registry and Policy Engine used by model tool calls. `cosia tool list` is generated from the ToolCatalog, and `cosia tool run <tool-id>` runs any registered catalog tool. Hyphen aliases such as `cosia tool git-status` are kept as compatibility shortcuts, but the canonical CLI path is catalog id based.
+
+`read_file`, `write_file`, and `search_files` are core runtime tools. Git and NPM tools are bundled extension tools: runtime config can enable or disable them, but cannot change their permission, workspace boundary, command behavior, or security behavior. `git_diff` is restricted to workspace paths, `git_log` is capped at 50 commits, and NPM tools use the `project_check` permission class to run only the fixed `test` or `typecheck` package scripts.
 
 Provider schemas list registered model-exposed tools, while prompt contracts show only tools available for the current run after agent allowlists, runtime config, and policy gates are applied. Runtime gates still reject unavailable tool calls and record the reason.
 
@@ -616,7 +622,7 @@ Future cleanup candidates: package manager auto-detection, project-check artifac
 
 ## Roadmap
 
-- v0.27.3: Generalized bundled tool catalog.
+- v0.27.4: Catalog-driven tool CLI cleanup.
 - v0.28 decision checkpoint: keep polishing `status/start/chat/Telegram` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.

@@ -27,6 +27,7 @@ import { formatStatusReport, getStatusReport } from "./runtime/status_report.js"
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
 import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult, restartGateway, startGateway, stopGateway, unlockStaleGateway } from "./runtime/gateway_supervisor.js";
 import { checkTelegramGateway, formatTelegramCheck, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
+import { getToolCatalogEntry, isToolId, toolCatalog, toolNameValues } from "./runtime/tool_catalog.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
@@ -1534,58 +1535,39 @@ policy
     });
   });
 
-const tool = program.command("tool").description("Run policy-gated local tools.");
-
-tool
-  .command("git-status")
-  .description("Show git status through the Tool Registry.")
-  .action(async () => {
+program
+  .command("tool")
+  .argument("[action-or-tool-id]", "`list`, `run`, a catalog tool id, or a hyphen alias like git-status")
+  .argument("[tool-id]", "Tool id when using `run`")
+  .option("--args <json>", "JSON object arguments for the tool.")
+  .option("--path <path>", "Compatibility shortcut for tools that accept a workspace path.")
+  .option("--staged", "Compatibility shortcut for staged diffs.", false)
+  .option("--max-count <n>", "Compatibility shortcut for tools that accept maxCount.")
+  .description("List or run policy-gated catalog tools.")
+  .action(async (actionOrToolId: string | undefined, toolId: string | undefined, options: ToolCliOptions) => {
     await main(async (workspaceRoot) => {
-      await runCliTool(workspaceRoot, "git_status", {});
-    });
-  });
+      if (!actionOrToolId || actionOrToolId === "list") {
+        console.log(formatToolCatalog());
+        return;
+      }
 
-tool
-  .command("git-diff")
-  .option("--path <path>", "Workspace path to diff")
-  .option("--staged", "Show staged diff", false)
-  .description("Show git diff through the Tool Registry.")
-  .action(async (options: { path?: string; staged: boolean }) => {
-    await main(async (workspaceRoot) => {
-      await runCliTool(workspaceRoot, "git_diff", {
-        path: options.path,
-        staged: options.staged
-      });
-    });
-  });
+      const requestedTool = actionOrToolId === "run" ? toolId : actionOrToolId;
+      if (!requestedTool) {
+        console.log("[FAILED] Missing tool id.");
+        console.log("Try: cosia tool run git_status");
+        process.exitCode = 1;
+        return;
+      }
 
-tool
-  .command("git-log")
-  .option("--max-count <n>", "Commit count", "20")
-  .description("Show git log through the Tool Registry.")
-  .action(async (options: { maxCount: string }) => {
-    await main(async (workspaceRoot) => {
-      await runCliTool(workspaceRoot, "git_log", {
-        maxCount: parseIntegerOption(options.maxCount, "max-count")
-      });
-    });
-  });
+      const normalizedToolId = normalizeCliToolId(requestedTool);
+      if (!normalizedToolId) {
+        console.log(`[FAILED] Unknown tool: ${requestedTool}`);
+        console.log("Run `cosia tool list` to see registered catalog tools.");
+        process.exitCode = 1;
+        return;
+      }
 
-tool
-  .command("npm-test")
-  .description("Run npm test through the Tool Registry.")
-  .action(async () => {
-    await main(async (workspaceRoot) => {
-      await runCliTool(workspaceRoot, "npm_test", {});
-    });
-  });
-
-tool
-  .command("npm-typecheck")
-  .description("Run npm run typecheck through the Tool Registry.")
-  .action(async () => {
-    await main(async (workspaceRoot) => {
-      await runCliTool(workspaceRoot, "npm_typecheck", {});
+      await runCliTool(workspaceRoot, normalizedToolId, parseCliToolArgs(normalizedToolId, options));
     });
   });
 
@@ -1802,6 +1784,76 @@ function parseNumberOption(value: string, name: string): number {
     throw new Error(`Invalid ${name}: ${value}`);
   }
   return parsed;
+}
+
+type ToolCliOptions = {
+  args?: string;
+  path?: string;
+  staged: boolean;
+  maxCount?: string;
+};
+
+function normalizeCliToolId(value: string): ToolName | undefined {
+  const candidate = value.replace(/-/g, "_");
+  return isToolId(candidate) ? candidate : undefined;
+}
+
+function parseCliToolArgs(toolId: ToolName, options: ToolCliOptions): Record<string, unknown> {
+  const args = options.args ? parseJsonObjectOption(options.args, "args") : {};
+  if (options.path !== undefined) {
+    args.path = options.path;
+  }
+  if (options.staged) {
+    args.staged = true;
+  }
+  if (options.maxCount !== undefined) {
+    args.maxCount = parseIntegerOption(options.maxCount, "max-count");
+  }
+  if (Object.keys(args).length === 0) {
+    return {};
+  }
+  return args;
+}
+
+function parseJsonObjectOption(value: string, name: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch (error) {
+    throw new Error(`Invalid --${name} JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Invalid --${name}: expected a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function formatToolCatalog(): string {
+  const grouped = new Map<string, ToolName[]>();
+  for (const id of toolNameValues) {
+    const entry = getToolCatalogEntry(id);
+    const group = entry.category === "core" ? "core" : entry.extensionId;
+    grouped.set(group, [...(grouped.get(group) ?? []), id]);
+  }
+  const lines = ["COSIA Tool Catalog", ""];
+  for (const [group, ids] of grouped) {
+    lines.push(group === "core" ? "Core Runtime Tools" : `Bundled Extension Tools: ${group}`);
+    lines.push("Tool                 Permission       Exposure   Default  Description");
+    for (const id of ids) {
+      const entry = toolCatalog[id];
+      lines.push(`${id.padEnd(20)} ${entry.permission.padEnd(16)} ${entry.exposure.padEnd(10)} ${String(entry.defaultEnabled).padEnd(8)} ${entry.description}`);
+    }
+    lines.push("");
+  }
+  lines.push("Run:");
+  lines.push("  cosia tool run <tool-id> --args \"{...}\"");
+  lines.push("  cosia tool run git_status");
+  lines.push("  cosia tool run git_diff --args \"{\\\"path\\\":\\\"README.md\\\"}\"");
+  lines.push("");
+  lines.push("Compatibility:");
+  lines.push("  cosia tool git-status");
+  lines.push("  cosia tool git-diff --path README.md");
+  return lines.join("\n");
 }
 
 async function resolveMemoryTierOptions(

@@ -160,6 +160,10 @@ export function getToolCatalogEntry(id: CatalogToolId): ToolCatalogEntry {
   return toolCatalog[id];
 }
 
+export function isToolId(value: string): value is CatalogToolId {
+  return Object.prototype.hasOwnProperty.call(toolCatalog, value);
+}
+
 export function isBundledToolId(value: string): value is BundledToolId {
   return Object.prototype.hasOwnProperty.call(toolCatalog, value)
     && toolCatalog[value as CatalogToolId].category === "bundled";
