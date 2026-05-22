@@ -25,6 +25,33 @@ const policyToolSchema = z.object({
 
 const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
 const memoryPromotionPathPolicySchema = z.enum(["manual_or_low_risk", "manual_only", "deferred"]);
+const selfImprovementSchema = z.object({
+  skillAutoPromotion: z.object({
+    enabled: z.boolean(),
+    allowRiskLevels: z.array(riskLevelSchema),
+    requireTriggers: z.boolean(),
+    denySecretLike: z.boolean(),
+    maxContentChars: z.number().int().positive(),
+    preferForAgent: z.boolean()
+  }).default({
+    enabled: true,
+    allowRiskLevels: ["low"],
+    requireTriggers: true,
+    denySecretLike: true,
+    maxContentChars: 6000,
+    preferForAgent: false
+  })
+}).default({
+  skillAutoPromotion: {
+    enabled: true,
+    allowRiskLevels: ["low"],
+    requireTriggers: true,
+    denySecretLike: true,
+    maxContentChars: 6000,
+    preferForAgent: false
+  }
+});
+
 export const policyConfigSchema = z.object({
   version: z.string().min(1),
   agents: z.object({
@@ -121,6 +148,7 @@ export const policyConfigSchema = z.object({
       denyKinds: ["security", "policy", "credential", "secret"]
     })
   }),
+  selfImprovement: selfImprovementSchema,
   promptBudget: promptBudgetSchema.default(defaultRuntimeConfig.promptBudget),
   model: modelConfigSchema.default(defaultRuntimeConfig.model),
   connectors: connectorsConfigSchema.default(defaultRuntimeConfig.connectors),
@@ -141,7 +169,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.27.3",
+  version: "0.28.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -228,6 +256,16 @@ export const defaultPolicy: PolicyConfig = {
       allowScopes: ["project", "session", "task", "tool"],
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
+    }
+  },
+  selfImprovement: {
+    skillAutoPromotion: {
+      enabled: true,
+      allowRiskLevels: ["low"],
+      requireTriggers: true,
+      denySecretLike: true,
+      maxContentChars: 6000,
+      preferForAgent: false
     }
   },
   promptBudget: defaultRuntimeConfig.promptBudget,
@@ -433,6 +471,12 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
     review: {
       ...defaultPolicy.review,
       ...policy.review
+    },
+    selfImprovement: {
+      skillAutoPromotion: {
+        ...defaultPolicy.selfImprovement.skillAutoPromotion,
+        ...policy.selfImprovement?.skillAutoPromotion
+      }
     }
   });
 }
@@ -447,7 +491,8 @@ export function policyLawJson(policy: PolicyConfig): Record<string, unknown> {
     requireTools: policy.requireTools,
     fileInspection: policy.fileInspection,
     codex: policy.codex,
-    memory: policy.memory
+    memory: policy.memory,
+    selfImprovement: policy.selfImprovement
   });
 }
 
@@ -514,6 +559,15 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 - Auto promotion tiers: ${policy.memory.autoPromotion.allowTiers.map((tier) => `\`${tier}\``).join(", ")}
 - Auto promotion requires no conflict: \`${policy.memory.autoPromotion.requireNoConflict}\`
 
+## Self Improvement
+
+- Skill auto promotion enabled: \`${policy.selfImprovement.skillAutoPromotion.enabled}\`
+- Skill auto promotion risk levels: ${policy.selfImprovement.skillAutoPromotion.allowRiskLevels.map((level) => `\`${level}\``).join(", ")}
+- Skill auto promotion requires triggers: \`${policy.selfImprovement.skillAutoPromotion.requireTriggers}\`
+- Skill auto promotion denies secret-like content: \`${policy.selfImprovement.skillAutoPromotion.denySecretLike}\`
+- Skill auto promotion max content chars: \`${policy.selfImprovement.skillAutoPromotion.maxContentChars}\`
+- Skill auto promotion prefers for agent automatically: \`${policy.selfImprovement.skillAutoPromotion.preferForAgent}\`
+
 ## Runtime Config
 
 - Operational settings are not Codex law.
@@ -534,6 +588,7 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Long-term memory: ${policy.memory.longTermWrite}`,
     `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`,
     `Memory auto promotion: ${policy.memory.autoPromotion.mode}`,
+    `Skill auto promotion: ${policy.selfImprovement.skillAutoPromotion.enabled ? "enabled" : "disabled"}`,
     `Prompt budget: ${policy.promptBudget.maxPromptChars} chars`,
     `Default agent: ${policy.agents.defaultAgentId ?? "none"}`,
     `Default provider: ${policy.model.defaultProvider}`,

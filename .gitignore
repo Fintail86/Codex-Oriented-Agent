@@ -2,9 +2,12 @@ node_modules/
 dist/
 coverage/
 .vitest/
+agents/
+skills/
 memory/*
 sessions/*
 *.log
 Docs/
 .cosia-gateway/
+.cosia-reset-backups/
 config/runtime.local.json

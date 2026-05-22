@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentManifestSchema,
@@ -123,6 +123,14 @@ export class SkillStore {
   writeSkillFiles(skillId: string, content: string, metadata: SkillMetadata): void {
     writeFileSync(this.skillPath(skillId), content, "utf8");
     writeFileSync(this.skillMetadataPath(skillId), `${JSON.stringify(skillMetadataSchema.parse(metadata), null, 2)}\n`, "utf8");
+  }
+
+  deleteSkillFiles(skillId: string): void {
+    for (const filePath of [this.skillPath(skillId), this.skillMetadataPath(skillId)]) {
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+      }
+    }
   }
 
   readSkillRecords(): SkillRecord[] {

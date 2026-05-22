@@ -158,7 +158,7 @@ export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
 
 export type MemoryCandidateRecord = z.infer<typeof memoryCandidateRecordSchema>;
 
-export const skillCandidateStatusSchema = z.enum(["pending", "promoted", "discarded"]);
+export const skillCandidateStatusSchema = z.enum(["pending", "promoted", "discarded", "reverted"]);
 export type SkillCandidateStatus = z.infer<typeof skillCandidateStatusSchema>;
 
 export const skillCandidateSchema = z.object({

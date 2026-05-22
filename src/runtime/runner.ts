@@ -9,6 +9,7 @@ import { PolicyAuditLog } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { appendPromptManifest, buildPromptBundle, type PromptBlock } from "./prompt_builder.js";
+import { SelfImprovementGovernor } from "./self_improvement.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
@@ -137,21 +138,30 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       }
       finalContent = output.step.content;
       const candidates = await memory.appendCandidates(output.step.memoryCandidates, session, runId, agent.id);
-      if (candidates.length) {
-        const summary = await memory.reviewCandidates(candidates, policy.memory.autoPromotion);
-        options.onMemoryReview?.(summary);
-        options.onEvent?.(`memory review: ${summary.created} candidates, ${summary.autoPromoted} auto-promoted, ${summary.pending} pending, ${summary.conflicts} conflicts`);
-        for (const line of formatMemoryReviewSummary(summary).split(/\r?\n/).slice(1)) {
-          options.onEvent?.(line);
-        }
-        options.onEvent?.("review: use /review in chat or `cosia review`.");
-      }
       const skillCandidates = skills.appendCandidates(output.step.skillCandidates, session, runId, agent.id);
-      if (skillCandidates.length) {
-        options.onEvent?.(`skill review: ${skillCandidates.length} candidates pending`);
-        for (const candidate of skillCandidates) {
-          options.onEvent?.(`skill candidate: ${candidate.id.slice(0, 8)} ${candidate.riskLevel} ${candidate.agentId}/${candidate.skillId}`);
+      try {
+        const improve = await new SelfImprovementGovernor(workspaceRoot).afterRun({
+          policy,
+          session,
+          agentId: agent.id,
+          runId,
+          memoryCandidates: candidates,
+          skillCandidates
+        });
+        if (improve.memorySummary) {
+          options.onMemoryReview?.(improve.memorySummary);
+          options.onEvent?.(`memory review: ${improve.memorySummary.created} candidates, ${improve.memorySummary.autoPromoted} auto-promoted, ${improve.memorySummary.pending} pending, ${improve.memorySummary.conflicts} conflicts`);
+          for (const line of formatMemoryReviewSummary(improve.memorySummary).split(/\r?\n/).slice(1)) {
+            options.onEvent?.(line);
+          }
         }
+        if (candidates.length || skillCandidates.length || improve.applied.length || improve.blocked.length || improve.failed.length) {
+          options.onEvent?.(`[improve] memory/skill applied:${improve.applied.length} blocked:${improve.blocked.length} failed:${improve.failed.length}`);
+        }
+      } catch (error) {
+        options.onEvent?.(`[improve] failed: ${(error as Error).message}`);
+      }
+      if (candidates.length || skillCandidates.length) {
         options.onEvent?.("review: use /review in chat or `cosia review`.");
       }
       break;

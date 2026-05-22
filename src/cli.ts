@@ -22,6 +22,15 @@ import { runChatRepl } from "./runtime/repl.js";
 import { formatReviewCleanup, formatReviewInbox, formatReviewStats, ReviewInboxService } from "./runtime/review_inbox.js";
 import { runSession } from "./runtime/runner.js";
 import { SessionManager } from "./runtime/session_manager.js";
+import {
+  formatImprovementDetail,
+  formatImprovementMutation,
+  formatImproveApply,
+  formatImprovePreview,
+  formatImproveRecords,
+  formatImproveStatus,
+  SelfImprovementGovernor
+} from "./runtime/self_improvement.js";
 import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "./runtime/skill_manager.js";
 import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
@@ -347,6 +356,83 @@ reviewCommand
         olderThanDays: policy.review.discardedRetentionDays,
         yes: options.yes
       })));
+    });
+  });
+
+const improveCommand = program.command("improve").description("Inspect and apply governed self-improvement candidates.");
+
+improveCommand
+  .command("status")
+  .description("Show self-improvement backlog and evidence status.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(formatImproveStatus(await new SelfImprovementGovernor(workspaceRoot).status(policy)));
+    });
+  });
+
+improveCommand
+  .command("preview")
+  .description("Preview eligible backlog improvements without changing files or DB state.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(formatImprovePreview(await new SelfImprovementGovernor(workspaceRoot).preview(policy)));
+    });
+  });
+
+improveCommand
+  .command("apply")
+  .option("--yes", "Apply eligible improvements after re-evaluating backlog.", false)
+  .description("Apply eligible self-improvements. Requires --yes.")
+  .action(async (options: { yes: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (!options.yes) {
+        throw new Error("Refusing to apply improvements without --yes. Run `cosia improve preview` first.");
+      }
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(formatImproveApply(await new SelfImprovementGovernor(workspaceRoot).applyBacklog(policy)));
+    });
+  });
+
+improveCommand
+  .command("review")
+  .description("List improvement evidence records.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      console.log(formatImproveRecords(new SelfImprovementGovernor(workspaceRoot).listRecords(true)));
+    });
+  });
+
+improveCommand
+  .command("show")
+  .argument("<id>")
+  .description("Show an improvement evidence record.")
+  .action(async (id: string) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatImprovementDetail(new SelfImprovementGovernor(workspaceRoot).getRecord(id)));
+    });
+  });
+
+improveCommand
+  .command("revert")
+  .argument("<id>")
+  .requiredOption("--reason <reason>", "Revert reason.")
+  .description("Revert an applied automatic improvement.")
+  .action(async (id: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatImprovementMutation("Reverted", await new SelfImprovementGovernor(workspaceRoot).revert(id, options.reason)));
+    });
+  });
+
+improveCommand
+  .command("discard")
+  .argument("<id>")
+  .requiredOption("--reason <reason>", "Discard reason.")
+  .description("Discard an improvement recommendation or blocked record.")
+  .action(async (id: string, options: { reason: string }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatImprovementMutation("Discarded", await new SelfImprovementGovernor(workspaceRoot).discard(id, options.reason)));
     });
   });
 

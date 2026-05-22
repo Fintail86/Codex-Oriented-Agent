@@ -273,6 +273,30 @@ export class SkillCandidateStore {
     return { changed: true, record: updated, skillPath, metadataPath, skillsIndexPath, preferredAgentId: options.preferFor, warning };
   }
 
+  revertPromotedCandidate(candidateId: string, reason: string): SkillCandidateRecord {
+    const entry = resolveSkillCandidate(this.readCandidateEntries(), candidateId, true);
+    const record = entry.record;
+    if (record.status !== "promoted" || !record.promotedSkillId) {
+      throw new Error(`Skill candidate is not an applied promotion: ${candidateId}`);
+    }
+    const now = new Date().toISOString();
+    this.store.deleteSkillFiles(record.promotedSkillId);
+    this.mirror.syncSkillsIndex();
+    const updated = {
+      ...record,
+      status: "reverted" as const,
+      reviewedAt: now,
+      discardReason: reason
+    };
+    const db = this.open();
+    try {
+      upsertSkillCandidateRow(db, updated);
+    } finally {
+      db.close();
+    }
+    return updated;
+  }
+
   private readCandidateEntries(): SkillCandidateView[] {
     this.ensureSchema();
     const db = this.open();

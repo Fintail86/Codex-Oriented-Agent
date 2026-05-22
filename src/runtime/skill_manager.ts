@@ -113,6 +113,10 @@ export class SkillManager {
     return this.candidates.promoteCandidate(candidateId, options);
   }
 
+  revertPromotedCandidate(candidateId: string, reason: string): SkillCandidateRecord {
+    return this.candidates.revertPromotedCandidate(candidateId, reason);
+  }
+
   listSkills(): SkillRecord[] {
     this.ensureSkillFiles();
     return this.store.listSkills();

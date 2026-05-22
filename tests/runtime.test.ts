@@ -29,6 +29,7 @@ import { parseHashCommand, retrieveCommandCandidates } from "../src/runtime/comm
 import { formatChatHelp, runChatRepl } from "../src/runtime/repl.js";
 import { formatReviewInbox, ReviewInboxService } from "../src/runtime/review_inbox.js";
 import { runSession } from "../src/runtime/runner.js";
+import { SelfImprovementGovernor } from "../src/runtime/self_improvement.js";
 import { SessionManager } from "../src/runtime/session_manager.js";
 import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
 import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
@@ -132,7 +133,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.27.3\"");
+    expect(policyJson).toContain("\"version\": \"0.28.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1512,6 +1513,9 @@ describe("memory", () => {
     const promotions = memory.listPromotions();
     expect(promotions).toHaveLength(1);
     expect((await memory.listCandidates(true))[0].record?.status).toBe("auto_promoted");
+    const improveRecords = new SelfImprovementGovernor(root).listRecords(true).filter((record) => record.type === "memory_auto_promote");
+    expect(improveRecords).toHaveLength(1);
+    expect(improveRecords[0].status).toBe("applied");
 
     const reverted = memory.revertPromotion(promotions[0].id.slice(0, 12), "test revert");
     expect(reverted.revertedAt).toBeTruthy();
@@ -1582,13 +1586,14 @@ describe("skills", () => {
     const sessions = new SessionManager(root);
     const session = await sessions.createSession("architect-agent", "Skill candidate loop");
 
-    await runSession(root, {
-      sessionId: session.id,
-      prompt: "[MOCK_SKILL_CANDIDATE] propose a git skill",
-      providerId: "mock"
-    });
-
     const skills = new SkillManager(root);
+    skills.appendCandidates([{
+      agentId: "architect-agent",
+      skillName: "Git Commit Convention",
+      reason: "Mock skill candidate.",
+      content: "When asked about git commits, inspect git status and write concise commit messages.",
+      triggers: ["git", "commit"]
+    }], session);
     const candidates = skills.listCandidates();
     expect(candidates).toHaveLength(1);
     expect(candidates[0].record.skillId).toBe("git-commit-convention");
@@ -1610,6 +1615,57 @@ describe("skills", () => {
     expect(manifest.preferredSkills).toContain("git-commit-convention");
     expect(await readFile(join(root, "skills", "SKILLS.md"), "utf8")).toContain("git-commit-convention");
     expect(await readFile(join(root, "agents", "architect-agent", "SKILLS.md"), "utf8")).toContain("git-commit-convention");
+  });
+
+  it("auto-promotes low-risk skill candidates through the Governor and can revert them", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Auto skill improvement");
+    const events: string[] = [];
+
+    await runSession(root, {
+      sessionId: session.id,
+      prompt: "[MOCK_SKILL_CANDIDATE] propose a git skill",
+      providerId: "mock",
+      onEvent: (message) => events.push(message)
+    });
+
+    expect(events.some((event) => event.includes("[improve] memory/skill applied:1"))).toBe(true);
+    expect(await readFile(join(root, "skills", "git-commit-convention.md"), "utf8")).toContain("git commits");
+    const skills = new SkillManager(root);
+    expect(skills.listCandidates(true)[0].record.status).toBe("promoted");
+    const improve = new SelfImprovementGovernor(root);
+    const records = improve.listRecords(true).filter((record) => record.type === "skill_auto_promote");
+    expect(records).toHaveLength(1);
+    expect(records[0].status).toBe("applied");
+    expect(records[0].policySnapshot).not.toHaveProperty("connectors");
+
+    const reverted = await improve.revert(records[0].id, "test revert");
+    expect(reverted.status).toBe("reverted");
+    await expect(readFile(join(root, "skills", "git-commit-convention.md"), "utf8")).rejects.toThrow();
+    expect(skills.listCandidates(true)[0].record.status).toBe("reverted");
+  });
+
+  it("keeps triggerless skill candidates pending in Governor preview", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Triggerless skill");
+    const skills = new SkillManager(root);
+    skills.appendCandidates([{
+      agentId: "cosia-agent",
+      skillName: "No Trigger Skill",
+      reason: "No trigger test.",
+      content: "Only use manually.",
+      triggers: [],
+      riskLevel: "low"
+    }], session);
+    const policy = await new PolicyManager(root).loadPolicy();
+    const preview = await new SelfImprovementGovernor(root).preview(policy);
+
+    expect(preview.decisions.some((decision) => decision.type === "skill_auto_promote" && !decision.eligible && decision.rationale.includes("missing trigger"))).toBe(true);
+    expect(skills.listCandidates()[0].record.status).toBe("pending");
   });
 
   it("warns on manual-only skill promotion and blocks duplicate skill ids", async () => {
@@ -2174,7 +2230,7 @@ describe("model parsing and run loop", () => {
     const memoryCandidates = await new MemoryManager(root).listCandidates(true);
     expect(memoryCandidates.some((candidate) => candidate.record?.sourceAgentId === "architect-agent")).toBe(true);
 
-    const skillCandidates = new SkillManager(root).listCandidates();
+    const skillCandidates = new SkillManager(root).listCandidates(true);
     expect(skillCandidates.some((candidate) => candidate.record.sourceAgentId === "architect-agent")).toBe(true);
   });
 
@@ -2475,7 +2531,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.27.4");
+    expect(emptyReport.version).toBe("0.28.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

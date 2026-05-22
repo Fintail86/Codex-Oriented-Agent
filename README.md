@@ -1,10 +1,10 @@
-# COSIA v0.27.0
+# COSIA v0.28.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated core and bundled extension tools, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.27.0 splits Codex law from runtime configuration. `codex/POLICY.json` stays a minimal law source, while provider, gateway, prompt budget, and review retention settings live in `config/runtime.defaults.json` plus optional ignored `config/runtime.local.json`.
+v0.28.0 adds the Self-Improvement Governor. Low-risk session memory and low-risk triggered skill candidates can be auto-applied inside policy boundaries, while tool improvements stop at evidence-backed recommendations and Codex amendments stay manual-review only.
 
 ## Requirements
 
@@ -435,6 +435,24 @@ The chat REPL also accepts hash natural commands for the common review flow:
 
 Hash mutation previews expire after five minutes, so re-run the hash command if `[EXPIRED]` appears.
 
+## Self-Improvement Governor
+
+The Governor evaluates memory, skill, and tool improvement candidates without widening Codex authority. After a normal run it only processes candidates created by that run. Backlog work is handled explicitly:
+
+```powershell
+cosia improve status
+cosia improve preview
+cosia improve apply --yes
+cosia improve review
+cosia improve show <id>
+cosia improve revert <id> --reason "Rollback test"
+cosia improve discard <id> --reason "Not useful"
+```
+
+`preview` prints an `evaluationHash`, but it is not an apply token. `apply --yes` always re-evaluates the current backlog before changing anything. Memory auto-promotion is limited to low-risk, no-conflict session candidates. Skill auto-promotion is stricter: low risk, no secret-like content, safe id, valid metadata, trigger present, and content within budget. Tool improvement creates recommendation evidence only.
+
+Every automatic apply, block, failure, and recommendation is recorded in `memory/longterm.sqlite`. Skill rollback across files and SQLite is best-effort compensation; failures are recorded as evidence instead of being hidden.
+
 ## Gateway / Telegram Remote Console
 
 Telegram is an optional Gateway connector. It does not add new model, tool, or policy permissions; it routes allowed Telegram chat messages into the existing COSIA runtime.
@@ -622,8 +640,8 @@ Future cleanup candidates: package manager auto-detection, project-check artifac
 
 ## Roadmap
 
-- v0.27.4: Catalog-driven tool CLI cleanup.
-- v0.28 decision checkpoint: keep polishing `status/start/chat/Telegram` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
+- v0.28.0: Self-Improvement Governor v1.
+- Next decision checkpoint: keep polishing `status/start/chat/Telegram/improve` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: optional automatic summary/archive after explicit workflows are validated.

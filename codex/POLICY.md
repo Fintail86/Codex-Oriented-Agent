@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 ## Version
 
-- Policy version: `0.27.4`
+- Policy version: `0.28.0`
 
 ## Agents
 
@@ -56,6 +56,15 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 - Auto promotion risk levels: `low`
 - Auto promotion tiers: `session`
 - Auto promotion requires no conflict: `true`
+
+## Self Improvement
+
+- Skill auto promotion enabled: `true`
+- Skill auto promotion risk levels: `low`
+- Skill auto promotion requires triggers: `true`
+- Skill auto promotion denies secret-like content: `true`
+- Skill auto promotion max content chars: `6000`
+- Skill auto promotion prefers for agent automatically: `false`
 
 ## Runtime Config
 
