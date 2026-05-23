@@ -350,7 +350,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   const hasLegacyRuntime = Object.keys(legacy).length > 0;
   const legacyToolLocal = localConfigFromLegacyPolicyTools(raw);
   const lawPolicy = stripRuntimeConfig(raw);
-  lawPolicy.version = "0.27.3";
+  lawPolicy.version = "0.30.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
   const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
@@ -551,6 +551,9 @@ function removeBundledPolicyTools(policy: Record<string, unknown>): void {
     return;
   }
   for (const id of bundledToolIds) {
+    delete policy.tools[id];
+  }
+  for (const id of ["git_status", "git_diff", "git_log", "npm_test", "npm_typecheck"]) {
     delete policy.tools[id];
   }
 }

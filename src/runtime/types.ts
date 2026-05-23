@@ -26,6 +26,7 @@ export const toolPermissionSchema = z.enum([
   "read_only",
   "write_local",
   "project_check",
+  "shell_request",
   "destructive",
   "network",
   "external_send",
@@ -238,6 +239,10 @@ export type ModelProvider = {
 export type ToolContext = {
   workspaceRoot: string;
   allowedTools: ToolName[];
+  sessionId?: string;
+  agentId?: string;
+  runId?: string;
+  sourceChannel?: "cli" | "repl" | "gateway";
   approveOverwrite?: (filePath: string) => Promise<boolean>;
   policyAudit?: (event: PolicyAuditEventInput) => Promise<void>;
 };

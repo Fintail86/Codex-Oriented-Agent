@@ -367,6 +367,8 @@ function outputContract(allowedTools: string[]): string {
 
 When the request asks about implementation, files, CLI commands, package metadata, or current project state, inspect actual files before final. A good pattern is search_files first, then read_file on the most relevant path matches such as package.json, README.md, src/cli.ts, src/index.ts, or bin entrypoints.
 
+shell_request does not execute commands. It only creates a user-reviewable, one-shot shell approval preview. Do not claim the command has run until execution output is observed after approval. Prefer current active tools and capability proposals before shell_request.
+
 For a tool call:
 {"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 

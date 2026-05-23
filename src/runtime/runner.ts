@@ -31,6 +31,7 @@ type RunOptions = {
   onMemoryReview?: (summary: MemoryReviewSummary) => void;
   manualSkillIds?: string[];
   agentId?: string;
+  sourceChannel?: "cli" | "repl" | "gateway";
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
@@ -176,6 +177,10 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     const result = await tools.execute(output.step.tool, output.step.args, {
       workspaceRoot,
       allowedTools: agent.allowedTools,
+      sessionId: session.id,
+      agentId: agent.id,
+      runId,
+      sourceChannel: options.sourceChannel ?? "cli",
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false,
       policyAudit: recordPolicyEvent
     });

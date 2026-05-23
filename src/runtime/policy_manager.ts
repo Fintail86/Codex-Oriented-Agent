@@ -59,7 +59,7 @@ export const policyConfigSchema = z.object({
   }).default({
     defaultAgentId: "cosia-agent"
   }),
-  tools: z.partialRecord(toolNameSchema, policyToolSchema),
+  tools: z.record(z.string(), policyToolSchema),
   disabledPermissions: z.array(toolPermissionSchema),
   overwrite: z.object({
     existingFileRequiresApproval: z.boolean()
@@ -169,7 +169,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.28.0",
+  version: "0.30.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -186,6 +186,11 @@ export const defaultPolicy: PolicyConfig = {
     },
     search_files: {
       permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
+    shell_request: {
+      permission: "shell_request",
       workspace: "inside_only",
       enabled: true
     }
@@ -453,7 +458,7 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
     providers.openrouter = defaultPolicy.model.providers.openrouter;
   }
   const tools = Object.fromEntries(
-    Object.entries(policy.tools).filter(([name]) => !isBundledToolId(name))
+    Object.entries(policy.tools).filter(([name]) => toolNameSchema.safeParse(name).success && !isBundledToolId(name))
   );
   return policyConfigSchema.parse({
     ...policy,

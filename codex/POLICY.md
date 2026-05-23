@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 ## Version
 
-- Policy version: `0.28.0`
+- Policy version: `0.30.0`
 
 ## Agents
 
@@ -15,6 +15,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 - `read_file`: enabled, permission `read_only`, workspace `inside_only`
 - `write_file`: enabled, permission `write_local`, workspace `inside_only`
 - `search_files`: enabled, permission `read_only`, workspace `inside_only`
+- `shell_request`: enabled, permission `shell_request`, workspace `inside_only`
 
 ## Disabled Permissions
 

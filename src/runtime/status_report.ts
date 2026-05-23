@@ -9,6 +9,7 @@ import { COSIA_VERSION } from "./version.js";
 import { pathExists } from "./fs_utils.js";
 import { join } from "node:path";
 import { isGatewayProcessLockStale, readGatewayProcessLock } from "./gateway_locks.js";
+import { ShellApprovalLedger } from "./shell_approval.js";
 
 export type StatusIssueSeverity = "critical" | "warning" | "info";
 
@@ -80,6 +81,7 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
   const pendingSkillCandidatesCount = countPendingSkillCandidates(workspaceRoot);
   const gatewayLock = await readGatewayProcessLock(workspaceRoot);
   const gatewayLockStale = isGatewayProcessLockStale(gatewayLock, workspaceRoot, Date.now());
+  const staleShellApprovals = safeStaleShellApprovals(workspaceRoot);
   const issues = sortIssues([
     ...requiredStructure.filter((item) => !item.exists).map((item): StatusIssue => ({
       id: `missing_structure.${item.path}`,
@@ -157,6 +159,13 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
       title: "Gateway stale lock",
       detail: "A gateway process lock appears stale.",
       action: "Run `cosia gateway unlock --stale-only`."
+    } : undefined,
+    staleShellApprovals.length > 0 ? {
+      id: "shell.stale_running",
+      severity: "warning",
+      title: "Stale running shell approval",
+      detail: `${staleShellApprovals.length} shell approval(s) are stuck in running state.`,
+      action: "Run `cosia shell status` and create a new approval if retry is needed."
     } : undefined,
     policy?.connectors.telegram.enabled && !process.env[policy.connectors.telegram.tokenEnv] ? {
       id: "gateway.telegram.missing_token",
@@ -243,6 +252,14 @@ function countPendingSkillCandidates(workspaceRoot: string): number {
     return new SkillManager(workspaceRoot).listCandidates(false).filter((candidate) => candidate.record.status === "pending").length;
   } catch {
     return 0;
+  }
+}
+
+function safeStaleShellApprovals(workspaceRoot: string) {
+  try {
+    return new ShellApprovalLedger(workspaceRoot).staleRunning();
+  } catch {
+    return [];
   }
 }
 

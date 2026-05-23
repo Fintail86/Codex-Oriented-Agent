@@ -80,22 +80,6 @@
     "autoCleanupOnRead": true
   },
   "tools": {
-    "bundled": {
-      "git_status": {
-        "enabled": true
-      },
-      "git_diff": {
-        "enabled": true
-      },
-      "git_log": {
-        "enabled": true
-      },
-      "npm_test": {
-        "enabled": true
-      },
-      "npm_typecheck": {
-        "enabled": true
-      }
-    }
+    "bundled": {}
   }
 }

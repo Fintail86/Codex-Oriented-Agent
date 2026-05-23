@@ -1,16 +1,16 @@
-# COSIA v0.28.0
+# COSIA v0.30.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, policy-gated core and bundled extension tools, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.28.0 adds the Self-Improvement Governor. Low-risk session memory and low-risk triggered skill candidates can be auto-applied inside policy boundaries, while tool improvements stop at evidence-backed recommendations and Codex amendments stay manual-review only.
+v0.30.0 stabilizes the generic workspace fact scan layer. COSIA observes workspace facts as facts, not tool assumptions: names and shapes may classify observations, but they do not imply concrete tools, runners, commands, or capabilities.
 
 ## Requirements
 
 - Node.js 24+
-- npm
-- Git
+- npm for local development/install workflows
+- Git for repository development workflows
 - ripgrep (`rg`)
 - Codex CLI logged in with `codex login`
 
@@ -64,7 +64,8 @@ cosia memory add --tier core --content "COSIA uses Codex / Agent / Session layer
 cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 cosia chat --session <session-id>
 cosia tool list
-cosia tool run git_status
+cosia capability scan --request "변경 상태 확인"
+cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia provider list
 cosia provider check codex-cli
 cosia provider check openrouter
@@ -245,11 +246,10 @@ cosia policy sync
 cosia policy audit --session <session-id> --limit <n>
 cosia tool list
 cosia tool run <tool-id> --args "{...}"
-cosia tool run git_status
-cosia tool run git_diff --args "{\"path\":\"<path>\"}"
-cosia tool run git_log --args "{\"maxCount\":20}"
-cosia tool run npm_test
-cosia tool run npm_typecheck
+cosia capability scan --request "<request>"
+cosia capability review
+cosia shell preview --command "<command>" --reason "<reason>"
+cosia shell apply <approval-id>
 cosia status
 cosia session list
 cosia session show <session-id>
@@ -267,7 +267,7 @@ cosia session show <session-id>
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
-- Destructive, network, external-send, and shell tools are not registered in v0.16.
+- Destructive, network, external-send, and unrestricted shell permissions are disabled by policy. `shell_request` only creates a one-shot approval preview.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is runtime-config-backed; `codex-cli` remains the default provider.
 - `openai-compatible` is implemented but disabled by default. Its API key is read only from the configured environment variable.
@@ -619,28 +619,31 @@ Reference memory is written with source hints so model answers can cite durable 
 npm test
 ```
 
-## Controlled Tools
+## Controlled Tools And Shell Bridge
 
 ```powershell
 cosia tool list
-cosia tool run git_status
-cosia tool run git_diff --args "{\"path\":\"src/runtime/tool_registry.ts\"}"
-cosia tool run git_log --args "{\"maxCount\":20}"
-cosia tool run npm_test
-cosia tool run npm_typecheck
+cosia capability scan --request "테스트 돌려봐"
+cosia capability facts --latest
+cosia capability review
+cosia shell preview --command "echo ready" --reason "one-shot local shell check"
+cosia shell apply <approval-id>
 ```
 
-These commands execute through the same Tool Registry and Policy Engine used by model tool calls. `cosia tool list` is generated from the ToolCatalog, and `cosia tool run <tool-id>` runs any registered catalog tool. Hyphen aliases such as `cosia tool git-status` are kept as compatibility shortcuts, but the canonical CLI path is catalog id based.
+`cosia tool list` shows active catalog tools. The initial model-facing surface is intentionally small: `read_file`, `write_file`, `search_files`, and `shell_request`.
 
-`read_file`, `write_file`, and `search_files` are core runtime tools. Git and NPM tools are bundled extension tools: runtime config can enable or disable them, but cannot change their permission, workspace boundary, command behavior, or security behavior. `git_diff` is restricted to workspace paths, `git_log` is capped at 50 commits, and NPM tools use the `project_check` permission class to run only the fixed `test` or `typecheck` package scripts.
+Git, NPM, Python, Bun, and similar concrete tools are not default active tools or default blueprints. Workspace entries and structured files are generic facts first. Capability planning turns user requests plus facts into proposals before any shell command is suggested.
 
-Provider schemas list registered model-exposed tools, while prompt contracts show only tools available for the current run after agent allowlists, runtime config, and policy gates are applied. Runtime gates still reject unavailable tool calls and record the reason.
+`cosia capability scan` creates a scan snapshot with stable fact-kind summaries such as `Hidden entries`, `Manifest-like files`, `Script-like keys`, and `Warnings`. It does not run shell probes, does not infer concrete runners, and does not emit wording like “Found Git repository” or “Found NPM project”.
 
-Future cleanup candidates: package manager auto-detection, project-check artifact/cache reporting, tool output sensitivity classification, CLI-only/internal catalog examples, and `git_diff` output secret-like scan/redaction. Read-only does not mean safe-to-display.
+`shell_request` does not execute commands. It creates a one-shot shell approval preview for local CLI/REPL review. An approval stores the exact command and cwd hash, expires, and can be executed only once. Gateway/Telegram shell execution is blocked by default.
+
+Approved Shell Bridge is temporary. The long-term direction is documented in `Docs/architecture/governed-terminal-long-term.md`: a Governed Terminal substrate with command classification, probes, candidate tests, and tool acquisition.
 
 ## Roadmap
 
-- v0.28.0: Self-Improvement Governor v1.
+- v0.30.0: Generic workspace fact scan snapshots.
+- v0.29.0: Zero-base capability planner and approved shell bridge.
 - Next decision checkpoint: keep polishing `status/start/chat/Telegram/improve` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
 - v1.0+: Codex amendment gate.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.

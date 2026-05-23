@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import { AgentManager } from "./agent_manager.js";
 import {
   applyPendingCommand,
+  cancelPendingCommand,
   executeReadOnlyCommand,
   formatAmbiguousCommand,
   formatNeedsInput,
@@ -69,6 +70,8 @@ export function formatChatHelp(): string {
     "  /review stats                              Show review queue statistics.",
     "  /review cleanup                            Preview discarded candidate cleanup.",
     "  /review next                               Show the oldest pending review item.",
+    "  /shell <command>                           Preview a one-shot shell approval. Use #적용 to run once.",
+    "  /shell cancel                              Cancel the current shell/review preview.",
     "",
     "Natural commands:",
     "  #상태 보여줘                              Run a COSIA status command.",
@@ -79,6 +82,7 @@ export function formatChatHelp(): string {
     "                                             Preview discarding conflicted memory candidates.",
     "  #컨플릭트 메모리 전부 디스카드해 이유는 중복",
     "                                             Preview discarding conflicted memory candidates.",
+    "  #쉘로 <command> 실행 제안해                Preview a one-shot shell approval.",
     "  #적용                                     Apply the current pending preview.",
     "  #취소                                     Cancel the current pending preview.",
     "  #대기중인 작업 보여줘                     Show the pending preview and remaining time.",
@@ -269,6 +273,59 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         writeLine(errorOutput, "[cosia] cleared manual skills");
         continue;
       }
+      if (prompt === "/shell cancel") {
+        if (pendingCommand) {
+          try {
+            writeLine(output, await cancelPendingCommand(pendingCommand, {
+              workspaceRoot: options.workspaceRoot,
+              session,
+              agent,
+              providerId,
+              policy,
+              sessions,
+              memory,
+              skills,
+              reviewInbox,
+              now,
+              previewScope: { sessionId: session.id }
+            }));
+          } catch (error) {
+            writeLine(output, `[FAILED] ${(error as Error).message}`);
+          }
+        } else {
+          writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
+        }
+        pendingCommand = undefined;
+        continue;
+      }
+      if (prompt.startsWith("/shell ")) {
+        const command = prompt.slice("/shell ".length).trim();
+        if (!command) {
+          writeLine(output, "Usage: /shell <command>");
+          continue;
+        }
+        const preview = await previewMutationCommand({
+          type: "matched",
+          commandId: "shell.preview",
+          confidence: "high",
+          args: { command, reason: "User requested a shell execution preview from chat." }
+        }, {
+          workspaceRoot: options.workspaceRoot,
+          session,
+          agent,
+          providerId,
+          policy,
+          sessions,
+          memory,
+          skills,
+          reviewInbox,
+          now,
+          previewScope: { sessionId: session.id }
+        });
+        pendingCommand = preview?.pending;
+        writeLine(output, preview?.output ?? "[BLOCKED] Shell preview is unavailable.");
+        continue;
+      }
       if (prompt === "/review" || prompt.startsWith("/review ")) {
         try {
           await handleReviewCommand(prompt, reviewInbox, output);
@@ -353,8 +410,16 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           continue;
         }
         if (intent.commandId === "pending.cancel") {
+          if (pendingCommand) {
+            try {
+              writeLine(output, await cancelPendingCommand(pendingCommand, commandContext));
+            } catch (error) {
+              writeLine(output, `[FAILED] ${(error as Error).message}`);
+            }
+          } else {
+            writeLine(output, "[SUCCESS] Pending command cancelled.");
+          }
           pendingCommand = undefined;
-          writeLine(output, "[SUCCESS] Pending command cancelled.");
           continue;
         }
         if (intent.commandId === "pending.show") {
@@ -393,6 +458,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           sessionId: session.id,
           prompt,
           agentId: agent.id,
+          sourceChannel: "repl",
           providerId,
           providerTimeoutMs: options.providerTimeoutMs,
           approveOverwriteFiles: options.approveOverwriteFiles,

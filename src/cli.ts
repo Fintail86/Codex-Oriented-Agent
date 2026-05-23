@@ -12,6 +12,15 @@ import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, 
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatMvpChecklist } from "./runtime/mvp_checklist.js";
 import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "./runtime/command_triggers.js";
+import {
+  CapabilityPlanner,
+  capabilityScanJson,
+  formatCapabilityFacts,
+  formatCapabilityProposal,
+  formatCapabilityReview,
+  formatCapabilityScan,
+  formatCapabilityShellPreview
+} from "./runtime/capability.js";
 import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
@@ -38,6 +47,7 @@ import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult
 import { checkTelegramGateway, formatTelegramCheck, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
 import { getToolCatalogEntry, isToolId, toolCatalog, toolNameValues } from "./runtime/tool_catalog.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
+import { formatShellApprovalList, formatShellApprovalPreview, ShellApprovalLedger } from "./runtime/shell_approval.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
 import { COSIA_VERSION } from "./runtime/version.js";
@@ -1622,6 +1632,143 @@ policy
   });
 
 program
+  .command("capability")
+  .argument("[action]", "`scan`, `facts`, `review`, `show`, `discard`, or `convert`", "review")
+  .argument("[id]", "Capability proposal id.")
+  .option("--request <text>", "User request to ground a capability scan.")
+  .option("--latest", "Show the latest capability fact scan.", false)
+  .option("--scan-id <id>", "Show one capability fact scan by id.")
+  .option("--json", "Print stable JSON output.", false)
+  .option("--reason <reason>", "Reason for discard.")
+  .option("--to-shell", "Convert a proposal to a shell approval preview.", false)
+  .description("Scan generic workspace facts and review zero-base capability proposals.")
+  .action(async (action: string, id: string | undefined, options: { request?: string; latest: boolean; scanId?: string; json: boolean; reason?: string; toShell: boolean }) => {
+    await main(async (workspaceRoot) => {
+      const planner = new CapabilityPlanner(workspaceRoot);
+      if (action === "scan") {
+        const result = await planner.scan({ userNeed: options.request });
+        console.log(options.json ? capabilityScanJson(result) : formatCapabilityScan(result));
+        return;
+      }
+      if (action === "facts") {
+        const result = planner.listFacts({ latest: options.latest || !options.scanId, scanId: options.scanId });
+        console.log(options.json ? capabilityScanJson(result) : formatCapabilityFacts(result));
+        return;
+      }
+      if (action === "review") {
+        console.log(formatCapabilityReview(planner.listProposals()));
+        return;
+      }
+      if (action === "show") {
+        if (!id) throw new Error("Usage: cosia capability show <id>");
+        console.log(formatCapabilityProposal(planner.getProposal(id)));
+        return;
+      }
+      if (action === "discard") {
+        if (!id || !options.reason) throw new Error("Usage: cosia capability discard <id> --reason \"<reason>\"");
+        console.log(formatCapabilityProposal(planner.discardProposal(id, options.reason)));
+        return;
+      }
+      if (action === "convert") {
+        if (!id || !options.toShell) throw new Error("Usage: cosia capability convert <id> --to-shell");
+        console.log(formatCapabilityShellPreview(planner.convertToShell(id, { sourceChannel: "cli" })));
+        return;
+      }
+      throw new Error(`Unknown capability action: ${action}`);
+    });
+  });
+
+program
+  .command("shell")
+  .argument("[action]", "`preview`, `apply`, `run`, `cancel`, or `status`", "status")
+  .argument("[approval-id]", "Shell approval id.")
+  .option("--command <command>", "Exact shell command for preview/run.")
+  .option("--cwd <cwd>", "Workspace-relative working directory.", ".")
+  .option("--reason <reason>", "Reason for requesting shell execution.")
+  .option("--expected-effect <text>", "Expected shell command effect.")
+  .option("--from-capability <id>", "Create or run a shell preview from a capability proposal.")
+  .option("--yes", "Apply a newly created preview immediately.", false)
+  .option("--confirm <phrase>", "Approval-id-bound confirmation phrase for high-risk commands.")
+  .description("Create, apply, cancel, or inspect one-shot user-approved shell command previews.")
+  .action(async (action: string, approvalId: string | undefined, options: {
+    command?: string;
+    cwd: string;
+    reason?: string;
+    expectedEffect?: string;
+    fromCapability?: string;
+    yes: boolean;
+    confirm?: string;
+  }) => {
+    await main(async (workspaceRoot) => {
+      const ledger = new ShellApprovalLedger(workspaceRoot);
+      if (action === "status") {
+        console.log(formatShellApprovalList(ledger.list().slice(0, 20)));
+        return;
+      }
+      if (action === "preview") {
+        if (options.fromCapability) {
+          const approval = new CapabilityPlanner(workspaceRoot).convertToShell(options.fromCapability, { sourceChannel: "cli" });
+          console.log(formatCapabilityShellPreview(approval));
+          return;
+        }
+        if (!options.command || !options.reason) {
+          throw new Error("Usage: cosia shell preview --command \"<command>\" --reason \"<reason>\"");
+        }
+        console.log(formatShellApprovalPreview(ledger.create({
+          command: options.command,
+          cwd: options.cwd,
+          reason: options.reason,
+          expectedEffect: options.expectedEffect,
+          sourceChannel: "cli"
+        })));
+        return;
+      }
+      if (action === "apply") {
+        if (!approvalId) throw new Error("Usage: cosia shell apply <approval-id>");
+        const result = await ledger.apply(approvalId, { confirm: options.confirm });
+        console.log(result.content);
+        if (!result.ok) process.exitCode = 1;
+        return;
+      }
+      if (action === "run") {
+        if (options.fromCapability) {
+          const approval = new CapabilityPlanner(workspaceRoot).convertToShell(options.fromCapability, { sourceChannel: "cli" });
+          console.log(formatCapabilityShellPreview(approval));
+          if (options.yes) {
+            const result = await ledger.apply(approval.id, { confirm: options.confirm });
+            console.log("");
+            console.log(result.content);
+            if (!result.ok) process.exitCode = 1;
+          }
+          return;
+        }
+        if (!options.command || !options.reason || !options.yes) {
+          throw new Error("Usage: cosia shell run --command \"<command>\" --reason \"<reason>\" --yes");
+        }
+        const approval = ledger.create({
+          command: options.command,
+          cwd: options.cwd,
+          reason: options.reason,
+          expectedEffect: options.expectedEffect,
+          sourceChannel: "cli"
+        });
+        console.log(formatShellApprovalPreview(approval));
+        const result = await ledger.apply(approval.id, { confirm: options.confirm });
+        console.log("");
+        console.log(result.content);
+        if (!result.ok) process.exitCode = 1;
+        return;
+      }
+      if (action === "cancel") {
+        if (!approvalId) throw new Error("Usage: cosia shell cancel <approval-id>");
+        console.log(formatShellApprovalPreview(ledger.cancel(approvalId)));
+        return;
+      }
+      throw new Error(`Unknown shell action: ${action}`);
+    });
+  });
+
+program
   .command("tool")
   .argument("[action-or-tool-id]", "`list`, `run`, a catalog tool id, or a hyphen alias like git-status")
   .argument("[tool-id]", "Tool id when using `run`")
@@ -1640,7 +1787,7 @@ program
       const requestedTool = actionOrToolId === "run" ? toolId : actionOrToolId;
       if (!requestedTool) {
         console.log("[FAILED] Missing tool id.");
-        console.log("Try: cosia tool run git_status");
+        console.log("Try: cosia tool list");
         process.exitCode = 1;
         return;
       }
@@ -1933,12 +2080,12 @@ function formatToolCatalog(): string {
   }
   lines.push("Run:");
   lines.push("  cosia tool run <tool-id> --args \"{...}\"");
-  lines.push("  cosia tool run git_status");
-  lines.push("  cosia tool run git_diff --args \"{\\\"path\\\":\\\"README.md\\\"}\"");
+  lines.push("  cosia shell preview --command \"<command>\" --reason \"<reason>\"");
   lines.push("");
-  lines.push("Compatibility:");
-  lines.push("  cosia tool git-status");
-  lines.push("  cosia tool git-diff --path README.md");
+  lines.push("Zero-base capability flow:");
+  lines.push("  cosia capability scan --request \"<request>\"");
+  lines.push("  cosia capability facts --latest");
+  lines.push("  cosia capability review");
   return lines.join("\n");
 }
 
@@ -2225,7 +2372,8 @@ ${source.contextTail}
 async function runCliTool(workspaceRoot: string, name: ToolName, args: Record<string, unknown>): Promise<void> {
   const result = await new ToolRegistry().execute(name, args, {
     workspaceRoot,
-    allowedTools: [name]
+    allowedTools: [name],
+    sourceChannel: "cli"
   });
   console.log(result.content);
   if (!result.ok) {

@@ -1,5 +1,5 @@
 {
-  "version": "0.28.0",
+  "version": "0.30.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -16,6 +16,11 @@
     },
     "search_files": {
       "permission": "read_only",
+      "workspace": "inside_only",
+      "enabled": true
+    },
+    "shell_request": {
+      "permission": "shell_request",
       "workspace": "inside_only",
       "enabled": true
     }

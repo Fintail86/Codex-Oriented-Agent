@@ -187,10 +187,21 @@ export const commandDefinitions: CommandDefinition[] = [
     safety: "read_only",
     description: "Run a policy-gated catalog tool.",
     argsSchema: { required: ["toolId"], optional: ["toolArgs"] },
-    examples: ["#git 상태 보여줘", "#git status"],
+    examples: ["#tool read_file path README.md"],
     triggers: {
-      ko: ["git 상태", "깃 상태"],
-      en: ["git status", "show git status"]
+      ko: ["도구 실행"],
+      en: ["tool run"]
+    }
+  },
+  {
+    commandId: "shell.preview",
+    safety: "preview_mutation",
+    description: "Create a user-reviewable one-shot shell approval preview.",
+    argsSchema: { required: ["command"], optional: ["reason"] },
+    examples: ["#쉘로 echo ready 실행 제안해", "#suggest shell echo ready"],
+    triggers: {
+      ko: ["쉘 실행 제안", "쉘로 실행", "터미널 실행 제안"],
+      en: ["shell preview", "suggest shell", "propose shell"]
     }
   },
   {
@@ -267,6 +278,21 @@ export function parseHashCommand(input: string): CommandIntentResult {
     return matched("memory.search", { query: englishMemorySearch[1].trim() });
   }
 
+  const shellPreviewKo = body.match(/^쉘로\s+(.+?)\s*(?:실행\s*)?(?:제안해|제안|프리뷰|preview)(?:\s*(?:이유|사유|reason)는?\s+(.+))?$/i);
+  if (shellPreviewKo) {
+    return matched("shell.preview", {
+      command: shellPreviewKo[1].trim(),
+      reason: shellPreviewKo[2]?.trim() ?? "User requested a shell execution preview."
+    });
+  }
+  const shellPreviewEn = body.match(/^(?:suggest|propose)\s+shell\s+(.+?)(?:\s+(?:because|reason(?:\s+is)?|for)\s+(.+))?$/i);
+  if (shellPreviewEn) {
+    return matched("shell.preview", {
+      command: shellPreviewEn[1].trim(),
+      reason: shellPreviewEn[2]?.trim() ?? "User requested a shell execution preview."
+    });
+  }
+
   const englishDiscardConflicts = body.match(/^discard\s+(?:all\s+)?(?:conflicting|conflict|duplicate)\s+memor(?:y|ies)(?:\s+(?:because|reason(?:\s+is)?|for)\s+(.+))?$/i);
   if (englishDiscardConflicts) {
     const reason = englishDiscardConflicts[1]?.trim();
@@ -327,12 +353,6 @@ export function parseHashCommand(input: string): CommandIntentResult {
   }
   if (/^check\s+provider$/.test(normalized)) {
     return matched("provider.check");
-  }
-  if (/^git\s*상태\s*(보여줘|확인|조회)?$/.test(normalized)) {
-    return matched("tool.run", { toolId: "git_status", toolArgs: {} });
-  }
-  if (/^git\s+status$/.test(normalized)) {
-    return matched("tool.run", { toolId: "git_status", toolArgs: {} });
   }
   if (/^policy\s*(검사|확인|체크)?$/.test(normalized) || /^정책\s*(검사|확인|체크)?$/.test(normalized)) {
     return matched("policy.check");

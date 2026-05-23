@@ -7,6 +7,7 @@ import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
 import { isToolId } from "./tool_catalog.js";
+import { formatShellApprovalPreview, ShellApprovalLedger } from "./shell_approval.js";
 import { checkProvider, listProviders } from "./model/provider_registry.js";
 import {
   formatReviewBatchDiscard,
@@ -141,6 +142,27 @@ export async function executeReadOnlyCommand(intent: Extract<CommandIntentResult
 
 export async function previewMutationCommand(intent: Extract<CommandIntentResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<{ output: string; pending?: PendingCommand } | undefined> {
   switch (intent.commandId) {
+    case "shell.preview": {
+      if (ctx.previewScope?.chatId) {
+        return { output: "[BLOCKED] Shell execution previews are blocked through gateway channels in v0.29." };
+      }
+      const command = String(intent.args.command ?? "");
+      const reason = String(intent.args.reason ?? "User requested a shell execution preview.");
+      const approval = new ShellApprovalLedger(ctx.workspaceRoot).create({
+        command,
+        reason,
+        expectedEffect: "Run the approved shell command once.",
+        sourceSessionId: ctx.session.id,
+        sourceAgentId: ctx.agent.id,
+        sourceChannel: "repl"
+      });
+      const output = [
+        formatShellApprovalPreview(approval),
+        "",
+        approval.blocked ? "This command cannot be applied." : "Run #적용 to execute once or #취소 to cancel."
+      ].join("\n");
+      return { output, pending: approval.blocked ? undefined : createPendingCommand("shell.apply", { approvalId: approval.id }, "dangerous", output, ctx.now, ctx, []) };
+    }
     case "review.discard": {
       const target = String(intent.args.target ?? "");
       const reason = String(intent.args.reason ?? "");
@@ -207,6 +229,13 @@ export async function previewMutationCommand(intent: Extract<CommandIntentResult
 export async function applyPendingCommand(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
   await validatePendingFreshness(pending, ctx);
   switch (pending.commandId) {
+    case "shell.apply": {
+      if (ctx.previewScope?.chatId) {
+        return "[BLOCKED] Shell execution is blocked through gateway channels in v0.29.";
+      }
+      const result = await new ShellApprovalLedger(ctx.workspaceRoot).apply(String(pending.args.approvalId ?? ""));
+      return result.content;
+    }
     case "review.discard": {
       const result = await ctx.reviewInbox.discard(String(pending.args.target ?? ""), String(pending.args.reason ?? ""));
       return [`[SUCCESS] ${result.output}`, formatReviewUpdate(result.inbox)].join("\n");
@@ -233,6 +262,14 @@ export async function applyPendingCommand(pending: PendingCommand, ctx: CommandC
     default:
       return "[BLOCKED] This pending command cannot be applied.";
   }
+}
+
+export async function cancelPendingCommand(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
+  if (pending.commandId === "shell.apply") {
+    const approval = new ShellApprovalLedger(ctx.workspaceRoot).cancel(String(pending.args.approvalId ?? ""));
+    return `[SUCCESS] Shell approval cancelled: ${approval.id}`;
+  }
+  return "[SUCCESS] Pending command cancelled.";
 }
 
 export function createPendingCommand(
@@ -307,7 +344,10 @@ export function formatAmbiguousCommand(candidates: string[], hint: string): stri
 async function executeTool(name: ToolName, args: unknown, ctx: CommandCatalogContext): Promise<string> {
   const result = await new ToolRegistry().execute(name, args, {
     workspaceRoot: ctx.workspaceRoot,
-    allowedTools: ctx.agent.allowedTools
+    allowedTools: ctx.agent.allowedTools,
+    sessionId: ctx.session.id,
+    agentId: ctx.agent.id,
+    sourceChannel: ctx.previewScope?.chatId ? "gateway" : "repl"
   });
   return result.content;
 }

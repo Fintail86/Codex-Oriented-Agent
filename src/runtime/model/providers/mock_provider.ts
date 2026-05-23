@@ -114,14 +114,11 @@ function mockToolArgs(tool: string, value: string): Record<string, unknown> {
   if (tool === "search_files") {
     return { query: value };
   }
-  if (tool === "git_log") {
-    return value ? { maxCount: Number.parseInt(value, 10) } : {};
-  }
-  if (tool === "git_diff") {
-    return value ? { path: value } : {};
-  }
-  if (tool === "git_status" || tool === "npm_test" || tool === "npm_typecheck") {
-    return {};
+  if (tool === "shell_request") {
+    return {
+      command: value || "echo COSIA shell preview",
+      reason: "Mock shell preview request."
+    };
   }
   return { path: value };
 }

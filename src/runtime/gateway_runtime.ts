@@ -69,6 +69,7 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     sessionId: state.activeSessionId!,
     prompt: input,
     providerId: state.providerId,
+    sourceChannel: "gateway",
     onEvent: () => undefined
   }));
   return done(output, state);

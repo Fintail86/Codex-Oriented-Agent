@@ -8,6 +8,7 @@ import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
+import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
 import { getToolCatalogEntry } from "./tool_catalog.js";
 import type { ToolContext, ToolDefinition, ToolName, ToolPermission, ToolResult } from "./types.js";
 
@@ -27,13 +28,11 @@ const searchFilesArgs = z.object({
   directory: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional())
 });
 
-const gitDiffArgs = z.object({
-  path: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
-  staged: z.boolean().optional()
-});
-
-const gitLogArgs = z.object({
-  maxCount: z.number().int().positive().optional()
+const shellRequestArgs = z.object({
+  command: z.string().min(1),
+  cwd: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
+  reason: z.string().min(1),
+  expectedEffect: z.string().min(1).optional()
 });
 
 const toolOutputMaxChars = 12000;
@@ -76,26 +75,20 @@ export class ToolRegistry {
         const content = formatSearchResult(contentMatches, pathSearch.matches, pathSearch.diagnostics);
         return { ok: true, content };
     });
-    this.registerCatalogTool("git_status", async (_args, ctx) => runWorkspaceCommand("git", ["status", "--short", "--branch"], ctx.workspaceRoot));
-    this.registerCatalogTool("git_diff", async (args, ctx) => {
-        const parsed = gitDiffArgs.parse(args);
-        const commandArgs = ["diff"];
-        if (parsed.staged) {
-          commandArgs.push("--staged");
-        }
-        if (parsed.path) {
-          const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
-          commandArgs.push("--", toDisplayPath(resolved, ctx.workspaceRoot));
-        }
-        return runWorkspaceCommand("git", commandArgs, ctx.workspaceRoot);
+    this.registerCatalogTool("shell_request", async (args, ctx) => {
+      const parsed = shellRequestArgs.parse(args);
+      const approval = new ShellApprovalLedger(ctx.workspaceRoot).create({
+        command: parsed.command,
+        cwd: parsed.cwd,
+        reason: parsed.reason,
+        expectedEffect: parsed.expectedEffect,
+        sourceSessionId: ctx.sessionId,
+        sourceAgentId: ctx.agentId,
+        sourceRunId: ctx.runId,
+        sourceChannel: ctx.sourceChannel ?? "cli"
+      });
+      return { ok: !approval.blocked, content: formatShellApprovalPreview(approval) };
     });
-    this.registerCatalogTool("git_log", async (args, ctx) => {
-        const parsed = gitLogArgs.parse(args);
-        const maxCount = Math.min(parsed.maxCount ?? 20, 50);
-        return runWorkspaceCommand("git", ["log", `--max-count=${maxCount}`, "--date=short", "--pretty=format:%h %ad %s"], ctx.workspaceRoot);
-    });
-    this.registerCatalogTool("npm_test", async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "test", ["test"]));
-    this.registerCatalogTool("npm_typecheck", async (_args, ctx) => runPackageScript(ctx.workspaceRoot, "typecheck", ["run", "typecheck"]));
   }
 
   register(tool: ToolDefinition): void {
@@ -175,38 +168,9 @@ export class ToolRegistry {
   }
 }
 
-async function runPackageScript(workspaceRoot: string, scriptName: "test" | "typecheck", npmArgs: string[]): Promise<ToolResult> {
-  let packageJsonPath: string;
-  try {
-    packageJsonPath = await resolveExistingInside(workspaceRoot, "package.json");
-  } catch {
-    return { ok: false, content: `package.json script not found: ${scriptName}` };
-  }
-  const packageJson = JSON.parse(await readText(packageJsonPath)) as { scripts?: Record<string, string> };
-  if (!packageJson.scripts?.[scriptName]) {
-    return { ok: false, content: `package.json script not found: ${scriptName}` };
-  }
-  return runNpmCommand(npmArgs, workspaceRoot);
-}
-
 function summarizeToolArgs(name: ToolName, args: unknown): Record<string, unknown> {
-  if (name === "npm_test") {
-    return {
-      ...summarizePolicyArgs(args),
-      permission: "project_check",
-      script: "test",
-      packageJsonPath: "package.json",
-      arbitraryArgs: false
-    };
-  }
-  if (name === "npm_typecheck") {
-    return {
-      ...summarizePolicyArgs(args),
-      permission: "project_check",
-      script: "typecheck",
-      packageJsonPath: "package.json",
-      arbitraryArgs: false
-    };
+  if (name === "shell_request") {
+    return summarizeShellToolArgs(args);
   }
   return summarizePolicyArgs(args);
 }
@@ -237,13 +201,6 @@ function formatCommandOutput(stdout: string, stderr: string): string {
     sections.push(`stderr:\n${stderr.trimEnd()}`);
   }
   return sections.join("\n\n") || "No output.";
-}
-
-function runNpmCommand(args: string[], cwd: string): Promise<ToolResult> {
-  if (process.platform === "win32") {
-    return runWorkspaceCommand("cmd.exe", ["/d", "/s", "/c", "npm", ...args], cwd);
-  }
-  return runWorkspaceCommand("npm", args, cwd);
 }
 
 async function runRipgrep(query: string, directory: string): Promise<{ stdout: string; stderr: string }> {

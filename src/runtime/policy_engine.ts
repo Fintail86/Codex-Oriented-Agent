@@ -55,6 +55,9 @@ export class PolicyEngine {
     if (tool.permission === "project_check") {
       return { allowed: true, ruleId: "tool.project_check.fixed_script", reason: "Allowed fixed project check script." };
     }
+    if (tool.permission === "shell_request") {
+      return { allowed: true, ruleId: "tool.shell_request.preview_only", reason: "Allowed shell approval preview creation. This does not execute a command." };
+    }
     return { allowed: false, ruleId: "permission.unsupported", reason: `Unsupported permission: ${tool.permission}` };
   }
 
