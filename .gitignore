@@ -16,3 +16,5 @@ Docs/*
 .cosia-gateway/
 .cosia-reset-backups/
 config/runtime.local.json
+config/runtime.private.json
+config/secrets.private.json

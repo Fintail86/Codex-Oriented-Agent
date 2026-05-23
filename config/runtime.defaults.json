@@ -12,11 +12,11 @@
     "overflowPolicy": "truncate_low_priority"
   },
   "model": {
-    "defaultProvider": "codex-cli",
+    "providerProfiles": {},
     "providers": {
       "codex-cli": {
         "type": "codex-cli",
-        "enabled": true,
+        "enabled": false,
         "sandbox": "read-only",
         "baseUrl": null,
         "model": null,
@@ -64,7 +64,6 @@
       "enabled": false,
       "tokenEnv": "TELEGRAM_BOT_TOKEN",
       "allowedChatIds": [],
-      "defaultProvider": "codex-cli",
       "allowMutations": true,
       "blockDangerous": true,
       "messageChunkChars": 3500,

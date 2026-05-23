@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import { Command } from "commander";
 import {
   AgentManager,
@@ -21,11 +22,22 @@ import {
   formatCapabilityReview,
   formatCapabilityScan
 } from "./runtime/capability.js";
-import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
+import { checkProvider, createProvider, listProviders, resolveProviderSelection } from "./runtime/model/provider_registry.js";
+import {
+  addProviderProfile,
+  formatProviderProfileAdded,
+  formatProviderProfileList,
+  formatProviderProfileShow,
+  formatProviderProfileUsed,
+  listProviderProfileSummaries,
+  requireProviderProfile,
+  useProviderProfile,
+  removeProviderProfile
+} from "./runtime/provider_profiles.js";
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "./runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "./runtime/policy_manager.js";
-import { applyRuntimeConfigMigration, buildRuntimeConfigMigration, formatConfigCheck, formatConfigShow } from "./runtime/runtime_config.js";
+import { applyRuntimeConfigMigration, buildRuntimeConfigMigration, formatConfigCheck, formatConfigShow, repairRuntimeConfig } from "./runtime/runtime_config.js";
 import type { PromptManifest } from "./runtime/prompt_builder.js";
 import { runChatRepl } from "./runtime/repl.js";
 import { formatReviewCleanup, formatReviewInbox, formatReviewStats, ReviewInboxService } from "./runtime/review_inbox.js";
@@ -44,7 +56,17 @@ import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResul
 import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
 import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult, restartGateway, startGateway, stopGateway, unlockStaleGateway } from "./runtime/gateway_supervisor.js";
-import { checkTelegramGateway, formatTelegramCheck, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
+import { checkTelegramGateway, formatTelegramCheck, resolveTelegramToken, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
+import {
+  addTelegramChatId,
+  enableTelegramConnector,
+  formatTelegramConnectorList,
+  removeTelegramChatId,
+  setTelegramToken,
+  setTelegramTokenEnv,
+  unsetTelegramToken,
+  unsetTelegramTokenEnv
+} from "./runtime/telegram_connector_config.js";
 import { getToolCatalogEntry, isToolId, toolCatalog, toolNameValues } from "./runtime/tool_catalog.js";
 import { ToolRegistry } from "./runtime/tool_registry.js";
 import { formatShellApprovalList, formatShellApprovalPreview, ShellApprovalLedger } from "./runtime/shell_approval.js";
@@ -155,9 +177,16 @@ configCommand
 
 configCommand
   .command("check")
+  .option("--repair", "Remove legacy ignored runtime fields where safe.", false)
   .description("Validate runtime configuration and secret-like values.")
-  .action(async () => {
+  .action(async (options: { repair: boolean }) => {
     await main(async (workspaceRoot) => {
+      if (options.repair) {
+        const repaired = await repairRuntimeConfig(workspaceRoot);
+        if (repaired.length) {
+          console.log(`Repaired: ${repaired.join(", ")}`);
+        }
+      }
       const rawPolicy = await readRawPolicy(workspaceRoot);
       console.log(await formatConfigCheck(workspaceRoot, rawPolicy));
     });
@@ -228,22 +257,132 @@ providerCommand
     });
   });
 
+const providerProfile = providerCommand.command("profile").description("Manage explicit provider profiles.");
+
+providerProfile
+  .command("add")
+  .argument("<name>")
+  .requiredOption("--provider <provider-id>", "Provider implementation id, e.g. codex-cli, openrouter, openai-compatible.")
+  .option("--oauth", "Use provider-managed OAuth status. For codex-cli this uses Codex CLI login.", false)
+  .option("--api-key", "Prompt for an API key and store it in the private secret store.", false)
+  .option("--api-key-env <env-name>", "Read the API key from an environment variable.")
+  .option("--model <model-id>", "Model id for OpenAI-compatible providers.")
+  .option("--base-url <url>", "Base URL for openai-compatible providers.")
+  .description("Add or update a provider profile.")
+  .action(async (name: string, options: {
+    provider: string;
+    oauth: boolean;
+    apiKey: boolean;
+    apiKeyEnv?: string;
+    model?: string;
+    baseUrl?: string;
+  }) => {
+    await main(async (workspaceRoot) => {
+      const authModes = [options.oauth, options.apiKey, Boolean(options.apiKeyEnv)].filter(Boolean).length;
+      if (authModes !== 1) {
+        throw new Error("Choose exactly one auth mode: --oauth, --api-key, or --api-key-env <ENV_NAME>.");
+      }
+      if (options.oauth && options.provider !== "codex-cli") {
+        throw new Error("--oauth is currently supported for --provider codex-cli.");
+      }
+      const apiKey = options.apiKey ? await promptHidden("API key: ") : undefined;
+      console.log(formatProviderProfileAdded(await addProviderProfile(workspaceRoot, name, {
+        providerId: options.provider,
+        oauth: options.oauth,
+        apiKey,
+        apiKeyEnv: options.apiKeyEnv,
+        model: options.model,
+        baseUrl: options.baseUrl
+      })));
+    });
+  });
+
+providerProfile
+  .command("use")
+  .argument("<name>")
+  .description("Select the active provider profile.")
+  .action(async (name: string) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatProviderProfileUsed(await useProviderProfile(workspaceRoot, name)));
+    });
+  });
+
+providerProfile
+  .command("list")
+  .description("List provider profiles without printing secrets.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      console.log(formatProviderProfileList(await listProviderProfileSummaries(workspaceRoot)));
+    });
+  });
+
+providerProfile
+  .command("show")
+  .argument("<name>")
+  .description("Show one provider profile without printing secrets.")
+  .action(async (name: string) => {
+    await main(async (workspaceRoot) => {
+      const item = (await listProviderProfileSummaries(workspaceRoot)).find((profile) => profile.name === name);
+      if (!item) {
+        throw new Error(`Provider profile not found: ${name}`);
+      }
+      console.log(formatProviderProfileShow(item));
+    });
+  });
+
+providerProfile
+  .command("check")
+  .argument("[name]")
+  .description("Check a provider profile configuration and auth status.")
+  .action(async (name?: string) => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      const profileName = name ?? policy.model.activeProviderProfile;
+      if (!profileName) {
+        throw new Error("No active provider profile is configured. Run `cosia provider profile use <name>`.");
+      }
+      await requireProviderProfile(workspaceRoot, profileName);
+      const result = await checkProvider(profileName, workspaceRoot, policy);
+      console.log(`Provider profile: ${profileName}`);
+      console.log(`Status: ${result.ok ? "ok" : "failed"}`);
+      console.log(`Message: ${result.message}`);
+      if (result.reason) {
+        console.log(`Reason: ${result.reason}`);
+      }
+      if (result.hint) {
+        console.log(`Hint: ${result.hint}`);
+      }
+    });
+  });
+
+providerProfile
+  .command("remove")
+  .argument("<name>")
+  .description("Remove a provider profile and its private API key, if present.")
+  .action(async (name: string) => {
+    await main(async (workspaceRoot) => {
+      const removed = await removeProviderProfile(workspaceRoot, name);
+      console.log(removed ? `Provider profile removed: ${name}` : `Provider profile not found: ${name}`);
+    });
+  });
+
 const gateway = program.command("gateway").description("Manage COSIA external gateway connectors.");
 
 gateway
   .command("start")
   .option("--connector <connector>", "Connector to start. v0.26.1 supports telegram.")
-  .option("--model-provider <provider>", "Model provider for gateway chat messages.")
+  .option("--provider-profile <name>", "Temporary provider profile override for gateway chat messages.")
+  .option("--model-provider <provider>", "Deprecated alias for --provider-profile.")
   .option("--once", "Process one update batch and exit.", false)
   .description("Start the COSIA gateway supervisor.")
-  .action(async (options: { connector?: string; modelProvider?: string; once: boolean }) => {
+  .action(async (options: { connector?: string; providerProfile?: string; modelProvider?: string; once: boolean }) => {
     await main(async (workspaceRoot) => {
       if (options.connector && options.connector !== "telegram") {
         throw new Error(`Unsupported gateway connector: ${options.connector}`);
       }
       await startGateway(workspaceRoot, {
         connector: options.connector as "telegram" | undefined,
-        modelProvider: options.modelProvider,
+        providerProfile: options.providerProfile ?? options.modelProvider,
         once: options.once
       });
     });
@@ -264,18 +403,19 @@ gateway
 gateway
   .command("restart")
   .option("--connector <connector>", "Connector to restart. v0.26.1 supports telegram.")
-  .option("--model-provider <provider>", "Model provider for gateway chat messages.")
+  .option("--provider-profile <name>", "Temporary provider profile override for gateway chat messages.")
+  .option("--model-provider <provider>", "Deprecated alias for --provider-profile.")
   .option("--timeout-ms <ms>", "Milliseconds to wait for cooperative shutdown.", "10000")
   .option("--once", "After stopping, process one update batch and exit.", false)
   .description("Cooperatively stop and then start the gateway supervisor.")
-  .action(async (options: { connector?: string; modelProvider?: string; timeoutMs: string; once: boolean }) => {
+  .action(async (options: { connector?: string; providerProfile?: string; modelProvider?: string; timeoutMs: string; once: boolean }) => {
     await main(async (workspaceRoot) => {
       if (options.connector && options.connector !== "telegram") {
         throw new Error(`Unsupported gateway connector: ${options.connector}`);
       }
       await restartGateway(workspaceRoot, {
         connector: options.connector as "telegram" | undefined,
-        modelProvider: options.modelProvider,
+        providerProfile: options.providerProfile ?? options.modelProvider,
         timeoutMs: parseIntegerOption(options.timeoutMs, "--timeout-ms"),
         once: options.once
       });
@@ -305,6 +445,100 @@ gateway
 const telegram = gateway.command("telegram").description("Manage the Telegram remote console connector.");
 
 telegram
+  .command("enable")
+  .description("Enable the Telegram gateway connector in private runtime config.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const config = await enableTelegramConnector(workspaceRoot, true);
+      console.log(`Telegram connector enabled: ${config.enabled}`);
+    });
+  });
+
+telegram
+  .command("disable")
+  .description("Disable the Telegram gateway connector in private runtime config.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const config = await enableTelegramConnector(workspaceRoot, false);
+      console.log(`Telegram connector enabled: ${config.enabled}`);
+    });
+  });
+
+telegram
+  .command("set")
+  .argument("<field>")
+  .argument("[value]")
+  .description("Set Telegram connector fields: chat-id/id, token, token-env.")
+  .action(async (field: string, value?: string) => {
+    await main(async (workspaceRoot) => {
+      switch (field) {
+        case "chat-id":
+        case "id": {
+          if (!value) throw new Error(`Usage: cosia gateway telegram set ${field} <chat-id>`);
+          const config = await addTelegramChatId(workspaceRoot, value);
+          console.log(`Telegram allowed chat ids: ${config.allowedChatIds.length}`);
+          break;
+        }
+        case "token": {
+          if (value) throw new Error("Do not pass Telegram token as an argument. Run `cosia gateway telegram set token` and enter it at the hidden prompt.");
+          const token = await promptHidden("Telegram bot token: ");
+          await setTelegramToken(workspaceRoot, token);
+          console.log("Telegram token stored in private secret store.");
+          break;
+        }
+        case "token-env": {
+          if (!value) throw new Error("Usage: cosia gateway telegram set token-env <ENV_NAME>");
+          const config = await setTelegramTokenEnv(workspaceRoot, value);
+          console.log(`Telegram token env: ${config.tokenEnv}`);
+          break;
+        }
+        default:
+          throw new Error("Unsupported Telegram field. Use chat-id, id, token, or token-env.");
+      }
+    });
+  });
+
+telegram
+  .command("unset")
+  .argument("<field>")
+  .argument("[value]")
+  .description("Unset Telegram connector fields: chat-id/id, token, token-env.")
+  .action(async (field: string, value?: string) => {
+    await main(async (workspaceRoot) => {
+      switch (field) {
+        case "chat-id":
+        case "id": {
+          if (!value) throw new Error(`Usage: cosia gateway telegram unset ${field} <chat-id>`);
+          const config = await removeTelegramChatId(workspaceRoot, value);
+          console.log(`Telegram allowed chat ids: ${config.allowedChatIds.length}`);
+          break;
+        }
+        case "token":
+          await unsetTelegramToken(workspaceRoot);
+          console.log("Telegram private token removed.");
+          break;
+        case "token-env": {
+          const config = await unsetTelegramTokenEnv(workspaceRoot);
+          console.log(`Telegram token env: ${config.tokenEnv}`);
+          break;
+        }
+        default:
+          throw new Error("Unsupported Telegram field. Use chat-id, id, token, or token-env.");
+      }
+    });
+  });
+
+telegram
+  .command("list")
+  .description("List Telegram connector settings without printing secrets.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+      console.log(formatTelegramConnectorList(policy.connectors.telegram, resolveTelegramToken(workspaceRoot, policy.connectors.telegram)));
+    });
+  });
+
+telegram
   .command("check")
   .description("Check Telegram connector policy, token env, allowlist, and getMe.")
   .action(async () => {
@@ -315,13 +549,14 @@ telegram
 
 telegram
   .command("start")
-  .option("--provider <provider>", "Provider for Telegram chat messages.")
+  .option("--provider-profile <name>", "Temporary provider profile override for Telegram chat messages.")
+  .option("--provider <provider>", "Deprecated alias for --provider-profile.")
   .option("--once", "Process one update batch and exit.", false)
   .description("Debug: start Telegram long polling directly. Normal use: cosia gateway start.")
-  .action(async (options: { provider?: string; once: boolean }) => {
+  .action(async (options: { providerProfile?: string; provider?: string; once: boolean }) => {
     await main(async (workspaceRoot) => {
       await startTelegramGateway(workspaceRoot, {
-        providerId: options.provider,
+        providerId: options.providerProfile ?? options.provider,
         once: options.once,
         command: "cosia gateway telegram start"
       });
@@ -808,7 +1043,7 @@ session
         return;
       }
       const policy = await new PolicyManager(workspaceRoot).loadPolicy();
-      const providerId = options.provider ?? policy.model.defaultProvider;
+      const providerId = resolveProviderSelection(policy, options.provider);
       const summary = await generateSessionSummary(workspaceRoot, session, providerId, {
         timeoutMs: options.providerTimeoutMs ? parseIntegerOption(options.providerTimeoutMs, "provider-timeout-ms") : undefined,
         contextChars: policy.promptBudget.contextTailChars
@@ -2407,6 +2642,26 @@ async function resolveBootstrapOptions(options: {
       throw new Error("Agent id, name, role, and voice are required.");
     }
     return { id, name, role, voice, priorities, boundaries };
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptHidden(prompt: string): Promise<string> {
+  process.stdout.write(prompt);
+  const muted = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    }
+  });
+  const rl = createInterface({ input: process.stdin, output: muted, terminal: true });
+  try {
+    const value = await rl.question("");
+    process.stdout.write("\n");
+    if (!value.trim()) {
+      throw new Error("Secret value is required.");
+    }
+    return value.trim();
   } finally {
     rl.close();
   }

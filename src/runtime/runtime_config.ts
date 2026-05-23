@@ -14,6 +14,11 @@ import {
 const promptOverflowPolicySchema = z.literal("truncate_low_priority");
 const providerTypeSchema = z.enum(["codex-cli", "openai-compatible"]);
 const providerResponseFormatSchema = z.enum(["json_object"]).nullable();
+const providerAuthSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("oauth") }),
+  z.object({ mode: z.literal("secret"), secretRef: z.string().min(1) }),
+  z.object({ mode: z.literal("env"), envName: z.string().min(1) })
+]);
 
 export const providerConfigSchema = z.object({
   type: providerTypeSchema.optional(),
@@ -30,6 +35,16 @@ export const providerConfigSchema = z.object({
   extraHeaders: z.record(z.string(), z.string()).default({})
 });
 
+export const providerProfileSchema = z.object({
+  name: z.string().min(1),
+  providerId: z.string().min(1),
+  model: z.string().min(1).optional(),
+  baseUrl: z.string().min(1).optional(),
+  auth: providerAuthSchema,
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1)
+});
+
 export const promptBudgetSchema = z.object({
   maxPromptChars: z.number().int().positive(),
   refMemoryMaxItems: z.number().int().positive(),
@@ -44,15 +59,15 @@ export const promptBudgetSchema = z.object({
 });
 
 export const modelConfigSchema = z.object({
-  defaultProvider: z.string().min(1),
-  providers: z.record(z.string(), providerConfigSchema)
+  activeProviderProfile: z.string().min(1).optional(),
+  providerProfiles: z.record(z.string(), providerProfileSchema).default({}),
+  providers: z.record(z.string(), providerConfigSchema).default({})
 });
 
 export const telegramConnectorSchema = z.object({
   enabled: z.boolean().default(false),
   tokenEnv: z.string().min(1).default("TELEGRAM_BOT_TOKEN"),
   allowedChatIds: z.array(z.string()).default([]),
-  defaultProvider: z.string().min(1).default("codex-cli"),
   allowMutations: z.boolean().default(true),
   blockDangerous: z.boolean().default(true),
   messageChunkChars: z.number().int().positive().default(3500),
@@ -89,6 +104,7 @@ export const runtimeConfigSchema = z.object({
 });
 
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+export type ProviderProfile = z.infer<typeof providerProfileSchema>;
 
 export type RuntimeConfigIssue = {
   severity: "info" | "warning" | "high";
@@ -141,11 +157,11 @@ export const defaultRuntimeConfig: RuntimeConfig = {
     overflowPolicy: "truncate_low_priority"
   },
   model: {
-    defaultProvider: "codex-cli",
+    providerProfiles: {},
     providers: {
       "codex-cli": {
         type: "codex-cli",
-        enabled: true,
+        enabled: false,
         sandbox: "read-only",
         baseUrl: null,
         model: null,
@@ -193,7 +209,6 @@ export const defaultRuntimeConfig: RuntimeConfig = {
       enabled: false,
       tokenEnv: "TELEGRAM_BOT_TOKEN",
       allowedChatIds: [],
-      defaultProvider: "codex-cli",
       allowMutations: true,
       blockDangerous: true,
       messageChunkChars: 3500,
@@ -230,6 +245,35 @@ export async function ensureRuntimeDefaults(workspaceRoot: string): Promise<stri
   return ["config/runtime.defaults.json"];
 }
 
+export async function repairRuntimeConfig(workspaceRoot: string): Promise<string[]> {
+  const repaired = [...await ensureRuntimeDefaults(workspaceRoot)];
+  for (const path of [runtimeDefaultsPath(workspaceRoot), runtimeLocalPath(workspaceRoot), runtimePrivatePath(workspaceRoot)]) {
+    if (!existsSync(path)) {
+      continue;
+    }
+    const raw = await readJsonIfExists(path);
+    if (!isObject(raw)) {
+      continue;
+    }
+    const next = clone(raw) as JsonObject;
+    let changed = false;
+    if (isObject(next.model) && Object.prototype.hasOwnProperty.call(next.model, "defaultProvider")) {
+      delete next.model.defaultProvider;
+      changed = true;
+    }
+    if (isObject(next.connectors) && isObject(next.connectors.telegram)
+      && Object.prototype.hasOwnProperty.call(next.connectors.telegram, "defaultProvider")) {
+      delete next.connectors.telegram.defaultProvider;
+      changed = true;
+    }
+    if (changed) {
+      await writeText(path, `${JSON.stringify(next, null, 2)}\n`);
+      repaired.push(path);
+    }
+  }
+  return repaired;
+}
+
 export async function loadRuntimeConfig(workspaceRoot: string, legacyPolicyRaw?: unknown): Promise<RuntimeConfigLoadResult> {
   const sources: Record<string, string> = {};
   let merged = clone(defaultRuntimeConfig) as JsonObject;
@@ -255,13 +299,25 @@ export async function loadRuntimeConfig(workspaceRoot: string, legacyPolicyRaw?:
     markSources(parsedLocal, "runtime.local.json", sources);
   }
 
+  const privateRaw = await readJsonIfExists(runtimePrivatePath(workspaceRoot));
+  if (privateRaw) {
+    const parsedPrivate = isObject(privateRaw) ? privateRaw : {};
+    merged = deepMerge(merged, parsedPrivate) as JsonObject;
+    markSources(parsedPrivate, "runtime.private.json", sources);
+  }
+
   const config = normalizeRuntimeConfig(runtimeConfigSchema.parse(merged));
   const issues = [
     ...collectSecretIssues(defaultsRaw, "config/runtime.defaults.json"),
     ...collectSecretIssues(localRaw, "config/runtime.local.json"),
+    ...collectSecretIssues(privateRaw, "config/runtime.private.json"),
+    ...collectLegacyProviderIssues(defaultsRaw, "config/runtime.defaults.json"),
+    ...collectLegacyProviderIssues(localRaw, "config/runtime.local.json"),
+    ...collectLegacyProviderIssues(privateRaw, "config/runtime.private.json"),
     ...collectPersonalDefaultsIssues(defaultsRaw),
     ...collectBundledToolIssues(defaultsRaw, "config/runtime.defaults.json"),
     ...collectBundledToolIssues(localRaw, "config/runtime.local.json"),
+    ...collectBundledToolIssues(privateRaw, "config/runtime.private.json"),
     ...collectToolCatalogIssues()
   ];
   return {
@@ -282,13 +338,26 @@ export function normalizeRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
       extraHeaders: provider.extraHeaders ?? {}
     };
   }
+  if (!providers["codex-cli"]) {
+    providers["codex-cli"] = defaultRuntimeConfig.model.providers["codex-cli"];
+  }
+  if (!providers["openai-compatible"]) {
+    providers["openai-compatible"] = defaultRuntimeConfig.model.providers["openai-compatible"];
+  }
   if (!providers.openrouter) {
     providers.openrouter = defaultRuntimeConfig.model.providers.openrouter;
   }
+  const providerProfiles = Object.fromEntries(
+    Object.entries(config.model.providerProfiles ?? {}).map(([name, profile]) => [name, {
+      ...profile,
+      name
+    }])
+  );
   return runtimeConfigSchema.parse({
     ...config,
     model: {
       ...config.model,
+      providerProfiles,
       providers
     },
     connectors: {
@@ -350,7 +419,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   const hasLegacyRuntime = Object.keys(legacy).length > 0;
   const legacyToolLocal = localConfigFromLegacyPolicyTools(raw);
   const lawPolicy = stripRuntimeConfig(raw);
-  lawPolicy.version = "0.38.0";
+  lawPolicy.version = "0.39.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
   const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
@@ -373,7 +442,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
     policyPath: policyJsonPath(workspaceRoot),
     policyMarkdownPath: join(workspaceRoot, "codex", "POLICY.md"),
     defaultsPath: runtimeDefaultsPath(workspaceRoot),
-    localPath: runtimeLocalPath(workspaceRoot),
+    localPath: runtimePrivatePath(workspaceRoot),
     lawPolicy,
     runtimeDefaults,
     runtimeLocal: mergedRuntimeLocal,
@@ -406,7 +475,8 @@ export async function formatConfigShow(workspaceRoot: string, legacyPolicyRaw?: 
   const rows = [
     ["promptBudget.maxPromptChars", String(result.config.promptBudget.maxPromptChars)],
     ["promptBudget.contextTailChars", String(result.config.promptBudget.contextTailChars)],
-    ["model.defaultProvider", result.config.model.defaultProvider],
+    ["model.activeProviderProfile", result.config.model.activeProviderProfile ?? "none"],
+    ["model.providerProfiles", String(Object.keys(result.config.model.providerProfiles).length)],
     ["model.providers.codex-cli.enabled", String(result.config.model.providers["codex-cli"]?.enabled ?? false)],
     ["model.providers.openrouter.enabled", String(result.config.model.providers.openrouter?.enabled ?? false)],
     ["model.providers.openrouter.model", result.config.model.providers.openrouter?.model ?? "null"],
@@ -446,6 +516,7 @@ export async function formatConfigCheck(workspaceRoot: string, legacyPolicyRaw?:
       "Config: warning",
       `runtime.defaults.json: ${existsSync(runtimeDefaultsPath(workspaceRoot)) ? "present" : "missing; using built-in defaults"}`,
       `runtime.local.json: ${existsSync(runtimeLocalPath(workspaceRoot)) ? "present" : "missing"}`,
+      `runtime.private.json: ${existsSync(runtimePrivatePath(workspaceRoot)) ? "present" : "missing"}`,
       "Schema: failed",
       "Issues:",
       `- [high] config.schema runtime config: ${(error as Error).message}`
@@ -456,6 +527,7 @@ export async function formatConfigCheck(workspaceRoot: string, legacyPolicyRaw?:
     `Config: ${high.length ? "warning" : "ok"}`,
     `runtime.defaults.json: ${existsSync(runtimeDefaultsPath(workspaceRoot)) ? "present" : "missing; using built-in defaults"}`,
     `runtime.local.json: ${existsSync(runtimeLocalPath(workspaceRoot)) ? "present" : "missing"}`,
+    `runtime.private.json: ${existsSync(runtimePrivatePath(workspaceRoot)) ? "present" : "missing"}`,
     "Schema: ok",
     result.issues.length ? formatConfigIssues(result.issues) : "Issues: none"
   ].join("\n");
@@ -471,7 +543,7 @@ export function formatConfigMigration(migration: RuntimeConfigMigration): string
     `- Law policy: ${migration.policyPath}`,
     `- Policy mirror: ${migration.policyMarkdownPath}`,
     `- Runtime defaults: ${migration.defaultsPath}`,
-    Object.keys(migration.runtimeLocal).length ? `- Runtime local: ${migration.localPath}` : "- Runtime local: not needed",
+    Object.keys(migration.runtimeLocal).length ? `- Runtime private: ${migration.localPath}` : "- Runtime private: not needed",
     "",
     "Moved to runtime.defaults.json:",
     "- promptBudget",
@@ -479,7 +551,7 @@ export function formatConfigMigration(migration: RuntimeConfigMigration): string
     "- disabled provider/connector templates",
     "- bundled tool defaults",
     "",
-    "Moved to runtime.local.json:",
+    "Moved to runtime.private.json:",
     localKeys.length ? localKeys.map((key) => `- ${key}`).join("\n") : "- none",
     "",
     migration.changed ? "Re-run with --yes to apply." : "Already migrated."
@@ -490,10 +562,14 @@ function localConfigFromLegacy(legacy: PartialRuntimeConfig): PartialRuntimeConf
   const local: PartialRuntimeConfig = {};
   if (legacy.model) {
     const modelLocal: PartialRuntimeConfig["model"] = {};
-    if (legacy.model.defaultProvider && legacy.model.defaultProvider !== defaultRuntimeConfig.model.defaultProvider) {
-      modelLocal.defaultProvider = legacy.model.defaultProvider;
+    const legacyModel = legacy.model as PartialRuntimeConfig["model"] & { defaultProvider?: string };
+    if (legacyModel.activeProviderProfile) {
+      modelLocal.activeProviderProfile = legacyModel.activeProviderProfile;
     }
-    const providerEntries = Object.entries(legacy.model.providers ?? {});
+    if (legacyModel.providerProfiles) {
+      modelLocal.providerProfiles = legacyModel.providerProfiles;
+    }
+    const providerEntries = Object.entries(legacyModel.providers ?? {});
     const localProviders: RuntimeConfig["model"]["providers"] = {};
     for (const [id, provider] of providerEntries) {
       if (!provider) {
@@ -516,7 +592,6 @@ function localConfigFromLegacy(legacy: PartialRuntimeConfig): PartialRuntimeConf
     if (
       telegram.enabled
       || telegram.allowedChatIds.length
-      || telegram.defaultProvider !== defaultRuntimeConfig.connectors.telegram.defaultProvider
       || telegram.tokenEnv !== defaultRuntimeConfig.connectors.telegram.tokenEnv
     ) {
       local.connectors = { telegram };
@@ -634,7 +709,7 @@ function collectPersonalDefaultsIssues(raw: unknown): RuntimeConfigIssue[] {
       severity: "warning",
       id: "config.personal_defaults",
       path: "config/runtime.defaults.json:connectors.telegram.allowedChatIds",
-      message: "Telegram chat ids are personal values and should live in runtime.local.json."
+      message: "Telegram chat ids are personal values and should live in runtime.private.json."
     });
   }
   const openrouter = parsed.data.model?.providers?.openrouter;
@@ -643,10 +718,22 @@ function collectPersonalDefaultsIssues(raw: unknown): RuntimeConfigIssue[] {
       severity: "warning",
       id: "config.personal_defaults",
       path: "config/runtime.defaults.json:model.providers.openrouter",
-      message: "Enabled external providers and model choices should usually live in runtime.local.json."
+      message: "Enabled external providers and model choices should usually live in provider profiles in runtime.private.json."
     });
   }
   return issues;
+}
+
+function collectLegacyProviderIssues(raw: unknown, label: string): RuntimeConfigIssue[] {
+  if (!isObject(raw) || !isObject(raw.model) || typeof raw.model.defaultProvider !== "string") {
+    return [];
+  }
+  return [{
+    severity: "warning",
+    id: "config.legacy_default_provider",
+    path: `${label}:model.defaultProvider`,
+    message: "Legacy model.defaultProvider is ignored. Use `cosia provider profile add ...` and `cosia provider profile use <name>`."
+  }];
 }
 
 function collectBundledToolIssues(raw: unknown, label: string): RuntimeConfigIssue[] {
@@ -778,6 +865,14 @@ export function runtimeDefaultsPath(workspaceRoot: string): string {
 
 export function runtimeLocalPath(workspaceRoot: string): string {
   return join(configDir(workspaceRoot), "runtime.local.json");
+}
+
+export function runtimePrivatePath(workspaceRoot: string): string {
+  return join(configDir(workspaceRoot), "runtime.private.json");
+}
+
+export function secretsPrivatePath(workspaceRoot: string): string {
+  return join(configDir(workspaceRoot), "secrets.private.json");
 }
 
 function policyJsonPath(workspaceRoot: string): string {

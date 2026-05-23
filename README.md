@@ -77,9 +77,10 @@ cosia tool candidate test <candidate-id>
 cosia tool candidate approve <candidate-id>
 cosia tool activate <candidate-id> --agent <agent-id> --yes
 cosia tool active list
-cosia provider list
-cosia provider check codex-cli
-cosia provider check openrouter
+cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile use codex
+cosia provider profile list
+cosia provider profile check codex
 cosia mvp checklist
 cosia status
 cosia doctor
@@ -140,35 +141,31 @@ cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보
 
 Provider setup:
 
-- `codex-cli` is the default provider and uses the user's existing Codex CLI login.
+- Fresh init has no active provider profile.
+- `codex-cli` is supported only through an explicit provider profile and uses the user's existing Codex CLI login.
 - COSIA never reads or stores Codex token files.
 - `mock` is for deterministic regression tests only.
-- `openai-compatible` is available in runtime config but starts disabled.
-- `openrouter` is available as a disabled `openai-compatible` preset.
-- API keys are read only from the configured environment variable, default `OPENAI_API_KEY`.
-- Use `cosia provider list` and `cosia provider check <provider-id>` to inspect provider status.
+- `openai-compatible` and `openrouter` are available through provider profiles.
+- API keys are entered with hidden input into `config/secrets.private.json`, or read from an explicitly configured env var.
+- Use `cosia provider profile list` and `cosia provider profile check <name>` to inspect provider status.
 - Common failure reasons include `disabled`, `missing_config`, `missing_api_key`, `auth_failed`, `timeout`, `rate_limited`, `network_error`, `http_error`, `malformed_response`, and `malformed_agent_step`.
 
-OpenRouter setup:
+Provider profile setup:
 
 ```powershell
-$env:OPENROUTER_API_KEY="..."
-cosia provider check openrouter
-cosia run --session <session-id> --provider openrouter --prompt "간단히 응답해줘"
+cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile use codex
+cosia provider profile check codex
+
+cosia provider profile add openrouter --provider openrouter --api-key --model <openrouter-model-id>
+cosia provider profile use openrouter
+cosia run --session <session-id> --prompt "간단히 응답해줘"
 ```
 
-In `config/runtime.local.json`, enable OpenRouter and set a model id:
+Environment-variable API key profiles are also supported:
 
-```json
-"openrouter": {
-  "type": "openai-compatible",
-  "enabled": true,
-  "baseUrl": "https://openrouter.ai/api/v1",
-  "model": "<openrouter-model-id>",
-  "apiKeyEnv": "OPENROUTER_API_KEY",
-  "endpointPath": "/chat/completions",
-  "responseFormat": "json_object"
-}
+```powershell
+cosia provider profile add openrouter-env --provider openrouter --api-key-env OPENROUTER_API_KEY --model <openrouter-model-id>
 ```
 
 If a selected model rejects `response_format`, set `"responseFormat": null`. COSIA keeps `Authorization` and `Content-Type` under runtime control even when provider `extraHeaders` are configured.
@@ -195,7 +192,7 @@ cosia session unassign <session-id>
 cosia session archive <session-id> --reason "<reason>"
 cosia session list --agent <agent-id>
 cosia session summarize <session-id> --content "<summary>"
-cosia session summarize <session-id> --from-context --provider <provider>
+cosia session summarize <session-id> --from-context --provider <provider-profile>
 cosia session prompt <session-id> --latest
 cosia session context status <session-id>
 cosia session context compact <session-id> --keep-last <n> --reason "<reason>" --yes
@@ -204,8 +201,11 @@ cosia run --session <session-id> --prompt "<prompt>" --agent <agent-id>
 cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
 cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
-cosia provider list
-cosia provider check <provider-id>
+cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>
+cosia provider profile use <name>
+cosia provider profile list
+cosia provider profile check [name]
 cosia config show
 cosia config check
 cosia config migrate --from-policy
@@ -274,16 +274,16 @@ cosia session show <session-id>
 - Existing file overwrite requires explicit approval.
 - `codex/POLICY.json` is the Codex law source of truth.
 - `codex/POLICY.md` mirrors the JSON law for humans.
-- Runtime settings live in `config/runtime.defaults.json` and optional ignored `config/runtime.local.json`.
+- Runtime settings live in `config/runtime.defaults.json`, legacy `config/runtime.local.json`, and ignored `config/runtime.private.json`.
+- Secret values live in ignored `config/secrets.private.json` or explicitly configured env vars.
 - `config show`, `config check`, and `config migrate --from-policy` manage runtime configuration.
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
 - Destructive, network, external-send, and unrestricted shell permissions are disabled by policy. `shell_request` only creates a one-shot approval preview.
 - Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
-- Provider config is runtime-config-backed; `codex-cli` remains the default provider.
-- `openai-compatible` is implemented but disabled by default. Its API key is read only from the configured environment variable.
-- `mock` provider success proves regression safety only; MVP acceptance requires `codex-cli`.
+- Provider config is profile-backed; no provider is active until `cosia provider profile use <name>`.
+- `mock` provider success proves regression safety only; MVP acceptance requires an explicit Codex provider profile.
 - Provider failures are reported with reason codes and short next-action hints.
 - Invalid AgentStep JSON triggers a bounded structured retry that includes the parse error and a short malformed-output preview.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -472,10 +472,16 @@ Telegram is an optional Gateway connector. It does not add new model, tool, or p
 Setup:
 
 ```powershell
-$env:TELEGRAM_BOT_TOKEN="..."
+cosia init
+cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile use codex
+
+cosia gateway telegram enable
+cosia gateway telegram set chat-id <chat-id>
+cosia gateway telegram set token
 cosia policy check --repair
 cosia gateway telegram check
-cosia gateway start --model-provider codex-cli
+cosia gateway start
 ```
 
 Normal operation uses the top-level Gateway supervisor:
@@ -489,15 +495,14 @@ cosia gateway restart
 
 `cosia gateway telegram ...` commands remain available for connector-specific checks and debugging, but users should usually start and stop the Gateway through the top-level commands.
 
-`config/runtime.local.json` should enable the connector and list allowed chat ids:
+Connector settings are managed through the CLI:
 
-```json
-"connectors": {
-  "telegram": {
-    "enabled": true,
-    "allowedChatIds": ["123456789"]
-  }
-}
+```powershell
+cosia gateway telegram enable
+cosia gateway telegram set chat-id <chat-id>
+cosia gateway telegram set token
+cosia gateway telegram list
+cosia gateway telegram check
 ```
 
 Useful Telegram commands:

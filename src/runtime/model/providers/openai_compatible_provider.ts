@@ -9,7 +9,9 @@ export type OpenAICompatibleProviderOptions = {
   enabled: boolean;
   baseUrl: string | null;
   model: string | null;
-  apiKeyEnv: string;
+  apiKeyEnv?: string;
+  apiKey?: string;
+  apiKeyLabel?: string;
   endpointPath: string;
   timeoutMs: number;
   structuredRetryCount: number;
@@ -33,7 +35,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       this.validateConfig();
       return {
         ok: true,
-        message: `Provider ${this.id} is configured. Live model calls use ${this.options.apiKeyEnv}.`
+        message: `Provider ${this.id} is configured. Live model calls use ${this.apiKeyLabel()}.`
       };
     } catch (error) {
       const providerError = error instanceof ProviderError
@@ -134,20 +136,24 @@ export class OpenAICompatibleProvider implements ModelProvider {
         hint: providerFailureHint("missing_config", this.id)
       });
     }
-    if (!this.options.apiKeyEnv) {
-      throw new ProviderError("missing_config", "Provider openai-compatible requires apiKeyEnv.", {
+    if (!this.options.apiKeyEnv && this.options.apiKey === undefined) {
+      throw new ProviderError("missing_config", "Provider openai-compatible requires an API key source.", {
         hint: providerFailureHint("missing_config", this.id)
       });
     }
     if (!this.apiKey()) {
-      throw new ProviderError("missing_api_key", `Environment variable ${this.options.apiKeyEnv} is not set.`, {
+      throw new ProviderError("missing_api_key", `${this.apiKeyLabel()} is not set.`, {
         hint: providerFailureHint("missing_api_key", this.id)
       });
     }
   }
 
   private apiKey(): string {
-    return process.env[this.options.apiKeyEnv] ?? "";
+    return this.options.apiKey ?? (this.options.apiKeyEnv ? process.env[this.options.apiKeyEnv] : "") ?? "";
+  }
+
+  private apiKeyLabel(): string {
+    return this.options.apiKeyLabel ?? (this.options.apiKeyEnv ? `environment variable ${this.options.apiKeyEnv}` : "private secret");
   }
 
   private endpointUrl(): string {

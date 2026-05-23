@@ -9,7 +9,6 @@ import {
   extractLegacyRuntimeConfig,
   loadRuntimeConfig,
   modelConfigSchema,
-  normalizeRuntimeConfig,
   promptBudgetSchema,
   reviewRetentionSchema,
   stripRuntimeConfig
@@ -169,7 +168,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.38.0",
+  version: "0.39.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -457,6 +456,18 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
   if (!providers.openrouter) {
     providers.openrouter = defaultPolicy.model.providers.openrouter;
   }
+  if (!providers["codex-cli"]) {
+    providers["codex-cli"] = defaultPolicy.model.providers["codex-cli"];
+  }
+  if (!providers["openai-compatible"]) {
+    providers["openai-compatible"] = defaultPolicy.model.providers["openai-compatible"];
+  }
+  const providerProfiles = Object.fromEntries(
+    Object.entries(policy.model.providerProfiles ?? {}).map(([name, profile]) => [name, {
+      ...profile,
+      name
+    }])
+  );
   const tools = Object.fromEntries(
     Object.entries(policy.tools).filter(([name]) => toolNameSchema.safeParse(name).success && !isBundledToolId(name))
   );
@@ -465,6 +476,7 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
     tools,
     model: {
       ...policy.model,
+      providerProfiles,
       providers
     },
     connectors: {
@@ -512,7 +524,7 @@ export function renderPolicyMarkdown(policy: PolicyConfig): string {
 
   return `# POLICY
 
-This file mirrors \`codex/POLICY.json\`. The JSON file is the Codex law source of truth. Runtime settings live in \`config/runtime.defaults.json\` and optional \`config/runtime.local.json\`.
+This file mirrors \`codex/POLICY.json\`. The JSON file is the Codex law source of truth. Runtime settings live in \`config/runtime.defaults.json\`, legacy \`config/runtime.local.json\`, and optional ignored \`config/runtime.private.json\`.
 
 ## Version
 
@@ -576,7 +588,7 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 ## Runtime Config
 
 - Operational settings are not Codex law.
-- Provider details, gateway connector settings, prompt budgets, bundled tool enablement, and review retention live in \`config/runtime.defaults.json\` and optional ignored \`config/runtime.local.json\`.
+- Provider profiles, gateway connector settings, prompt budgets, bundled tool enablement, and review retention live in runtime config. User-specific values should live in ignored private config and secret files.
 - Runtime config cannot relax disabled permissions, dangerous command blocks, protected Codex path rules, or Codex amendment approval requirements.
 `;
 }
@@ -596,7 +608,7 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Skill auto promotion: ${policy.selfImprovement.skillAutoPromotion.enabled ? "enabled" : "disabled"}`,
     `Prompt budget: ${policy.promptBudget.maxPromptChars} chars`,
     `Default agent: ${policy.agents.defaultAgentId ?? "none"}`,
-    `Default provider: ${policy.model.defaultProvider}`,
+    `Active provider profile: ${policy.model.activeProviderProfile ?? "none"}`,
     `Telegram connector: ${policy.connectors.telegram.enabled ? "enabled" : "disabled"}`
   ].join("\n");
 }

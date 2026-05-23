@@ -1,6 +1,6 @@
 import { AgentManager } from "./agent_manager.js";
 import { MemoryManager } from "./memory_manager.js";
-import { checkProvider } from "./model/provider_registry.js";
+import { checkProvider, resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager } from "./policy_manager.js";
 import { SessionManager, type ContextHealth } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
@@ -10,6 +10,7 @@ import { pathExists } from "./fs_utils.js";
 import { join } from "node:path";
 import { isGatewayProcessLockStale, readGatewayProcessLock } from "./gateway_locks.js";
 import { ShellApprovalLedger } from "./shell_approval.js";
+import { resolveTelegramToken } from "./telegram_gateway.js";
 
 export type StatusIssueSeverity = "critical" | "warning" | "info";
 
@@ -49,7 +50,7 @@ export type StatusReport = {
   recommendedActions: string[];
 };
 
-export async function getStatusReport(workspaceRoot: string, providerId = "codex-cli"): Promise<StatusReport> {
+export async function getStatusReport(workspaceRoot: string, providerId = "default"): Promise<StatusReport> {
   const sessionManager = new SessionManager(workspaceRoot);
   const [agents, sessions, requiredStructure] = await Promise.all([
     new AgentManager(workspaceRoot).listAgents(),
@@ -70,12 +71,26 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
     })
     : [];
   const largestContext = contextHealth.sort((left, right) => right.chars - left.chars)[0];
-  const resolvedProviderId = providerId === "default" && policy ? policy.model.defaultProvider : providerId;
-  const providerStatus = policy
-    ? await checkProvider(resolvedProviderId, workspaceRoot, policy)
-    : resolvedProviderId === "mock"
+  let resolvedProviderId = providerId;
+  let providerStatus: { id: string; ok: boolean; message: string; reason?: string; hint?: string };
+  if (policy) {
+    try {
+      resolvedProviderId = resolveProviderSelection(policy, providerId);
+      providerStatus = await checkProvider(resolvedProviderId, workspaceRoot, policy);
+    } catch (error) {
+      providerStatus = {
+        id: "none",
+        ok: false,
+        message: (error as Error).message,
+        reason: "missing_config",
+        hint: "Run `cosia provider profile add ...` and `cosia provider profile use <name>`."
+      };
+    }
+  } else {
+    providerStatus = resolvedProviderId === "mock"
       ? { id: "mock", ok: true, message: "Mock provider does not require authentication." }
       : { id: resolvedProviderId, ok: false, message: "Policy not loaded.", reason: "missing_config", hint: "Run `cosia init` or `cosia policy check --repair`." };
+  }
   const defaultAgentId = policy?.agents.defaultAgentId ?? null;
   const defaultAgentExists = Boolean(defaultAgentId && agentIds.has(defaultAgentId));
   const pendingSkillCandidatesCount = countPendingSkillCandidates(workspaceRoot);
@@ -167,12 +182,12 @@ export async function getStatusReport(workspaceRoot: string, providerId = "codex
       detail: `${staleShellApprovals.length} shell approval(s) are stuck in running state.`,
       action: "Run `cosia shell status` and create a new approval if retry is needed."
     } : undefined,
-    policy?.connectors.telegram.enabled && !process.env[policy.connectors.telegram.tokenEnv] ? {
+    policy?.connectors.telegram.enabled && !resolveTelegramToken(workspaceRoot, policy.connectors.telegram).token ? {
       id: "gateway.telegram.missing_token",
       severity: "warning",
-      title: "Telegram token env missing",
-      detail: `Telegram connector is enabled but ${policy.connectors.telegram.tokenEnv} is not set.`,
-      action: "Set the token env or disable the Telegram connector."
+      title: "Telegram token missing",
+      detail: "Telegram connector is enabled but no bot token is configured.",
+      action: "Run `cosia gateway telegram set token` or disable the Telegram connector."
     } : undefined,
     policy?.connectors.telegram.enabled && policy.connectors.telegram.allowedChatIds.length === 0 ? {
       id: "gateway.telegram.no_allowed_chats",

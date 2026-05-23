@@ -7,6 +7,7 @@ import { previewText, ProviderError, providerFailureHint } from "../provider_err
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
 
 type CodexCliProviderOptions = {
+  id?: string;
   workspaceRoot: string;
   timeoutMs?: number;
   sandbox?: string;
@@ -15,9 +16,11 @@ type CodexCliProviderOptions = {
 };
 
 export class CodexCliProvider implements ModelProvider {
-  readonly id = "codex-cli";
+  readonly id: string;
 
-  constructor(private readonly options: CodexCliProviderOptions) {}
+  constructor(private readonly options: CodexCliProviderOptions) {
+    this.id = options.id ?? "codex-cli";
+  }
 
   async checkAuth(): Promise<AuthStatus> {
     try {

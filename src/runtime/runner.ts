@@ -4,7 +4,7 @@ import { approveOverwrite } from "./approval_gate.js";
 import { AgentManager } from "./agent_manager.js";
 import { formatMemoryReviewSummary, MemoryManager } from "./memory_manager.js";
 import { formatProviderFailure, ProviderError } from "./model/provider_errors.js";
-import { createProvider } from "./model/provider_registry.js";
+import { createProvider, resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyAuditLog } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
@@ -60,7 +60,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     await memory.writeReferenceMemory(session, options.prompt, agent.id);
   }
 
-  const providerId = options.providerId ?? policy.model.defaultProvider;
+  const providerId = options.provider ? options.provider.id : resolveProviderSelection(policy, options.providerId);
   let provider: ModelProvider | undefined;
   try {
     provider = options.provider ?? createProvider(providerId, workspaceRoot, {

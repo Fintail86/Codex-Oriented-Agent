@@ -13,10 +13,12 @@ import {
   type GatewayLockRecord
 } from "./gateway_locks.js";
 import type { FetchLike } from "./model/providers/openai_compatible_provider.js";
+import { resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import {
   checkTelegramGateway,
   loadTelegramGatewayState,
+  resolveTelegramToken,
   startTelegramGateway,
   type TelegramGatewayCheck
 } from "./telegram_gateway.js";
@@ -32,6 +34,7 @@ export type GatewayStopRequest = {
 export type GatewayStartOptions = {
   connector?: GatewayConnectorId;
   modelProvider?: string;
+  providerProfile?: string;
   once?: boolean;
   fetchImpl?: FetchLike;
   now?: () => number;
@@ -60,8 +63,8 @@ export async function startGateway(workspaceRoot: string, options: GatewayStartO
   const connectors = enabledConnectors(policy, options.connector);
   if (!connectors.length) {
     throw new Error(options.connector
-      ? `Gateway connector '${options.connector}' is disabled. Enable it in codex/POLICY.json before starting.`
-      : "No enabled gateway connectors. Enable connectors.telegram in codex/POLICY.json before starting.");
+      ? `Gateway connector '${options.connector}' is disabled. Run \`cosia gateway ${options.connector} enable\` before starting.`
+      : "No enabled gateway connectors. Run `cosia gateway telegram enable` before starting.");
   }
   if (connectors.length > 1) {
     throw new Error("Multiple gateway connectors are not supported in v0.26.1.");
@@ -80,7 +83,7 @@ export async function startGateway(workspaceRoot: string, options: GatewayStartO
       throw new Error(formatGatewayConnectorFailure("telegram", check));
     }
     await startTelegramGateway(workspaceRoot, {
-      providerId: options.modelProvider,
+      providerId: resolveProviderSelection(policy, options.providerProfile ?? options.modelProvider),
       once: options.once,
       fetchImpl: options.fetchImpl,
       now: options.now,
@@ -190,6 +193,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
   const now = Date.now();
   const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, now);
   const legacyLockStale = isGatewayProcessLockStale(legacyTelegramLock, workspaceRoot, now, 120000, "telegram");
+  const tokenStatus = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
   const report = {
     supervisor: {
       running: Boolean(lock && !lockStale),
@@ -203,7 +207,8 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
         enabled: policy.connectors.telegram.enabled,
         configured: policy.connectors.telegram.enabled
           && policy.connectors.telegram.allowedChatIds.length > 0
-          && Boolean(process.env[policy.connectors.telegram.tokenEnv]),
+          && Boolean(tokenStatus.token),
+        tokenStatus: tokenStatus.status,
         allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
         activeChats: Object.keys(state.chats).length,
         nextOffset: state.nextOffset,
@@ -232,6 +237,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     "  telegram:",
     `    Enabled: ${policy.connectors.telegram.enabled}`,
     `    Configured: ${report.connectors.telegram.configured}`,
+    `    Token: ${report.connectors.telegram.tokenStatus}`,
     `    Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length}`,
     `    Active chats: ${Object.keys(state.chats).length}`,
     `    Next offset: ${state.nextOffset ?? "none"}`,

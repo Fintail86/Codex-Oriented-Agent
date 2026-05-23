@@ -17,6 +17,7 @@ import { parseHashCommand, retrieveCommandCandidates } from "./command_intent.js
 import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import { PolicyManager } from "./policy_manager.js";
+import { resolveProviderSelection } from "./model/provider_registry.js";
 import { loadPromptStaticBlocks } from "./prompt_builder.js";
 import { formatReviewBatchDiscard, formatReviewCleanup, formatReviewInbox, formatReviewNext, formatReviewStats, formatReviewUpdate, ReviewInboxService, type ReviewFilter, type ReviewPromoteOptions } from "./review_inbox.js";
 import { runSession } from "./runner.js";
@@ -137,9 +138,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
   if (await policyManager.ensureMarkdownCurrent()) {
     writeLine(errorOutput, "[cosia] policy mirror synced from POLICY.json");
   }
-  const providerId = !options.providerId || options.providerId === "default"
-    ? policy.model.defaultProvider
-    : options.providerId;
+  const providerId = resolveProviderSelection(policy, options.providerId);
   const memory = new MemoryManager(options.workspaceRoot);
   const skills = new SkillManager(options.workspaceRoot);
   const reviewInbox = new ReviewInboxService(options.workspaceRoot);

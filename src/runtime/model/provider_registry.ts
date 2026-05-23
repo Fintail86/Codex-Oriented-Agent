@@ -1,5 +1,10 @@
 import type { ModelProvider } from "../types.js";
 import type { PolicyConfig } from "../policy_manager.js";
+import {
+  missingProviderProfileHint,
+  providerApiKeyForProfile,
+  providerConfigForProfile
+} from "../provider_profiles.js";
 import { ProviderError, providerErrorFromUnknown, providerFailureHint } from "./provider_errors.js";
 import { CodexCliProvider } from "./providers/codex_cli_provider.js";
 import { MockProvider } from "./providers/mock_provider.js";
@@ -38,13 +43,13 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
   if (providerId === "mock") {
     return new MockProvider();
   }
-  const config = options.policy?.model.providers[providerId];
+  const profile = options.policy?.model.providerProfiles[providerId];
+  const config = profile
+    ? providerConfigForProfile(workspaceRoot, options.policy!, profile)
+    : options.policy?.model.providers[providerId];
   if (!config) {
-    if (!options.policy && providerId === "codex-cli") {
-      return new CodexCliProvider({ workspaceRoot, timeoutMs: options.timeoutMs });
-    }
     throw new ProviderError("unknown_provider", `Unknown model provider: ${id}`, {
-      hint: providerFailureHint("unknown_provider", providerId)
+      hint: options.policy ? missingProviderProfileHint() : providerFailureHint("unknown_provider", providerId)
     });
   }
   if (!config.enabled) {
@@ -56,6 +61,7 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
   const providerType = config.type ?? (providerId === "codex-cli" ? "codex-cli" : "openai-compatible");
   if (providerType === "codex-cli") {
     return new CodexCliProvider({
+      id: profile?.name ?? providerId,
       workspaceRoot,
       timeoutMs,
       sandbox: config.sandbox,
@@ -64,12 +70,15 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
     });
   }
   if (providerType === "openai-compatible") {
+    const secretApiKey = profile ? providerApiKeyForProfile(workspaceRoot, profile) : undefined;
     return new OpenAICompatibleProvider({
-      id: providerId,
+      id: profile?.name ?? providerId,
       enabled: config.enabled,
       baseUrl: config.baseUrl,
       model: config.model,
       apiKeyEnv: config.apiKeyEnv,
+      apiKey: secretApiKey,
+      apiKeyLabel: profile?.auth.mode === "secret" ? `private secret for provider profile ${profile.name}` : undefined,
       endpointPath: config.endpointPath,
       timeoutMs,
       structuredRetryCount: config.structuredRetryCount,
@@ -118,7 +127,7 @@ export function listProviders(policy: PolicyConfig): ProviderListItem[] {
     id,
     type: config.type,
     enabled: config.enabled,
-    isDefault: id === policy.model.defaultProvider,
+    isDefault: false,
     timeoutMs: config.timeoutMs,
     structuredRetryCount: config.structuredRetryCount,
     maxPromptChars: config.maxPromptChars,
@@ -131,10 +140,22 @@ export function listProviders(policy: PolicyConfig): ProviderListItem[] {
     {
       id: "mock",
       enabled: true,
-      isDefault: policy.model.defaultProvider === "mock",
+      isDefault: policy.model.activeProviderProfile === "mock",
       builtIn: true
     }
   ];
+}
+
+export function resolveProviderSelection(policy: PolicyConfig, requested?: string): string {
+  if (requested && requested !== "default") {
+    return requested;
+  }
+  if (policy.model.activeProviderProfile) {
+    return policy.model.activeProviderProfile;
+  }
+  throw new ProviderError("missing_config", "No active provider profile is configured.", {
+    hint: missingProviderProfileHint()
+  });
 }
 
 export function normalizeProviderId(id: string): string {

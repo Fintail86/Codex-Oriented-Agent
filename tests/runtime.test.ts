@@ -18,7 +18,7 @@ import { checkProvider, createProvider, listProviders } from "../src/runtime/mod
 import { OpenAICompatibleProvider, type FetchLike } from "../src/runtime/model/providers/openai_compatible_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
-import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath } from "../src/runtime/runtime_config.js";
+import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath, runtimePrivatePath, secretsPrivatePath } from "../src/runtime/runtime_config.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { chunkTelegramMessage } from "../src/runtime/gateway_format.js";
@@ -37,7 +37,9 @@ import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_m
 import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { codexTemplates } from "../src/runtime/templates.js";
-import { checkTelegramGateway, loadTelegramGatewayState, processTelegramUpdate, saveTelegramGatewayState, startTelegramGateway } from "../src/runtime/telegram_gateway.js";
+import { checkTelegramGateway, formatTelegramCheck, loadTelegramGatewayState, processTelegramUpdate, saveTelegramGatewayState, startTelegramGateway } from "../src/runtime/telegram_gateway.js";
+import { addProviderProfile, listProviderProfileSummaries, useProviderProfile } from "../src/runtime/provider_profiles.js";
+import { addTelegramChatId, enableTelegramConnector, setTelegramToken } from "../src/runtime/telegram_connector_config.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import {
   ToolAcquisitionManager,
@@ -140,7 +142,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.38.0\"");
+    expect(policyJson).toContain("\"version\": \"0.39.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -739,6 +741,42 @@ describe("policy core", () => {
     const migration = await buildRuntimeConfigMigration(root);
     expect(migration.preview).toContain("Runtime config migration preview");
     expect(await formatConfigShow(root, rawPolicy)).not.toContain("tools.bundled.git_status.enabled");
+  });
+
+  it("starts without an active provider profile and stores provider secrets privately", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+
+    expect(policy.model.activeProviderProfile).toBeUndefined();
+    expect(policy.model.providers["codex-cli"].enabled).toBe(false);
+    expect(policy.model.providers.openrouter.enabled).toBe(false);
+    await expect(runSession(root, {
+      sessionId: (await new SessionManager(root).createSession("cosia-agent", "No default provider")).id,
+      prompt: "hello"
+    })).rejects.toThrow("No active provider profile");
+
+    await addProviderProfile(root, "codex", {
+      providerId: "codex-cli",
+      oauth: true
+    });
+    await addProviderProfile(root, "openrouter-test", {
+      providerId: "openrouter",
+      apiKey: "secret-openrouter-key",
+      model: "openai/gpt-test"
+    });
+    await useProviderProfile(root, "openrouter-test");
+
+    const nextPolicy = await new PolicyManager(root).loadPolicy();
+    expect(nextPolicy.model.activeProviderProfile).toBe("openrouter-test");
+    expect(await readFile(runtimePrivatePath(root), "utf8")).toContain("\"activeProviderProfile\": \"openrouter-test\"");
+    const secretText = await readFile(secretsPrivatePath(root), "utf8");
+    expect(secretText).toContain("secret-openrouter-key");
+    const listed = await listProviderProfileSummaries(root);
+    expect(listed.find((profile) => profile.name === "openrouter-test")).toMatchObject({
+      active: true,
+      secretStatus: "configured via private secret"
+    });
+    expect(formatConfigCheck(root)).resolves.not.toContain("secret-openrouter-key");
   });
 
   it("validates unknown bundled tool runtime config and removes legacy dedicated policy tools", async () => {
@@ -2562,7 +2600,7 @@ describe("model parsing and run loop", () => {
     expect(unknown).toMatchObject({ ok: false, reason: "unknown_provider" });
 
     const listed = listProviders(policy);
-    expect(listed.some((provider) => provider.id === "codex-cli" && provider.isDefault)).toBe(true);
+    expect(listed.some((provider) => provider.id === "codex-cli" && !provider.isDefault)).toBe(true);
     expect(listed.some((provider) => provider.id === "openrouter" && provider.type === "openai-compatible")).toBe(true);
     expect(listed.some((provider) => provider.id === "mock" && provider.enabled)).toBe(true);
   });
@@ -3148,7 +3186,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.38.0");
+    expect(emptyReport.version).toBe("0.39.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -3772,8 +3810,7 @@ describe("status and listing", () => {
     expect(policy.connectors.telegram).toMatchObject({
       enabled: false,
       tokenEnv: "TELEGRAM_BOT_TOKEN",
-      allowedChatIds: [],
-      defaultProvider: "codex-cli"
+      allowedChatIds: []
     });
 
     expect(await checkTelegramGateway(root)).toMatchObject({
@@ -3825,6 +3862,29 @@ describe("status and listing", () => {
         process.env.TELEGRAM_BOT_TOKEN = previousToken;
       }
     }
+  });
+
+  it("configures Telegram through private connector settings and never prints token values", async () => {
+    const root = await initializedWorkspace();
+    await enableTelegramConnector(root, true);
+    await addTelegramChatId(root, "123");
+    await setTelegramToken(root, "1234567890:AAsecrettelegramtokenvalue");
+
+    const policy = await new PolicyManager(root).loadPolicy();
+    expect(policy.connectors.telegram.enabled).toBe(true);
+    expect(policy.connectors.telegram.allowedChatIds).toEqual(["123"]);
+    expect(JSON.stringify(policy.connectors.telegram)).not.toContain("secrettelegram");
+    expect(await readFile(runtimePrivatePath(root), "utf8")).not.toContain("secrettelegram");
+    expect(await readFile(secretsPrivatePath(root), "utf8")).toContain("secrettelegram");
+
+    const check = await checkTelegramGateway(root, {
+      fetchImpl: async () => jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } })
+    });
+    expect(check).toMatchObject({
+      ok: true,
+      tokenStatus: "configured via private secret"
+    });
+    expect(formatTelegramCheck(check)).not.toContain("secrettelegram");
   });
 
   it("processes Telegram updates with allowlist checks, state, chunks, and hash commands", async () => {
@@ -4070,6 +4130,49 @@ describe("status and listing", () => {
       removed: true
     });
     expect(await pathExists(gatewayProcessLockPath(root))).toBe(false);
+  });
+
+  it("starts the gateway with the active provider profile and private Telegram token", async () => {
+    const root = await initializedWorkspace();
+    await addProviderProfile(root, "gateway-profile", {
+      providerId: "openrouter",
+      apiKey: "gateway-profile-key",
+      model: "openai/gpt-test"
+    });
+    await useProviderProfile(root, "gateway-profile");
+    await enableTelegramConnector(root, true);
+    await addTelegramChatId(root, "123");
+    await setTelegramToken(root, "test-token");
+    const requests: string[] = [];
+    const fetchImpl: FetchLike = async (url) => {
+      requests.push(String(url));
+      if (String(url).endsWith("/getMe")) {
+        return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getUpdates")) {
+        return jsonResponse({
+          ok: true,
+          result: [{
+            update_id: 1,
+            message: {
+              chat: { id: 123 },
+              text: "/status"
+            }
+          }]
+        });
+      }
+      return jsonResponse({ ok: true, result: { message_id: 1 } });
+    };
+
+    await startGateway(root, {
+      connector: "telegram",
+      once: true,
+      fetchImpl
+    });
+
+    expect(requests.some((url) => url.includes("bottest-token/getUpdates"))).toBe(true);
+    const state = await loadTelegramGatewayState(root);
+    expect(state.chats["123"]?.providerId).toBe("gateway-profile");
   });
 
   it("releases session locks when async work rejects", async () => {

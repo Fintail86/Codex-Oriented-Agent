@@ -16,6 +16,13 @@ import {
 import { chunkTelegramMessage } from "./gateway_format.js";
 import { handleGatewayMessage, type GatewayChatState } from "./gateway_runtime.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
+import { getTelegramBotTokenSecret } from "./private_config.js";
+import { resolveProviderSelection } from "./model/provider_registry.js";
+
+export type TelegramTokenResolution = {
+  token?: string;
+  status: "configured via env" | "configured via private secret" | "missing";
+};
 
 export type TelegramGatewayCheck = {
   ok: boolean;
@@ -23,6 +30,7 @@ export type TelegramGatewayCheck = {
   reason?: "disabled" | "missing_token" | "missing_allowed_chat_ids" | "auth_failed" | "network_error" | "http_error" | "malformed_response";
   message: string;
   hint?: string;
+  tokenStatus?: TelegramTokenResolution["status"];
 };
 
 export type TelegramGatewayState = {
@@ -150,7 +158,7 @@ export async function checkTelegramGateway(
       status: "failed",
       reason: "disabled",
       message: "Telegram connector is disabled.",
-      hint: "Set connectors.telegram.enabled=true in codex/POLICY.json."
+      hint: "Run `cosia gateway telegram enable`."
     };
   }
   if (!config.allowedChatIds.length) {
@@ -159,25 +167,27 @@ export async function checkTelegramGateway(
       status: "failed",
       reason: "missing_allowed_chat_ids",
       message: "Telegram connector has no allowed chat ids.",
-      hint: "Add your Telegram chat id to connectors.telegram.allowedChatIds."
+      hint: "Run `cosia gateway telegram set chat-id <chat-id>`."
     };
   }
-  const token = process.env[config.tokenEnv];
-  if (!token) {
+  const tokenResolution = resolveTelegramToken(workspaceRoot, config);
+  if (!tokenResolution.token) {
     return {
       ok: false,
       status: "failed",
       reason: "missing_token",
-      message: `Telegram token env ${config.tokenEnv} is not set.`,
-      hint: `Set ${config.tokenEnv} before starting the gateway.`
+      message: "Telegram bot token is not configured.",
+      hint: "Run `cosia gateway telegram set token` or `cosia gateway telegram set token-env <ENV_NAME>`.",
+      tokenStatus: tokenResolution.status
     };
   }
   try {
-    await new TelegramApiClient(token, options.fetchImpl).getMe();
+    await new TelegramApiClient(tokenResolution.token, options.fetchImpl).getMe();
     return {
       ok: true,
       status: "ok",
-      message: "Telegram connector is configured and getMe succeeded."
+      message: "Telegram connector is configured and getMe succeeded.",
+      tokenStatus: tokenResolution.status
     };
   } catch (error) {
     const classified = classifyTelegramCheckError(error);
@@ -199,7 +209,7 @@ function classifyTelegramCheckError(error: unknown): {
     if (error.status === 401 || error.status === 403 || error.status === 404) {
       return {
         reason: "auth_failed",
-        hint: "Check that TELEGRAM_BOT_TOKEN is the real BotFather token, e.g. 1234567890:AA..., not the bot username, chat id, or placeholder text."
+        hint: "Check that the configured Telegram bot token is the real BotFather token, e.g. 1234567890:AA..., not the bot username, chat id, or placeholder text."
       };
     }
     return {
@@ -221,8 +231,9 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
   if (!check.ok) {
     throw new Error(`${check.message}${check.hint ? `\nHint: ${check.hint}` : ""}`);
   }
-  const token = process.env[config.tokenEnv];
-  if (!token) throw new Error(`Telegram token env ${config.tokenEnv} is not set.`);
+  const token = resolveTelegramToken(workspaceRoot, config).token;
+  if (!token) throw new Error("Telegram bot token is not configured.");
+  const providerId = resolveProviderSelection(policy, options.providerId);
 
   await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
   const client = new TelegramApiClient(token, options.fetchImpl);
@@ -276,7 +287,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
           }
           await heartbeatGatewayProcessLock(workspaceRoot, lock, options.now);
           state = await processTelegramUpdate(workspaceRoot, policy, client, state, update, {
-            providerId: options.providerId ?? config.defaultProvider,
+            providerId,
             owner: `telegram:${telegramUpdateChatId(update) ?? "unknown"}`,
             now: options.now
           });
@@ -503,9 +514,32 @@ export function formatTelegramCheck(result: TelegramGatewayCheck): string {
     "Telegram Gateway",
     `Status: ${result.status}`,
     `Message: ${result.message}`,
+    result.tokenStatus ? `Token: ${result.tokenStatus}` : undefined,
     result.reason ? `Reason: ${result.reason}` : undefined,
     result.hint ? `Hint: ${result.hint}` : undefined
   ].filter(Boolean).join("\n");
+}
+
+export function resolveTelegramToken(
+  workspaceRoot: string,
+  config: PolicyConfig["connectors"]["telegram"]
+): TelegramTokenResolution {
+  if (config.tokenEnv && process.env[config.tokenEnv]) {
+    return {
+      token: process.env[config.tokenEnv],
+      status: "configured via env"
+    };
+  }
+  const privateToken = getTelegramBotTokenSecret(workspaceRoot);
+  if (privateToken) {
+    return {
+      token: privateToken,
+      status: "configured via private secret"
+    };
+  }
+  return {
+    status: "missing"
+  };
 }
 
 function telegramStatePath(workspaceRoot: string): string {

@@ -666,7 +666,10 @@ export class ToolAcquisitionManager {
 
   private async createLlmDraft(capability: CapabilityProposal, sourceShellApprovalIds: string[], providerId = "default"): Promise<Record<string, unknown>> {
     const policy = await new PolicyManager(this.workspaceRoot).loadPolicy();
-    const resolvedProviderId = providerId === "default" ? policy.model.defaultProvider : providerId;
+    const resolvedProviderId = providerId === "default" ? policy.model.activeProviderProfile : providerId;
+    if (!resolvedProviderId) {
+      throw new Error("No active provider profile is configured. Run `cosia provider profile add ...` and `cosia provider profile use <name>`.");
+    }
     const provider = createProvider(resolvedProviderId, this.workspaceRoot, { policy });
     const linkedShell = sourceShellApprovalIds
       .map((id) => new ShellApprovalLedger(this.workspaceRoot).get(id))

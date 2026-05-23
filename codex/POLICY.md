@@ -1,10 +1,10 @@
 # POLICY
 
-This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of truth. Runtime settings live in `config/runtime.defaults.json` and optional `config/runtime.local.json`.
+This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of truth. Runtime settings live in `config/runtime.defaults.json`, legacy `config/runtime.local.json`, and optional ignored `config/runtime.private.json`.
 
 ## Version
 
-- Policy version: `0.38.0`
+- Policy version: `0.39.0`
 
 ## Agents
 
@@ -70,5 +70,5 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 ## Runtime Config
 
 - Operational settings are not Codex law.
-- Provider details, gateway connector settings, prompt budgets, bundled tool enablement, and review retention live in `config/runtime.defaults.json` and optional ignored `config/runtime.local.json`.
+- Provider profiles, gateway connector settings, prompt budgets, bundled tool enablement, and review retention live in runtime config. User-specific values should live in ignored private config and secret files.
 - Runtime config cannot relax disabled permissions, dangerous command blocks, protected Codex path rules, or Codex amendment approval requirements.
