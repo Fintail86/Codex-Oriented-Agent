@@ -104,6 +104,8 @@ export const runtimeConfigSchema = z.object({
 });
 
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+export type ProviderConfig = z.infer<typeof providerConfigSchema>;
+export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type ProviderProfile = z.infer<typeof providerProfileSchema>;
 
 export type RuntimeConfigIssue = {
@@ -228,6 +230,22 @@ export const defaultRuntimeConfig: RuntimeConfig = {
   }
 };
 
+export function providerTypeForId(id: string): ProviderType {
+  return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
+}
+
+export function defaultProviderConfigForId(id: string): ProviderConfig {
+  const configured = defaultRuntimeConfig.model.providers[id];
+  if (configured) {
+    return providerConfigSchema.parse(configured);
+  }
+  return providerConfigSchema.parse({
+    type: providerTypeForId(id),
+    enabled: false,
+    sandbox: providerTypeForId(id) === "codex-cli" ? "read-only" : undefined
+  });
+}
+
 const RUNTIME_KEYS = ["promptBudget", "model", "connectors", "review"] as const;
 
 export async function ensureRuntimeDefaults(workspaceRoot: string): Promise<string[]> {
@@ -333,7 +351,7 @@ export function normalizeRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
   for (const [id, provider] of Object.entries(providers)) {
     providers[id] = {
       ...provider,
-      type: provider.type ?? defaultProviderType(id),
+      type: provider.type ?? providerTypeForId(id),
       responseFormat: provider.responseFormat ?? null,
       extraHeaders: provider.extraHeaders ?? {}
     };
@@ -827,10 +845,6 @@ function isObject(value: unknown): value is JsonObject {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function defaultProviderType(id: string): "codex-cli" | "openai-compatible" {
-  return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
 }
 
 function isEnvNameField(key: string): boolean {

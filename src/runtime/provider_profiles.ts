@@ -1,6 +1,8 @@
 import {
+  defaultProviderConfigForId,
   loadRuntimeConfig,
   providerConfigSchema,
+  providerTypeForId,
   type ProviderProfile,
   type RuntimeConfig
 } from "./runtime_config.js";
@@ -121,10 +123,10 @@ export function providerConfigForProfile(
   profile: ProviderProfile
 ): ReturnType<typeof providerConfigSchema.parse> {
   const template = policy.model.providers[profile.providerId]
-    ?? defaultProviderTemplate(profile.providerId);
+    ?? defaultProviderConfigForId(profile.providerId);
   const base = providerConfigSchema.parse({
     ...template,
-    type: template.type,
+    type: template.type ?? providerTypeForId(profile.providerId),
     enabled: true
   });
   if (profile.providerId === "codex-cli" || base.type === "codex-cli") {
@@ -241,30 +243,4 @@ function assertProfileName(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(name)) {
     throw new Error("Provider profile name must use letters, numbers, dot, underscore, or dash.");
   }
-}
-
-function defaultProviderTemplate(providerId: string): ReturnType<typeof providerConfigSchema.parse> {
-  return providerConfigSchema.parse({
-    type: defaultProviderType(providerId),
-    enabled: false,
-    sandbox: providerId === "codex-cli" ? "read-only" : undefined,
-    baseUrl: providerId === "openrouter" ? "https://openrouter.ai/api/v1" : null,
-    model: null,
-    apiKeyEnv: providerId === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY",
-    endpointPath: "/chat/completions",
-    timeoutMs: 120000,
-    structuredRetryCount: 1,
-    maxPromptChars: 60000,
-    responseFormat: providerId === "openrouter" ? "json_object" : null,
-    extraHeaders: providerId === "openrouter"
-      ? {
-        "HTTP-Referer": "https://github.com/Fintail86/Codex-Oriented-Agent",
-        "X-OpenRouter-Title": "COSIA"
-      }
-      : {}
-  });
-}
-
-function defaultProviderType(id: string): "codex-cli" | "openai-compatible" {
-  return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
 }

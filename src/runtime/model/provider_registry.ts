@@ -5,6 +5,7 @@ import {
   providerApiKeyForProfile,
   providerConfigForProfile
 } from "../provider_profiles.js";
+import { providerTypeForId } from "../runtime_config.js";
 import { ProviderError, providerErrorFromUnknown, providerFailureHint } from "./provider_errors.js";
 import { CodexCliProvider } from "./providers/codex_cli_provider.js";
 import { MockProvider } from "./providers/mock_provider.js";
@@ -58,7 +59,7 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
     });
   }
   const timeoutMs = options.timeoutMs ?? config.timeoutMs;
-  const providerType = config.type ?? (providerId === "codex-cli" ? "codex-cli" : "openai-compatible");
+  const providerType = config.type ?? providerTypeForId(providerId);
   if (providerType === "codex-cli") {
     return new CodexCliProvider({
       id: profile?.name ?? providerId,

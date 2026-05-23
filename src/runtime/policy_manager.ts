@@ -9,6 +9,7 @@ import {
   extractLegacyRuntimeConfig,
   loadRuntimeConfig,
   modelConfigSchema,
+  providerTypeForId,
   promptBudgetSchema,
   reviewRetentionSchema,
   stripRuntimeConfig
@@ -448,7 +449,7 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
   for (const [id, config] of Object.entries(providers)) {
     providers[id] = {
       ...config,
-      type: config.type ?? defaultProviderType(id),
+      type: config.type ?? providerTypeForId(id),
       responseFormat: config.responseFormat ?? null,
       extraHeaders: config.extraHeaders ?? {}
     };
@@ -511,10 +512,6 @@ export function policyLawJson(policy: PolicyConfig): Record<string, unknown> {
     memory: policy.memory,
     selfImprovement: policy.selfImprovement
   });
-}
-
-function defaultProviderType(id: string): "codex-cli" | "openai-compatible" {
-  return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
 }
 
 export function renderPolicyMarkdown(policy: PolicyConfig): string {
