@@ -40,6 +40,7 @@ This directory keeps approved COSIA implementation plans as separate versioned M
 - [v0.32 Capability-Linked Shell Preview](plans/v0.32-capability-linked-shell-preview.md)
 - [v0.33 LLM ToolDraft, ToolCandidate, and Active Registry MVP](plans/v0.33-tool-draft-candidate-active-registry.md)
 - [v0.34-v0.37 Active Tool Hardening, Governor Integration, Learned Blueprint](plans/v0.34-v0.37-active-tool-hardening-governor-blueprint.md)
+- [v0.38 Tool Growth Routine](plans/v0.38-tool-growth-routine.md)
 - [Current Revised Roadmap: Session Assignment -> Memory Ownership -> Provider Hardening](plans/roadmap-session-memory-provider.md)
 
 ## Notes

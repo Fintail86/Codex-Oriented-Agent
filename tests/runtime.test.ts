@@ -47,6 +47,7 @@ import {
   listEffectiveActiveModelToolIds,
   type ToolCandidateRecord
 } from "../src/runtime/tool_acquisition.js";
+import { ToolGrowthManager, formatToolGrowthReview } from "../src/runtime/tool_growth.js";
 import type { ModelProvider } from "../src/runtime/types.js";
 import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspace.js";
 
@@ -139,7 +140,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.37.0\"");
+    expect(policyJson).toContain("\"version\": \"0.38.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1328,6 +1329,113 @@ describe("tool acquisition", () => {
     const updatedAgent = await new AgentManager(root).loadAgent("architect-agent");
     expect(updatedAgent.allowedTools).not.toContain("local.project_check.nodever");
     expect((await manager.activeToolVisibility("local.project_check.nodever"))[0].visible).toBe(false);
+  });
+
+  it("orchestrates tool growth from request to explicit test and activation", async () => {
+    const root = await initializedWorkspace();
+    await new AgentManager(root).createAgent("architect-agent", "architect");
+    const growth = new ToolGrowthManager(root);
+    const acquisition = new ToolAcquisitionManager(root);
+
+    const started = await growth.start({
+      request: "테스트 돌려봐",
+      providerId: "mock",
+      agentId: "architect-agent"
+    });
+
+    expect(started.routine.status).toBe("candidate_ready");
+    expect(started.routine.sourceScanId).toBeDefined();
+    expect(started.routine.sourceCapabilityId).toBeDefined();
+    expect(started.routine.draftIds).toEqual([started.draftResult.draft.id]);
+    expect(started.routine.candidateIds).toEqual([started.draftResult.candidate?.id]);
+    expect(started.routine.attemptCount).toBe(1);
+    expect(new ShellApprovalLedger(root).list()).toHaveLength(0);
+    expect(acquisition.listActiveTools()).toHaveLength(0);
+
+    await expect(growth.test(started.routine.id)).rejects.toThrow("--yes");
+    const tested = await growth.test(started.routine.id, { yes: true });
+    expect(tested.testRun.status).toBe("passed");
+    expect(tested.routine.status).toBe("awaiting_activation");
+
+    await expect(growth.activate(started.routine.id, { agentId: "architect-agent" })).rejects.toThrow("--yes");
+    const activated = await growth.activate(started.routine.id, {
+      agentId: "architect-agent",
+      yes: true
+    });
+    expect(activated.routine.status).toBe("activated");
+    expect(activated.activation.status).toBe("active");
+    expect((await new AgentManager(root).loadAgent("architect-agent")).allowedTools).toContain(activated.activation.toolId);
+    expect(acquisition.listActiveTools().map((tool) => tool.id)).toContain(activated.activation.toolId);
+  });
+
+  it("preserves failed, rejected, retried, and cancelled tool growth evidence", async () => {
+    const root = await initializedWorkspace();
+    const growth = new ToolGrowthManager(root);
+
+    const failed = await growth.start({
+      request: "테스트 돌려봐",
+      providerId: "mock",
+      rawDraft: {
+        executorKind: "unknown"
+      }
+    });
+    expect(failed.routine.status).toBe("rejected");
+    expect(failed.draftResult.candidate).toBeUndefined();
+    expect(growth.list()).toHaveLength(0);
+    expect(formatToolGrowthReview(growth.list({ all: true }))).toContain(failed.routine.id);
+
+    const retried = await growth.retry(failed.routine.id, {
+      rawDraft: {
+        targetToolId: "local.project_check.retry",
+        capabilityFamily: "project_check",
+        permission: "project_check",
+        exposure: "model",
+        executorKind: "command_adapter",
+        executorPlan: {
+          executable: "node",
+          args: ["--version"],
+          cwdPolicy: "workspace_root",
+          timeoutMs: 30000,
+          outputCapBytes: 12000,
+          redaction: true
+        },
+        groundingReferences: []
+      }
+    });
+    expect(retried.routine.status).toBe("candidate_ready");
+    expect(retried.routine.attemptCount).toBe(2);
+    expect(retried.routine.draftIds).toHaveLength(2);
+    expect(retried.routine.candidateIds).toHaveLength(1);
+
+    const rejected = growth.reject(retried.routine.id, "not the intended function");
+    expect(rejected.status).toBe("rejected");
+    expect(growth.list()).toHaveLength(0);
+    expect(growth.list({ all: true }).map((routine) => routine.id)).toContain(rejected.id);
+
+    const cancellable = await growth.start({
+      request: "다른 테스트 도구",
+      providerId: "mock",
+      rawDraft: {
+        targetToolId: "local.project_check.cancel",
+        capabilityFamily: "project_check",
+        permission: "project_check",
+        exposure: "model",
+        executorKind: "command_adapter",
+        executorPlan: {
+          executable: "node",
+          args: ["--version"],
+          cwdPolicy: "workspace_root",
+          timeoutMs: 30000,
+          outputCapBytes: 12000,
+          redaction: true
+        },
+        groundingReferences: []
+      }
+    });
+    const cancelled = growth.cancel(cancellable.routine.id, "user cancelled");
+    expect(cancelled.status).toBe("cancelled");
+    await expect(growth.test(cancelled.id, { yes: true })).rejects.toThrow("closed");
+    await expect(growth.activate(cancelled.id, { agentId: "cosia-agent", yes: true })).rejects.toThrow("closed");
   });
 });
 
@@ -3040,7 +3148,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.37.0");
+    expect(emptyReport.version).toBe("0.38.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -3234,11 +3342,94 @@ describe("status and listing", () => {
     expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
     expect(formatChatHelp()).toContain("/context status");
     expect(formatChatHelp()).toContain("/review discard-conflicts");
+    expect(formatChatHelp()).toContain("/tool grow <request>");
     expect(output.read()).toContain("COSIA chat commands");
     expect(output.read()).toContain(`Session: ${session.id}`);
     expect(output.read()).toContain("# SESSION SUMMARY");
     expect(output.read()).toContain("Context:");
     expect(errorOutput.read()).toContain("Type /help for commands");
+  });
+
+  it("handles tool growth slash commands inside the shared chat REPL", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Tool growth REPL test");
+    const input = new PassThrough();
+    const output = captureWritable();
+    const errorOutput = captureWritable();
+
+    const resultPromise = runChatRepl({
+      workspaceRoot: root,
+      sessionId: session.id,
+      providerId: "mock",
+      input,
+      output: output.stream,
+      errorOutput: errorOutput.stream
+    });
+    const feedInput = async () => {
+      for (const line of [
+        "/tool grow 테스트 돌려봐",
+        "/tool grow show",
+        "/tool grow test --yes",
+        "/tool grow activate --yes",
+        "/exit"
+      ]) {
+        input.write(`${line}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      input.end();
+    };
+    await feedInput();
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
+    const text = output.read();
+    expect(text).toContain("Tool growth routine created");
+    expect(text).toContain("Tool growth routine:");
+    expect(text).toContain("Tool candidate test passed.");
+    expect(text).toContain("Active tool registration applied.");
+    expect((await new AgentManager(root).loadAgent("cosia-agent")).allowedTools).toContain("local.project_check.mock");
+  });
+
+  it("handles tool growth hash commands without ordinary runSession startup", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Tool growth hash REPL test");
+    const input = new PassThrough();
+    const output = captureWritable();
+    const errorOutput = captureWritable();
+
+    const resultPromise = runChatRepl({
+      workspaceRoot: root,
+      sessionId: session.id,
+      providerId: "mock",
+      input,
+      output: output.stream,
+      errorOutput: errorOutput.stream
+    });
+    const feedInput = async () => {
+      for (const line of [
+        "#도구 성장 테스트 돌려봐",
+        "#이 도구 테스트해",
+        "#이건 내가 원한 기능이 아니야 이유는 다른 기능",
+        "#다른 도구 후보 만들어줘",
+        "#도구 생성 취소",
+        "/exit"
+      ]) {
+        input.write(`${line}\n`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      input.end();
+    };
+    await feedInput();
+    const result = await resultPromise;
+
+    expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
+    const text = output.read();
+    expect(text).toContain("Tool growth routine created");
+    expect(text).toContain("Tool candidate test passed.");
+    expect(text).toContain("Candidate rejected and preserved as evidence.");
+    expect(text).toContain("Tool growth routine cancelled and preserved as evidence.");
   });
 
   it("handles review inbox commands inside the shared chat REPL", async () => {

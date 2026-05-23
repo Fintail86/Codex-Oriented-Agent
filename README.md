@@ -1,10 +1,10 @@
-# COSIA v0.37.0
+# COSIA v0.38.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed tool draft/candidate acquisition, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.37.0 hardens the active tool acquisition path. Tool activation is preview-first, active `command_adapter` execution records redacted evidence, Governor can surface tool candidate recommendations from repeated shell approvals, and successful local active tools can be captured as learned workspace blueprints. `ts_module` remains draft/review-only until a separate security roadmap exists.
+v0.38.0 adds Tool Growth Routine orchestration. A user can start from a request, get a capability proposal, LLM ToolDraft, normalized ToolCandidate, then explicitly test and activate through the existing hardened paths. Routine startup never creates shell approvals, executes commands, or registers active tools.
 
 ## Requirements
 
@@ -69,6 +69,9 @@ cosia capability plan --request "변경 상태 확인"
 cosia shell preview --from-capability <proposal-id> --command "<exact command>"
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia tool draft --from-capability <proposal-id> --provider mock
+cosia tool grow --request "테스트 돌려봐" --provider mock
+cosia tool grow test <routine-id> --yes
+cosia tool grow activate <routine-id> --agent <agent-id> --yes
 cosia tool candidate review
 cosia tool candidate test <candidate-id>
 cosia tool candidate approve <candidate-id>
@@ -664,6 +667,10 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 `cosia tool draft --from-capability <proposal-id>` asks the configured model for an untrusted ToolDraft package. The runtime stores the draft first, then normalizes it into a ToolCandidate only if all required allowlist gates pass. Candidate text and evidence may reference capabilities and shell approvals, but draft generation cannot create shell approvals, active tools, policy changes, config edits, or agent `allowedTools` changes.
 
+`cosia tool grow --request "<request>"` orchestrates the zero-base capability flow without adding new authority. It runs a fresh capability scan, creates a capability proposal, asks for an untrusted ToolDraft, normalizes a ToolCandidate, and records a Tool Growth Routine. It does not create shell approvals, run commands, or register active tools. Testing still requires `cosia tool grow test <routine-id> --yes`, and activation still requires `cosia tool grow activate <routine-id> --agent <agent-id> --yes`.
+
+Inside chat, `/tool grow <request>` and `#도구 성장 <request>` start the same routine. Short follow-up commands such as `#이 도구 테스트해`, `#이 도구 활성화해`, `#이건 내가 원한 기능이 아니야 이유는 ...`, `#다른 도구 후보 만들어줘`, and `#도구 생성 취소` operate only on the current unambiguous routine.
+
 `command_adapter` candidates are fixed executable + fixed args plans with `cwdPolicy=workspace_root`, output caps, timeouts, audit, and redaction forced on. They do not accept model-provided argument interpolation. A candidate can be approved before testing, but activation requires the latest passed candidate test hash to match the current candidate content hash.
 
 Active tools are workspace-local records, not static catalog entries. A model sees an active tool only when the active record is `active`, exposure is `model`, the target agent allows the tool id, and policy permits the tool permission. Deactivation removes the active tool from the target agent allowlist and from effective prompt/provider visibility.
@@ -674,6 +681,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.38.0: Tool Growth Routine orchestration from request to candidate, explicit test, and explicit activation.
 - v0.37.0: Learned local blueprint records from successful active command_adapter tools.
 - v0.36.0: Governor tool candidate recommendation evidence from repeated shell approval patterns.
 - v0.35.0: command_adapter runtime hardening with fixed args, env allowlist, and execution evidence.

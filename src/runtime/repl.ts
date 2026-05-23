@@ -22,6 +22,18 @@ import { formatReviewBatchDiscard, formatReviewCleanup, formatReviewInbox, forma
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
+import {
+  formatToolGrowthActivation,
+  formatToolGrowthCancelled,
+  formatToolGrowthRejected,
+  formatToolGrowthReview,
+  formatToolGrowthRoutine,
+  formatToolGrowthStart,
+  formatToolGrowthTest,
+  ToolGrowthManager,
+  type ToolGrowthRoutine
+} from "./tool_growth.js";
+import { ToolAcquisitionManager } from "./tool_acquisition.js";
 
 export type ChatReplOptions = {
   workspaceRoot: string;
@@ -72,6 +84,16 @@ export function formatChatHelp(): string {
     "  /review next                               Show the oldest pending review item.",
     "  /shell <command>                           Preview a one-shot shell approval. Use #적용 to run once.",
     "  /shell cancel                              Cancel the current shell/review preview.",
+    "  /tool grow <request>                        Create a tool growth routine candidate.",
+    "  /tool grow show [routine-id]                Show the current or selected tool growth routine.",
+    "  /tool grow test [routine-id] --yes          Run the selected candidate test.",
+    "  /tool grow activate [routine-id] --agent <agent-id> --yes",
+    "                                             Approve candidate design and activate explicitly.",
+    "  /tool grow reject [routine-id] --reason \"...\"",
+    "                                             Reject the current candidate while preserving evidence.",
+    "  /tool grow retry [routine-id]               Append a new draft/candidate attempt.",
+    "  /tool grow cancel [routine-id] --reason \"...\"",
+    "                                             Cancel the routine without deleting evidence.",
     "",
     "Natural commands:",
     "  #상태 보여줘                              Run a COSIA status command.",
@@ -83,6 +105,12 @@ export function formatChatHelp(): string {
     "  #컨플릭트 메모리 전부 디스카드해 이유는 중복",
     "                                             Preview discarding conflicted memory candidates.",
     "  #쉘로 <command> 실행 제안해                Preview a one-shot shell approval.",
+    "  #도구 성장 <request>                       Create a tool growth routine.",
+    "  #이 도구 테스트해                          Test the current tool growth candidate.",
+    "  #이 도구 활성화해                          Activate the current routine for this agent.",
+    "  #이건 내가 원한 기능이 아니야 이유는 ...   Reject the current candidate.",
+    "  #다른 도구 후보 만들어줘                  Retry the current routine.",
+    "  #도구 생성 취소                            Cancel the current routine.",
     "  #적용                                     Apply the current pending preview.",
     "  #취소                                     Cancel the current pending preview.",
     "  #대기중인 작업 보여줘                     Show the pending preview and remaining time.",
@@ -121,6 +149,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
   let lastPrompt = session.goal;
   const manualSkills = new Set(options.manualSkillIds ?? []);
   let pendingCommand: PendingCommand | undefined;
+  let currentToolGrowthRoutineId: string | undefined;
   const rl = createInterface({ input, output });
   let endedBy: ChatReplResult["endedBy"] = "eof";
 
@@ -326,6 +355,22 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         writeLine(output, preview?.output ?? "[BLOCKED] Shell preview is unavailable.");
         continue;
       }
+      if (prompt === "/tool grow" || prompt.startsWith("/tool grow ")) {
+        try {
+          const result = await handleToolGrowthSlashCommand({
+            prompt,
+            workspaceRoot: options.workspaceRoot,
+            providerId,
+            executingAgentId,
+            currentRoutineId: currentToolGrowthRoutineId
+          });
+          currentToolGrowthRoutineId = updateCurrentToolGrowthRoutineId(currentToolGrowthRoutineId, result.routine);
+          writeLine(output, result.output);
+        } catch (error) {
+          writeLine(output, `[FAILED] ${(error as Error).message}`);
+        }
+        continue;
+      }
       if (prompt === "/review" || prompt.startsWith("/review ")) {
         try {
           await handleReviewCommand(prompt, reviewInbox, output);
@@ -337,6 +382,18 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
       if (prompt.startsWith("\\#")) {
         prompt = prompt.slice(1);
       } else if (prompt.startsWith("#")) {
+        const toolGrowthHash = await handleToolGrowthHashCommand({
+          prompt,
+          workspaceRoot: options.workspaceRoot,
+          providerId,
+          executingAgentId,
+          currentRoutineId: currentToolGrowthRoutineId
+        });
+        if (toolGrowthHash.handled) {
+          currentToolGrowthRoutineId = updateCurrentToolGrowthRoutineId(currentToolGrowthRoutineId, toolGrowthHash.routine);
+          writeLine(output, toolGrowthHash.output);
+          continue;
+        }
         let intent = parseHashCommand(prompt);
         const commandContext = {
           workspaceRoot: options.workspaceRoot,
@@ -484,6 +541,187 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
     rl.close();
   }
   return { turns: history.length, endedBy };
+}
+
+type ToolGrowthReplResult = {
+  handled?: boolean;
+  output: string;
+  routine?: ToolGrowthRoutine;
+};
+
+async function handleToolGrowthSlashCommand(input: {
+  prompt: string;
+  workspaceRoot: string;
+  providerId: string;
+  executingAgentId: string;
+  currentRoutineId?: string;
+}): Promise<ToolGrowthReplResult> {
+  const rest = input.prompt.slice("/tool grow".length).trim();
+  const growth = new ToolGrowthManager(input.workspaceRoot);
+  const acquisition = new ToolAcquisitionManager(input.workspaceRoot);
+  if (!rest) {
+    return {
+      output: [
+        "Usage:",
+        "  /tool grow <request>",
+        "  /tool grow show [routine-id]",
+        "  /tool grow test [routine-id] --yes",
+        "  /tool grow activate [routine-id] --agent <agent-id> --yes",
+        "  /tool grow reject [routine-id] --reason \"<reason>\"",
+        "  /tool grow retry [routine-id]",
+        "  /tool grow cancel [routine-id] --reason \"<reason>\""
+      ].join("\n")
+    };
+  }
+
+  const tokens = parseCommandLineArgs(rest);
+  const action = tokens[0];
+  if (!["review", "show", "test", "activate", "reject", "retry", "cancel"].includes(action)) {
+    const result = await growth.start({
+      request: rest,
+      agentId: input.executingAgentId,
+      providerId: input.providerId
+    });
+    return { output: formatToolGrowthStart(result), routine: result.routine };
+  }
+
+  const args = tokens.slice(1);
+  const flags = parseFlagArgs(args);
+  if (action === "review") {
+    return { output: formatToolGrowthReview(growth.list({ all: flags.all === "true" })) };
+  }
+  const routineId = resolveToolGrowthRoutineId(args, input.currentRoutineId);
+  if (!routineId) {
+    return { output: "[BLOCKED] Tool growth routine id is required. Use /tool grow review or /tool grow show <routine-id>." };
+  }
+  if (action === "show") {
+    const routine = growth.get(routineId);
+    const candidate = routine.selectedCandidateId ? acquisition.getCandidate(routine.selectedCandidateId) : undefined;
+    return { output: formatToolGrowthRoutine(routine, candidate), routine };
+  }
+  if (action === "test") {
+    const result = await growth.test(routineId, { yes: flags.yes === "true" });
+    return { output: formatToolGrowthTest(result), routine: result.routine };
+  }
+  if (action === "activate") {
+    const result = await growth.activate(routineId, {
+      agentId: flags.agent ?? input.executingAgentId,
+      yes: flags.yes === "true"
+    });
+    return { output: formatToolGrowthActivation(result), routine: result.routine };
+  }
+  if (action === "reject") {
+    if (!flags.reason) {
+      throw new Error("Usage: /tool grow reject [routine-id] --reason \"<reason>\"");
+    }
+    const routine = growth.reject(routineId, flags.reason);
+    return { output: formatToolGrowthRejected(routine), routine };
+  }
+  if (action === "retry") {
+    const result = await growth.retry(routineId, { providerId: input.providerId });
+    return { output: formatToolGrowthStart(result), routine: result.routine };
+  }
+  if (action === "cancel") {
+    if (!flags.reason) {
+      throw new Error("Usage: /tool grow cancel [routine-id] --reason \"<reason>\"");
+    }
+    const routine = growth.cancel(routineId, flags.reason);
+    return { output: formatToolGrowthCancelled(routine), routine };
+  }
+  return { output: "[BLOCKED] Unknown /tool grow command." };
+}
+
+async function handleToolGrowthHashCommand(input: {
+  prompt: string;
+  workspaceRoot: string;
+  providerId: string;
+  executingAgentId: string;
+  currentRoutineId?: string;
+}): Promise<ToolGrowthReplResult> {
+  const body = input.prompt.trim().replace(/^#/, "").trim();
+  const growth = new ToolGrowthManager(input.workspaceRoot);
+  try {
+    const growthRequest = body.match(/^도구\s*성장\s+(.+)$/);
+    if (growthRequest) {
+      const result = await growth.start({
+        request: growthRequest[1].trim(),
+        agentId: input.executingAgentId,
+        providerId: input.providerId
+      });
+      return { handled: true, output: formatToolGrowthStart(result), routine: result.routine };
+    }
+    if (/^이\s*도구\s*테스트해$/.test(body)) {
+      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
+      const result = await growth.test(routineId, { yes: true });
+      return { handled: true, output: formatToolGrowthTest(result), routine: result.routine };
+    }
+    if (/^이\s*도구\s*활성화해$/.test(body)) {
+      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
+      const result = await growth.activate(routineId, {
+        agentId: input.executingAgentId,
+        yes: true
+      });
+      return { handled: true, output: formatToolGrowthActivation(result), routine: result.routine };
+    }
+    const reject = body.match(/^이건\s*내가\s*원한\s*기능이\s*아니야(?:\s*(?:이유는|사유는)\s*(.+))?$/);
+    if (reject) {
+      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
+      const reason = reject[1]?.trim();
+      if (!reason) {
+        return { handled: true, output: "[BLOCKED] Reject reason is required. 예: #이건 내가 원한 기능이 아니야 이유는 원하는 동작이 아님" };
+      }
+      const routine = growth.reject(routineId, reason);
+      return { handled: true, output: formatToolGrowthRejected(routine), routine };
+    }
+    if (/^다른\s*도구\s*후보\s*만들어줘$/.test(body)) {
+      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
+      const result = await growth.retry(routineId, { providerId: input.providerId });
+      return { handled: true, output: formatToolGrowthStart(result), routine: result.routine };
+    }
+    if (/^도구\s*생성\s*취소$/.test(body)) {
+      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
+      const routine = growth.cancel(routineId, "user cancelled tool growth routine");
+      return { handled: true, output: formatToolGrowthCancelled(routine), routine };
+    }
+  } catch (error) {
+    return { handled: true, output: `[FAILED] ${(error as Error).message}` };
+  }
+  return { handled: false, output: "" };
+}
+
+function updateCurrentToolGrowthRoutineId(current: string | undefined, routine: ToolGrowthRoutine | undefined): string | undefined {
+  if (!routine) {
+    return current;
+  }
+  return ["activated", "cancelled"].includes(routine.status) ? undefined : routine.id;
+}
+
+function requireCurrentToolGrowthRoutineId(current: string | undefined): string {
+  if (!current) {
+    throw new Error("Tool growth routine id is required. Start one with #도구 성장 <request> or use /tool grow show <routine-id>.");
+  }
+  return current;
+}
+
+function resolveToolGrowthRoutineId(tokens: string[], current: string | undefined): string | undefined {
+  const positional = positionalArgs(tokens);
+  return positional[0] ?? current;
+}
+
+function positionalArgs(tokens: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.startsWith("--")) {
+      const next = tokens[index + 1];
+      if (next && !next.startsWith("--")) {
+        index += 1;
+      }
+      continue;
+    }
+    result.push(token);
+  }
+  return result;
 }
 
 async function handleReviewCommand(prompt: string, reviewInbox: ReviewInboxService, output: Writable): Promise<void> {

@@ -65,6 +65,16 @@ import {
   ToolAcquisitionManager,
   type ActiveToolRecord
 } from "./runtime/tool_acquisition.js";
+import {
+  formatToolGrowthActivation,
+  formatToolGrowthCancelled,
+  formatToolGrowthRejected,
+  formatToolGrowthReview,
+  formatToolGrowthRoutine,
+  formatToolGrowthStart,
+  formatToolGrowthTest,
+  ToolGrowthManager
+} from "./runtime/tool_growth.js";
 import { COSIA_VERSION } from "./runtime/version.js";
 import { readText } from "./runtime/fs_utils.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
@@ -1822,6 +1832,7 @@ program
   .option("--staged", "Compatibility shortcut for staged diffs.", false)
   .option("--max-count <n>", "Compatibility shortcut for tools that accept maxCount.")
   .option("--from-capability <id>", "Create a draft from a capability proposal.")
+  .option("--request <text>", "Create a tool growth routine from a user request.")
   .option("--provider <provider>", "Model provider for LLM tool draft generation.", "default")
   .option("--agent <agent-id>", "Target agent id for activation.")
   .option("--reason <reason>", "Reason for discard/reject/deactivate.")
@@ -1844,6 +1855,60 @@ program
           providerId: options.provider
         })));
         return;
+      }
+
+      if (actionOrToolId === "grow") {
+        const growth = new ToolGrowthManager(workspaceRoot);
+        const action = toolId ?? (options.request ? "start" : "review");
+        if (action === "start") {
+          if (!options.request) throw new Error("Usage: cosia tool grow --request \"<text>\" [--agent <agent-id>] [--provider <provider>]");
+          console.log(formatToolGrowthStart(await growth.start({
+            request: options.request,
+            agentId: options.agent,
+            providerId: options.provider
+          })));
+          return;
+        }
+        if (action === "review") {
+          console.log(formatToolGrowthReview(growth.list({ all: options.all })));
+          return;
+        }
+        if (action === "show") {
+          if (!extraId) throw new Error("Usage: cosia tool grow show <routine-id>");
+          const routine = growth.get(extraId);
+          const candidate = routine.selectedCandidateId ? acquisition.getCandidate(routine.selectedCandidateId) : undefined;
+          console.log(formatToolGrowthRoutine(routine, candidate));
+          return;
+        }
+        if (action === "test") {
+          if (!extraId) throw new Error("Usage: cosia tool grow test <routine-id> --yes");
+          console.log(formatToolGrowthTest(await growth.test(extraId, { yes: options.yes })));
+          return;
+        }
+        if (action === "activate") {
+          if (!extraId || !options.agent) throw new Error("Usage: cosia tool grow activate <routine-id> --agent <agent-id> --yes");
+          console.log(formatToolGrowthActivation(await growth.activate(extraId, {
+            agentId: options.agent,
+            yes: options.yes
+          })));
+          return;
+        }
+        if (action === "reject") {
+          if (!extraId || !options.reason) throw new Error("Usage: cosia tool grow reject <routine-id> --reason \"<reason>\"");
+          console.log(formatToolGrowthRejected(growth.reject(extraId, options.reason)));
+          return;
+        }
+        if (action === "retry") {
+          if (!extraId) throw new Error("Usage: cosia tool grow retry <routine-id> [--provider <provider>]");
+          console.log(formatToolGrowthStart(await growth.retry(extraId, { providerId: options.provider })));
+          return;
+        }
+        if (action === "cancel") {
+          if (!extraId || !options.reason) throw new Error("Usage: cosia tool grow cancel <routine-id> --reason \"<reason>\"");
+          console.log(formatToolGrowthCancelled(growth.cancel(extraId, options.reason)));
+          return;
+        }
+        throw new Error(`Unknown tool grow action: ${action}`);
       }
 
       if (actionOrToolId === "candidate") {
@@ -2176,6 +2241,7 @@ type ToolCliOptions = {
   staged: boolean;
   maxCount?: string;
   fromCapability?: string;
+  request?: string;
   provider: string;
   agent?: string;
   reason?: string;
@@ -2239,6 +2305,7 @@ function formatToolCatalog(activeTools: ActiveToolRecord[] = []): string {
   lines.push("  cosia tool run <tool-id> --args \"{...}\"");
   lines.push("  cosia shell preview --command \"<command>\" --reason \"<reason>\"");
   lines.push("  cosia tool draft --from-capability <capability-id>");
+  lines.push("  cosia tool grow --request \"<request>\" --provider mock");
   lines.push("  cosia tool candidate review");
   lines.push("  cosia tool activate <candidate-id> --agent <agent-id> --yes");
   lines.push("  cosia tool blueprint list");
