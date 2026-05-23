@@ -16,10 +16,10 @@ import {
   CapabilityPlanner,
   capabilityScanJson,
   formatCapabilityFacts,
+  formatCapabilityPlan,
   formatCapabilityProposal,
   formatCapabilityReview,
-  formatCapabilityScan,
-  formatCapabilityShellPreview
+  formatCapabilityScan
 } from "./runtime/capability.js";
 import { checkProvider, createProvider, listProviders } from "./runtime/model/provider_registry.js";
 import { formatProviderFailure, ProviderError } from "./runtime/model/provider_errors.js";
@@ -1633,16 +1633,16 @@ policy
 
 program
   .command("capability")
-  .argument("[action]", "`scan`, `facts`, `review`, `show`, `discard`, or `convert`", "review")
+  .argument("[action]", "`scan`, `facts`, `plan`, `review`, `show`, or `discard`", "review")
   .argument("[id]", "Capability proposal id.")
   .option("--request <text>", "User request to ground a capability scan.")
   .option("--latest", "Show the latest capability fact scan.", false)
   .option("--scan-id <id>", "Show one capability fact scan by id.")
   .option("--json", "Print stable JSON output.", false)
   .option("--reason <reason>", "Reason for discard.")
-  .option("--to-shell", "Convert a proposal to a shell approval preview.", false)
+  .option("--all", "Show all capability proposals.", false)
   .description("Scan generic workspace facts and review zero-base capability proposals.")
-  .action(async (action: string, id: string | undefined, options: { request?: string; latest: boolean; scanId?: string; json: boolean; reason?: string; toShell: boolean }) => {
+  .action(async (action: string, id: string | undefined, options: { request?: string; latest: boolean; scanId?: string; json: boolean; reason?: string; all: boolean }) => {
     await main(async (workspaceRoot) => {
       const planner = new CapabilityPlanner(workspaceRoot);
       if (action === "scan") {
@@ -1655,23 +1655,24 @@ program
         console.log(options.json ? capabilityScanJson(result) : formatCapabilityFacts(result));
         return;
       }
+      if (action === "plan") {
+        if (!options.request) throw new Error("Usage: cosia capability plan --request \"<text>\"");
+        console.log(formatCapabilityPlan(planner.plan({ userNeed: options.request })));
+        return;
+      }
       if (action === "review") {
-        console.log(formatCapabilityReview(planner.listProposals()));
+        console.log(formatCapabilityReview(planner.listProposals({ all: options.all })));
         return;
       }
       if (action === "show") {
         if (!id) throw new Error("Usage: cosia capability show <id>");
-        console.log(formatCapabilityProposal(planner.getProposal(id)));
+        console.log(formatCapabilityProposal(planner.getProposal(id), planner.groundingFactsForProposal(id)));
         return;
       }
       if (action === "discard") {
         if (!id || !options.reason) throw new Error("Usage: cosia capability discard <id> --reason \"<reason>\"");
-        console.log(formatCapabilityProposal(planner.discardProposal(id, options.reason)));
-        return;
-      }
-      if (action === "convert") {
-        if (!id || !options.toShell) throw new Error("Usage: cosia capability convert <id> --to-shell");
-        console.log(formatCapabilityShellPreview(planner.convertToShell(id, { sourceChannel: "cli" })));
+        const proposal = planner.discardProposal(id, options.reason);
+        console.log(formatCapabilityProposal(proposal, planner.groundingFactsForProposal(id)));
         return;
       }
       throw new Error(`Unknown capability action: ${action}`);
@@ -1686,7 +1687,7 @@ program
   .option("--cwd <cwd>", "Workspace-relative working directory.", ".")
   .option("--reason <reason>", "Reason for requesting shell execution.")
   .option("--expected-effect <text>", "Expected shell command effect.")
-  .option("--from-capability <id>", "Create or run a shell preview from a capability proposal.")
+  .option("--from-capability <id>", "Reserved for v0.32 shell proposal conversion; rejected in v0.31.")
   .option("--yes", "Apply a newly created preview immediately.", false)
   .option("--confirm <phrase>", "Approval-id-bound confirmation phrase for high-risk commands.")
   .description("Create, apply, cancel, or inspect one-shot user-approved shell command previews.")
@@ -1707,9 +1708,7 @@ program
       }
       if (action === "preview") {
         if (options.fromCapability) {
-          const approval = new CapabilityPlanner(workspaceRoot).convertToShell(options.fromCapability, { sourceChannel: "cli" });
-          console.log(formatCapabilityShellPreview(approval));
-          return;
+          throw new Error("Capability-to-shell preview conversion is deferred to v0.32.");
         }
         if (!options.command || !options.reason) {
           throw new Error("Usage: cosia shell preview --command \"<command>\" --reason \"<reason>\"");
@@ -1732,15 +1731,7 @@ program
       }
       if (action === "run") {
         if (options.fromCapability) {
-          const approval = new CapabilityPlanner(workspaceRoot).convertToShell(options.fromCapability, { sourceChannel: "cli" });
-          console.log(formatCapabilityShellPreview(approval));
-          if (options.yes) {
-            const result = await ledger.apply(approval.id, { confirm: options.confirm });
-            console.log("");
-            console.log(result.content);
-            if (!result.ok) process.exitCode = 1;
-          }
-          return;
+          throw new Error("Capability-to-shell execution is deferred to v0.32.");
         }
         if (!options.command || !options.reason || !options.yes) {
           throw new Error("Usage: cosia shell run --command \"<command>\" --reason \"<reason>\" --yes");
@@ -2084,6 +2075,7 @@ function formatToolCatalog(): string {
   lines.push("");
   lines.push("Zero-base capability flow:");
   lines.push("  cosia capability scan --request \"<request>\"");
+  lines.push("  cosia capability plan --request \"<request>\"");
   lines.push("  cosia capability facts --latest");
   lines.push("  cosia capability review");
   return lines.join("\n");

@@ -131,7 +131,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.30.0\"");
+    expect(policyJson).toContain("\"version\": \"0.31.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -830,34 +830,74 @@ describe("policy core", () => {
 });
 
 describe("capability planner", () => {
-  it("collects generic facts and creates grounded capability proposals without assuming concrete tools", async () => {
+  it("collects generic facts and plans grounded capability proposals without assuming concrete tools", async () => {
     const root = await initializedWorkspace();
     await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node --version" } }), "utf8");
-    const scan = await new CapabilityPlanner(root).scan({ userNeed: "테스트 돌려봐" });
+    const planner = new CapabilityPlanner(root);
+    const scan = await planner.scan({ userNeed: "테스트 돌려봐" });
     expect(scan.scan.scanId).toMatch(/^scan_\d{8}T\d{9}Z_[0-9a-f]{6}$/);
     expect(scan.facts.every((fact) => fact.scanId === scan.scan.scanId)).toBe(true);
     expect(scan.facts.some((fact) => fact.kind === "manifest_like_file" && fact.path === "package.json")).toBe(true);
     expect(scan.facts.some((fact) => fact.kind === "script_like_key" && fact.keys?.includes("test"))).toBe(true);
-    expect(scan.proposals[0].capabilityFamily).toBe("project_check");
-    expect(scan.proposals[0].recommendedNextStep).toBe("ask_user");
-    expect(JSON.stringify(scan.proposals[0]).toLowerCase()).not.toContain("npm");
+
+    const plan = planner.plan({ userNeed: "npm test 해줘" });
+    expect(plan.proposal.sourceScanId).toBe(scan.scan.scanId);
+    expect(plan.proposal.capabilityFamily).toBe("project_check");
+    expect(plan.proposal.recommendedNextStep).toBe("shell_preview");
+    expect(plan.proposal.confidence).toBe("medium");
+    expect(plan.proposal.possibleApproaches.some((item) => item.kind === "shell_preview")).toBe(true);
+    expect(JSON.stringify(plan.proposal.hypotheses).toLowerCase()).not.toContain("npm");
+    expect(JSON.stringify(plan.proposal.possibleApproaches).toLowerCase()).not.toContain("npm");
+    expect(new ShellApprovalLedger(root).list()).toHaveLength(0);
   });
 
   it("keeps missing .git/package.json cases abstract and silently prunes hallucinated grounding ids", async () => {
     const root = await initializedWorkspace();
     await rm(join(root, "package.json"), { force: true });
-    const scan = await new CapabilityPlanner(root).scan({ userNeed: "변경 상태 확인" });
-    expect(scan.proposals[0].capabilityFamily).toBe("change_tracking");
-    expect(scan.proposals[0].possibleApproaches.map((item) => item.title)).toContain("External change-tracking setup");
+    const planner = new CapabilityPlanner(root);
+    const scan = await planner.scan({ userNeed: "변경 상태 확인" });
+    const plan = planner.plan({ userNeed: "git status 봐줘" });
+    expect(plan.proposal.capabilityFamily).toBe("change_tracking");
+    expect(plan.proposal.possibleApproaches.map((item) => item.title)).toContain("External change-tracking setup");
+    expect(JSON.stringify(plan.proposal.hypotheses).toLowerCase()).not.toContain("git");
+    expect(JSON.stringify(plan.proposal.possibleApproaches).toLowerCase()).not.toContain("git status");
 
     const normalized = normalizeCapabilityProposal({
-      ...scan.proposals[0],
+      ...plan.proposal,
       hypotheses: [{ text: "unsupported", groundingFactIds: ["missing_fact"] }],
-      possibleApproaches: [{ title: "unsupported", summary: "no grounding", groundingFactIds: ["missing_fact"], riskLevel: "low" }]
+      possibleApproaches: [{ title: "Use git status", summary: "Run npm test", groundingFactIds: ["missing_fact"], riskLevel: "low", kind: "shell_preview" }]
     });
     expect(normalized.status).toBe("ignored");
     expect(normalized.hypotheses).toEqual([]);
     expect(normalized.possibleApproaches).toEqual([]);
+    expect(scan.facts.some((fact) => fact.path === ".git")).toBe(false);
+  });
+
+  it("requires a fresh scan before planning and keeps proposal source scan ids fixed", async () => {
+    const root = await initializedWorkspace();
+    const planner = new CapabilityPlanner(root);
+    expect(() => planner.plan({ userNeed: "테스트 돌려봐" })).toThrow(/No environment scan found/);
+
+    const scan = await planner.scan({ userNeed: "테스트 돌려봐" });
+    const observedAt = Date.parse(scan.scan.observedAt);
+    const boundary = planner.plan({ userNeed: "테스트 돌려봐", now: new Date(observedAt + 300_000) });
+    expect(boundary.proposal.sourceScanId).toBe(scan.scan.scanId);
+    expect(() => planner.plan({ userNeed: "테스트 돌려봐", now: new Date(observedAt + 300_001) })).toThrow(/Latest environment scan is stale/);
+
+    const nextScan = await planner.scan({ userNeed: "테스트 다시 확인" });
+    expect(nextScan.scan.scanId).not.toBe(boundary.proposal.sourceScanId);
+    expect(planner.getProposal(boundary.proposal.id).sourceScanId).toBe(scan.scan.scanId);
+  });
+
+  it("normalizes concrete tool names into abstract capability families", async () => {
+    const root = await initializedWorkspace();
+    const planner = new CapabilityPlanner(root);
+    await planner.scan({ userNeed: "python 테스트 돌려봐" });
+    const plan = planner.plan({ userNeed: "python 테스트 돌려봐" });
+    expect(plan.proposal.capabilityFamily).toBe("project_check");
+    expect(plan.proposal.confidence).not.toBe("high");
+    expect(JSON.stringify(plan.proposal.hypotheses).toLowerCase()).not.toContain("python");
+    expect(JSON.stringify(plan.proposal.possibleApproaches).toLowerCase()).not.toContain("python");
   });
 
   it("stores scan snapshots, latest facts, and stable JSON without exposing workspace roots", async () => {
@@ -2617,7 +2657,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.30.0");
+    expect(emptyReport.version).toBe("0.31.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

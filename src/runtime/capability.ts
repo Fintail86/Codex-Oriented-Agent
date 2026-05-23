@@ -8,6 +8,7 @@ import { formatShellApprovalPreview, type ShellApproval } from "./shell_approval
 
 export const legacyEnvironmentScanId = "legacy_v0.29";
 const defaultMaxDepth = 3;
+const defaultPlannerMaxStaleAgeMs = 300_000;
 const structuredFileSizeCap = 500 * 1024;
 const readmeFileSizeCap = 128 * 1024;
 const maxDirectoryEntries = 250;
@@ -103,23 +104,33 @@ export type CapabilityApproach = {
   summary: string;
   groundingFactIds: string[];
   riskLevel: "low" | "medium" | "high";
+  kind: z.infer<typeof capabilityNextStepSchema>;
 };
 
 export type CapabilityProposal = {
   id: string;
+  sourceScanId: string;
   userNeed: string;
   capabilityFamily: CapabilityFamily;
-  groundingFacts: string[];
+  groundingFactIds: string[];
   hypotheses: CapabilityHypothesis[];
   possibleApproaches: CapabilityApproach[];
   recommendedNextStep: z.infer<typeof capabilityNextStepSchema>;
   riskLevel: "low" | "medium" | "high";
   confidence: "low" | "medium" | "high";
   status: z.infer<typeof capabilityStatusSchema>;
+  discardedAt?: string;
+  discardReason?: string;
 };
 
 export type CapabilityScanResult = EnvironmentScanResult & {
   proposals: CapabilityProposal[];
+};
+
+export type CapabilityPlanResult = {
+  scan: EnvironmentScan;
+  proposal: CapabilityProposal;
+  groundingFacts: EnvironmentFact[];
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -235,28 +246,42 @@ export class EnvironmentDiscovery {
 export class CapabilityPlanner {
   constructor(private readonly workspaceRoot: string) {}
 
-  async scan(options: { userNeed?: string } = {}): Promise<CapabilityScanResult> {
-    const scan = await new EnvironmentDiscovery(this.workspaceRoot).scan(options);
-    const proposals = options.userNeed?.trim() ? [this.propose(options.userNeed.trim(), scan.facts)] : [];
-    this.saveProposals(proposals);
-    return { ...scan, proposals };
+  async scan(options: { userNeed?: string } = {}): Promise<EnvironmentScanResult> {
+    return new EnvironmentDiscovery(this.workspaceRoot).scan(options);
+  }
+
+  plan(options: { userNeed: string; now?: Date; maxStaleAgeMs?: number }): CapabilityPlanResult {
+    const userNeed = options.userNeed.trim();
+    if (!userNeed) {
+      throw new Error("Capability request is required.");
+    }
+    const scanResult = this.loadLatestValidScan(userNeed, options);
+    const proposal = this.propose(userNeed, scanResult);
+    this.saveProposals([proposal]);
+    return {
+      scan: scanResult.scan,
+      proposal,
+      groundingFacts: selectFactsByIds(scanResult.facts, proposal.groundingFactIds)
+    };
   }
 
   listFacts(options: { latest?: boolean; scanId?: string } = {}): EnvironmentScanResult {
     return new EnvironmentDiscovery(this.workspaceRoot).listFacts(options);
   }
 
-  listProposals(): CapabilityProposal[] {
+  listProposals(options: { all?: boolean } = {}): CapabilityProposal[] {
     return withCapabilityDb(this.workspaceRoot, (db) => {
-      const rows = db.prepare("SELECT record_json FROM capability_proposals ORDER BY created_at DESC").all() as Array<{ record_json: string }>;
-      return rows.map((row) => JSON.parse(row.record_json) as CapabilityProposal);
+      const rows = options.all
+        ? db.prepare("SELECT record_json FROM capability_proposals ORDER BY created_at DESC").all() as Array<{ record_json: string }>
+        : db.prepare("SELECT record_json FROM capability_proposals WHERE status = 'pending' ORDER BY created_at DESC").all() as Array<{ record_json: string }>;
+      return rows.map((row) => normalizeStoredProposal(row.record_json));
     });
   }
 
   getProposal(id: string): CapabilityProposal {
     const proposal = withCapabilityDb(this.workspaceRoot, (db) => {
       const row = db.prepare("SELECT record_json FROM capability_proposals WHERE id = ?").get(id) as { record_json: string } | undefined;
-      return row ? JSON.parse(row.record_json) as CapabilityProposal : undefined;
+      return row ? normalizeStoredProposal(row.record_json) : undefined;
     });
     if (!proposal) {
       throw new Error(`Capability proposal not found: ${id}`);
@@ -266,39 +291,76 @@ export class CapabilityPlanner {
 
   discardProposal(id: string, reason: string): CapabilityProposal {
     const proposal = this.getProposal(id);
+    if (proposal.status === "discarded") {
+      return proposal;
+    }
+    if (proposal.status !== "pending" && proposal.status !== "ignored") {
+      throw new Error(`Capability proposal cannot be discarded from status: ${proposal.status}`);
+    }
     const next = normalizeCapabilityProposal({
       ...proposal,
       status: "discarded",
-      hypotheses: [
-        ...proposal.hypotheses,
-        { text: `Discarded: ${redactText(reason)}`, groundingFactIds: proposal.groundingFacts.slice(0, 1) }
-      ]
+      discardedAt: new Date().toISOString(),
+      discardReason: redactText(reason)
     });
     this.saveProposals([next]);
     return next;
   }
 
   convertToShell(id: string, _source: { sourceChannel: "cli" | "repl" | "gateway"; sourceSessionId?: string; sourceAgentId?: string; sourceRunId?: string }): ShellApproval {
-    const proposal = this.getProposal(id);
-    this.saveProposals([{ ...proposal, status: "converted_to_shell" }]);
-    throw new Error("Capability proposal has no v0.30 shell preview. Shell proposal mapping is deferred to v0.31+.");
+    this.getProposal(id);
+    throw new Error("Capability proposal has no v0.31 shell preview. Shell proposal mapping is deferred to v0.32+.");
   }
 
-  private propose(userNeed: string, facts: EnvironmentFact[]): CapabilityProposal {
+  groundingFactsForProposal(id: string): EnvironmentFact[] {
+    const proposal = this.getProposal(id);
+    const scanResult = this.listFacts({ scanId: proposal.sourceScanId });
+    return selectFactsByIds(scanResult.facts, proposal.groundingFactIds);
+  }
+
+  private loadLatestValidScan(userNeed: string, options: { now?: Date; maxStaleAgeMs?: number }): EnvironmentScanResult {
+    let scanResult;
+    try {
+      scanResult = this.listFacts({ latest: true });
+    } catch {
+      throw new Error([
+        "No environment scan found.",
+        "Run:",
+        `  cosia capability scan --request "${userNeed}"`
+      ].join("\n"));
+    }
+    const now = options.now ?? new Date();
+    const maxStaleAgeMs = options.maxStaleAgeMs ?? defaultPlannerMaxStaleAgeMs;
+    const observedMs = Date.parse(scanResult.scan.observedAt);
+    if (!Number.isFinite(observedMs) || now.getTime() - observedMs > maxStaleAgeMs) {
+      throw new Error([
+        "Latest environment scan is stale.",
+        "Run:",
+        `  cosia capability scan --request "${userNeed}"`
+      ].join("\n"));
+    }
+    return scanResult;
+  }
+
+  private propose(userNeed: string, scanResult: EnvironmentScanResult): CapabilityProposal {
+    const facts = scanResult.facts;
     const family = detectCapabilityFamily(userNeed);
     const userFact = facts.find((fact) => fact.kind === "user_request");
     const relevantFacts = relevantFactIds(family, facts);
-    const groundingFacts = [...new Set([...(userFact ? [userFact.id] : []), ...relevantFacts])];
+    const workspaceRelevantFacts = relevantFacts.filter((id) => !userFact || id !== userFact.id);
+    const groundingFactIds = [...new Set([...(userFact ? [userFact.id] : []), ...relevantFacts])];
+    const hasCrossGrounding = workspaceRelevantFacts.length > 0;
     return normalizeCapabilityProposal({
       id: `cap_${randomUUID().slice(0, 8)}`,
+      sourceScanId: scanResult.scan.scanId,
       userNeed: redactText(userNeed),
       capabilityFamily: family,
-      groundingFacts,
-      hypotheses: buildHypotheses(family, facts, groundingFacts),
-      possibleApproaches: buildApproaches(family, facts, groundingFacts),
-      recommendedNextStep: recommendNextStep(family),
+      groundingFactIds,
+      hypotheses: buildHypotheses(family, facts, groundingFactIds),
+      possibleApproaches: buildApproaches(family, facts, groundingFactIds),
+      recommendedNextStep: recommendNextStep(family, hasCrossGrounding),
       riskLevel: family === "runtime_execution" ? "medium" : "low",
-      confidence: groundingFacts.length > 1 ? "medium" : "low",
+      confidence: hasCrossGrounding ? "medium" : "low",
       status: "pending"
     });
   }
@@ -308,22 +370,29 @@ export class CapabilityPlanner {
       for (const proposal of proposals) {
         db.prepare(`
           INSERT OR REPLACE INTO capability_proposals (
-            id, user_need, capability_family, status, risk_level, confidence,
-            recommended_next_step, grounding_facts_json, record_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM capability_proposals WHERE id = ?), ?), ?)
+            id, source_scan_id, user_need, capability_family, status, risk_level, confidence,
+            recommended_next_step, grounding_facts_json, grounding_fact_ids_json, hypotheses_json, possible_approaches_json,
+            record_json, created_at, updated_at, discarded_at, discard_reason
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM capability_proposals WHERE id = ?), ?), ?, ?, ?)
         `).run(
           proposal.id,
+          proposal.sourceScanId,
           proposal.userNeed,
           proposal.capabilityFamily,
           proposal.status,
           proposal.riskLevel,
           proposal.confidence,
           proposal.recommendedNextStep,
-          JSON.stringify(proposal.groundingFacts),
+          JSON.stringify(proposal.groundingFactIds),
+          JSON.stringify(proposal.groundingFactIds),
+          JSON.stringify(proposal.hypotheses),
+          JSON.stringify(proposal.possibleApproaches),
           JSON.stringify(proposal),
           proposal.id,
           new Date().toISOString(),
-          new Date().toISOString()
+          new Date().toISOString(),
+          proposal.discardedAt ?? null,
+          proposal.discardReason ?? null
         );
       }
     });
@@ -331,40 +400,46 @@ export class CapabilityPlanner {
 }
 
 export function normalizeCapabilityProposal(proposal: CapabilityProposal): CapabilityProposal {
-  const validFacts = new Set(proposal.groundingFacts);
+  const groundingFactIds = uniqueStrings(proposal.groundingFactIds);
+  const validFacts = new Set(groundingFactIds);
   const hypotheses = proposal.hypotheses
-    .map((item) => ({ ...item, groundingFactIds: item.groundingFactIds.filter((id) => validFacts.has(id)) }))
-    .filter((item) => item.groundingFactIds.length > 0 || proposal.groundingFacts.length === 0);
+    .map((item) => ({
+      text: sanitizeCapabilityText(item.text, "A capability may be needed."),
+      groundingFactIds: uniqueStrings(item.groundingFactIds.filter((id) => validFacts.has(id)))
+    }))
+    .filter((item) => item.groundingFactIds.length > 0);
   const possibleApproaches = proposal.possibleApproaches
     .map((item) => ({
-      ...item,
+      title: sanitizeCapabilityText(item.title, "Capability boundary review"),
+      summary: sanitizeCapabilityText(item.summary, "Review the capability boundary before creating execution proposals."),
       riskLevel: (item.riskLevel === "high" || item.riskLevel === "medium" ? item.riskLevel : "low") as "low" | "medium" | "high",
-      groundingFactIds: item.groundingFactIds.filter((id) => validFacts.has(id))
+      kind: capabilityNextStepSchema.safeParse(item.kind).success ? item.kind : "ask_user",
+      groundingFactIds: uniqueStrings(item.groundingFactIds.filter((id) => validFacts.has(id)))
     }))
-    .filter((item) => item.groundingFactIds.length > 0 || proposal.groundingFacts.length === 0);
+    .filter((item) => item.groundingFactIds.length > 0);
   const allRemoved = proposal.hypotheses.length + proposal.possibleApproaches.length > 0
     && hypotheses.length + possibleApproaches.length === 0;
+  const normalizedConfidence = proposal.confidence === "medium" ? "medium" : "low";
   return {
     ...proposal,
+    sourceScanId: proposal.sourceScanId,
     capabilityFamily: capabilityFamilySchema.safeParse(proposal.capabilityFamily).success ? proposal.capabilityFamily : "unknown",
     recommendedNextStep: capabilityNextStepSchema.safeParse(proposal.recommendedNextStep).success ? proposal.recommendedNextStep : "ask_user",
     riskLevel: proposal.riskLevel === "high" || proposal.riskLevel === "medium" ? proposal.riskLevel : "low",
-    confidence: proposal.confidence === "high" || proposal.confidence === "medium" ? proposal.confidence : "low",
+    confidence: normalizedConfidence,
+    groundingFactIds,
     hypotheses,
     possibleApproaches,
     status: allRemoved ? "ignored" : proposal.status
   };
 }
 
-export function formatCapabilityScan(result: CapabilityScanResult): string {
+export function formatCapabilityScan(result: EnvironmentScanResult): string {
   return [
     "Capability scan",
     `Scan: ${result.scan.scanId}`,
     "",
-    formatFactKindSummary(result.facts, result.warnings),
-    "",
-    "Proposals:",
-    result.proposals.length ? result.proposals.map(formatCapabilityProposalCompact).join("\n\n") : "- none"
+    formatFactKindSummary(result.facts, result.warnings)
   ].join("\n");
 }
 
@@ -383,14 +458,17 @@ export function formatCapabilityFacts(result: EnvironmentScanResult): string {
   ].join("\n");
 }
 
-export function capabilityScanJson(result: EnvironmentScanResult | CapabilityScanResult): string {
+export function capabilityScanJson(result: EnvironmentScanResult): string {
   const output = {
     facts: sortFacts(result.facts).map(publicFact),
-    proposals: "proposals" in result ? result.proposals : undefined,
     scan: publicScan(result.scan),
     warnings: sortWarnings(result.warnings).map(publicWarning)
   };
   return stableJsonStringify(output);
+}
+
+export function formatCapabilityPlan(result: CapabilityPlanResult): string {
+  return formatCapabilityProposal(result.proposal, result.groundingFacts);
 }
 
 export function formatCapabilityReview(proposals: CapabilityProposal[]): string {
@@ -400,22 +478,26 @@ export function formatCapabilityReview(proposals: CapabilityProposal[]): string 
   return proposals.map(formatCapabilityProposalCompact).join("\n\n");
 }
 
-export function formatCapabilityProposal(proposal: CapabilityProposal): string {
+export function formatCapabilityProposal(proposal: CapabilityProposal, groundingFacts: EnvironmentFact[] = []): string {
   return [
     `Capability proposal: ${proposal.id}`,
     `Status: ${proposal.status}`,
+    `Source scan: ${proposal.sourceScanId}`,
     `Need: ${proposal.userNeed}`,
     `Family: ${proposal.capabilityFamily}`,
     `Risk: ${proposal.riskLevel}`,
     `Confidence: ${proposal.confidence}`,
     `Next: ${proposal.recommendedNextStep}`,
-    `Grounding facts: ${proposal.groundingFacts.join(", ") || "none"}`,
+    `Grounding facts: ${proposal.groundingFactIds.join(", ") || "none"}`,
+    "",
+    "Grounding fact summary:",
+    groundingFacts.length ? groundingFacts.map(formatFact).join("\n") : "- none",
     "",
     "Hypotheses:",
     proposal.hypotheses.length ? proposal.hypotheses.map((item) => `- ${item.text} [${item.groundingFactIds.join(", ")}]`).join("\n") : "- none",
     "",
     "Approaches:",
-    proposal.possibleApproaches.length ? proposal.possibleApproaches.map((item) => `- ${item.title} (${item.riskLevel}) [${item.groundingFactIds.join(", ")}]\n  ${item.summary}`).join("\n") : "- none"
+    proposal.possibleApproaches.length ? proposal.possibleApproaches.map((item) => `- ${item.title} (${item.kind}, ${item.riskLevel}) [${item.groundingFactIds.join(", ")}]\n  ${item.summary}`).join("\n") : "- none"
   ].join("\n");
 }
 
@@ -489,21 +571,33 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
       );
       CREATE TABLE IF NOT EXISTS capability_proposals (
         id TEXT PRIMARY KEY,
+        source_scan_id TEXT,
         user_need TEXT NOT NULL,
         capability_family TEXT NOT NULL,
         status TEXT NOT NULL,
         risk_level TEXT NOT NULL,
         confidence TEXT NOT NULL,
         recommended_next_step TEXT NOT NULL,
-        grounding_facts_json TEXT NOT NULL,
+        grounding_facts_json TEXT,
+        grounding_fact_ids_json TEXT,
+        hypotheses_json TEXT,
+        possible_approaches_json TEXT,
         record_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        discarded_at TEXT,
+        discard_reason TEXT
       );
     `);
     if (!hasColumn(db, "environment_facts", "scan_id")) {
       db.exec("ALTER TABLE environment_facts ADD COLUMN scan_id TEXT");
     }
+    ensureColumn(db, "capability_proposals", "source_scan_id", "TEXT");
+    ensureColumn(db, "capability_proposals", "grounding_fact_ids_json", "TEXT");
+    ensureColumn(db, "capability_proposals", "hypotheses_json", "TEXT");
+    ensureColumn(db, "capability_proposals", "possible_approaches_json", "TEXT");
+    ensureColumn(db, "capability_proposals", "discarded_at", "TEXT");
+    ensureColumn(db, "capability_proposals", "discard_reason", "TEXT");
     const legacyCount = db.prepare("SELECT COUNT(*) AS count FROM environment_facts WHERE scan_id IS NULL OR scan_id = ''").get() as { count: number };
     if (legacyCount.count > 0) {
       const observedAt = new Date(0).toISOString();
@@ -522,6 +616,8 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
       CREATE INDEX IF NOT EXISTS idx_environment_facts_scan_id ON environment_facts(scan_id);
       CREATE INDEX IF NOT EXISTS idx_environment_scan_warnings_scan_id ON environment_scan_warnings(scan_id);
       CREATE INDEX IF NOT EXISTS idx_environment_scans_observed_at ON environment_scans(observed_at);
+      CREATE INDEX IF NOT EXISTS idx_capability_proposals_status ON capability_proposals(status);
+      CREATE INDEX IF NOT EXISTS idx_capability_proposals_source_scan_id ON capability_proposals(source_scan_id);
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -559,6 +655,12 @@ function selectScan(db: DatabaseSync, options: { latest?: boolean; scanId?: stri
 function hasColumn(db: DatabaseSync, tableName: string, columnName: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
   return columns.some((column) => column.name === columnName);
+}
+
+function ensureColumn(db: DatabaseSync, tableName: string, columnName: string, definition: string): void {
+  if (!hasColumn(db, tableName, columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
+  }
 }
 
 async function scanDirectory(absDirectory: string, relDirectory: string, depth: number, context: DiscoveryContext): Promise<void> {
@@ -793,7 +895,7 @@ async function readSummary(absPath: string, relPath: string, context: DiscoveryC
 
 function detectCapabilityFamily(userNeed: string): CapabilityFamily {
   const normalized = userNeed.toLowerCase();
-  if (/변경|추적|상태|change|diff|version control|버전/.test(normalized)) {
+  if (/변경|추적|상태|status|change|diff|version control|버전/.test(normalized)) {
     return "change_tracking";
   }
   if (/테스트|검증|typecheck|test|build|빌드/.test(normalized)) {
@@ -844,28 +946,32 @@ function buildApproaches(family: CapabilityFamily, _facts: EnvironmentFact[], gr
   }
   if (family === "change_tracking") {
     return [
-      { title: "Current state report", summary: "Use current core tools to inspect relevant files and report observed state.", groundingFactIds: groundingFacts, riskLevel: "low" },
-      { title: "Local snapshot tracker", summary: "Propose a workspace-local snapshot capability for future comparisons.", groundingFactIds: groundingFacts, riskLevel: "medium" },
-      { title: "External change-tracking setup", summary: "Ask the user whether an external change-tracking capability should be introduced.", groundingFactIds: groundingFacts, riskLevel: "medium" }
+      { title: "Current state report", summary: "Use current core tools to inspect relevant files and report observed state.", groundingFactIds: groundingFacts, riskLevel: "low", kind: "current_tools_only" },
+      { title: "Local snapshot tracker", summary: "Propose a workspace-local snapshot capability for future comparisons.", groundingFactIds: groundingFacts, riskLevel: "medium", kind: "tool_draft" },
+      { title: "External change-tracking setup", summary: "Ask the user whether an external change-tracking capability should be introduced.", groundingFactIds: groundingFacts, riskLevel: "medium", kind: "ask_user" }
     ];
   }
   if (family === "project_check") {
     return [
-      { title: "Inspect manifest-like and test-like paths", summary: "Use core tools to inspect structured files and test-like paths before choosing any runner.", groundingFactIds: groundingFacts, riskLevel: "low" },
-      { title: "Ask for project check boundary", summary: "Ask the user how this workspace should run checks before creating shell or tool proposals.", groundingFactIds: groundingFacts, riskLevel: "low" }
+      { title: "Inspect manifest-like and test-like paths", summary: "Use core tools to inspect structured files and test-like paths before choosing any runner.", groundingFactIds: groundingFacts, riskLevel: "low", kind: "current_tools_only" },
+      { title: "Project check execution preview", summary: "A project check capability may be prepared for a later reviewed execution preview.", groundingFactIds: groundingFacts, riskLevel: "low", kind: "shell_preview" },
+      { title: "Ask for project check boundary", summary: "Ask the user how this workspace should run checks before creating shell or tool proposals.", groundingFactIds: groundingFacts, riskLevel: "low", kind: "ask_user" }
     ];
   }
   return [
-    { title: "Ask user for capability boundary", summary: "Clarify what capability is needed before creating shell or tool proposals.", groundingFactIds: groundingFacts, riskLevel: "low" }
+    { title: "Ask user for capability boundary", summary: "Clarify what capability is needed before creating shell or tool proposals.", groundingFactIds: groundingFacts, riskLevel: "low", kind: "ask_user" }
   ];
 }
 
-function recommendNextStep(family: CapabilityFamily): CapabilityProposal["recommendedNextStep"] {
+function recommendNextStep(family: CapabilityFamily, hasCrossGrounding: boolean): CapabilityProposal["recommendedNextStep"] {
   if (family === "search_observation") {
     return "current_tools_only";
   }
   if (family === "unknown") {
     return "ignore";
+  }
+  if ((family === "project_check" || family === "runtime_execution") && hasCrossGrounding) {
+    return "shell_preview";
   }
   return "ask_user";
 }
@@ -906,7 +1012,8 @@ function formatCapabilityProposalCompact(proposal: CapabilityProposal): string {
     `${proposal.id}\t${proposal.status}\t${proposal.capabilityFamily}\trisk:${proposal.riskLevel}\tconfidence:${proposal.confidence}`,
     `Need: ${proposal.userNeed}`,
     `Next: ${proposal.recommendedNextStep}`,
-    `Grounding: ${proposal.groundingFacts.join(", ") || "none"}`
+    `Source scan: ${proposal.sourceScanId}`,
+    `Grounding: ${proposal.groundingFactIds.join(", ") || "none"}`
   ].join("\n");
 }
 
@@ -939,6 +1046,11 @@ function publicWarning(warning: EnvironmentScanWarning): Record<string, unknown>
   };
 }
 
+function selectFactsByIds(facts: EnvironmentFact[], ids: string[]): EnvironmentFact[] {
+  const wanted = new Set(ids);
+  return sortFacts(facts.filter((fact) => wanted.has(fact.id)));
+}
+
 function normalizeFactFromRow(recordJson: string, scanId: string, observedAt: string): EnvironmentFact {
   const parsed = JSON.parse(recordJson) as Partial<EnvironmentFact>;
   return {
@@ -950,6 +1062,25 @@ function normalizeFactFromRow(recordJson: string, scanId: string, observedAt: st
     keys: parsed.keys ? sanitizeKeys(parsed.keys) : undefined,
     observedAt: parsed.observedAt ?? observedAt
   };
+}
+
+function normalizeStoredProposal(recordJson: string): CapabilityProposal {
+  const parsed = JSON.parse(recordJson) as Partial<CapabilityProposal> & { groundingFacts?: string[] };
+  return normalizeCapabilityProposal({
+    id: parsed.id ?? `cap_${randomUUID().slice(0, 8)}`,
+    sourceScanId: parsed.sourceScanId ?? legacyEnvironmentScanId,
+    userNeed: parsed.userNeed ? redactText(parsed.userNeed) : "Unknown capability need.",
+    capabilityFamily: capabilityFamilySchema.safeParse(parsed.capabilityFamily).success ? parsed.capabilityFamily as CapabilityFamily : "unknown",
+    groundingFactIds: parsed.groundingFactIds ?? parsed.groundingFacts ?? [],
+    hypotheses: parsed.hypotheses ?? [],
+    possibleApproaches: parsed.possibleApproaches ?? [],
+    recommendedNextStep: capabilityNextStepSchema.safeParse(parsed.recommendedNextStep).success ? parsed.recommendedNextStep as z.infer<typeof capabilityNextStepSchema> : "ask_user",
+    riskLevel: parsed.riskLevel === "medium" || parsed.riskLevel === "high" ? parsed.riskLevel : "low",
+    confidence: parsed.confidence === "medium" || parsed.confidence === "high" ? parsed.confidence : "low",
+    status: capabilityStatusSchema.safeParse(parsed.status).success ? parsed.status as z.infer<typeof capabilityStatusSchema> : "pending",
+    discardedAt: parsed.discardedAt,
+    discardReason: parsed.discardReason
+  });
 }
 
 function sortFacts(facts: EnvironmentFact[]): EnvironmentFact[] {
@@ -1091,6 +1222,18 @@ function sanitizeKeys(keys: string[]): string[] {
   return [...new Set(keys.map(redactKey).filter(Boolean))].sort().slice(0, 20);
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.trim()))];
+}
+
+function sanitizeCapabilityText(value: string, fallback: string): string {
+  const redacted = redactText(value).replace(/\s+/g, " ").trim();
+  if (!redacted || concreteToolNamePattern.test(redacted) || commandLikePhrasePattern.test(redacted)) {
+    return fallback;
+  }
+  return redacted;
+}
+
 function redactKey(key: string): string {
   return secretNamePattern.test(key) ? "[REDACTED_KEY]" : redactText(key);
 }
@@ -1113,6 +1256,8 @@ function redactText(value: string): string {
 }
 
 const secretNamePattern = /(api[_ -]?key|token|secret|password|credential|private[_ -]?key)/i;
+const concreteToolNamePattern = /\b(git|npm|pnpm|yarn|bun|python|pip|pytest|cargo|dotnet)\b/i;
+const commandLikePhrasePattern = /\b(run|use|execute|invoke|call|실행|사용)\s+["']?[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.:-]+){0,4}/i;
 const secretValuePatterns = [
   /\bsk-[A-Za-z0-9_-]{16,}\b/g,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,

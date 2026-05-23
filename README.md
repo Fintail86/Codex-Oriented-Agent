@@ -1,10 +1,10 @@
-# COSIA v0.30.0
+# COSIA v0.31.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.30.0 stabilizes the generic workspace fact scan layer. COSIA observes workspace facts as facts, not tool assumptions: names and shapes may classify observations, but they do not imply concrete tools, runners, commands, or capabilities.
+v0.31.0 adds a deterministic capability proposal planner over the generic workspace fact layer. COSIA turns user requests plus scan facts into abstract capability proposals without assuming concrete tools, runners, or commands.
 
 ## Requirements
 
@@ -65,6 +65,7 @@ cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모
 cosia chat --session <session-id>
 cosia tool list
 cosia capability scan --request "변경 상태 확인"
+cosia capability plan --request "변경 상태 확인"
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia provider list
 cosia provider check codex-cli
@@ -247,6 +248,7 @@ cosia policy audit --session <session-id> --limit <n>
 cosia tool list
 cosia tool run <tool-id> --args "{...}"
 cosia capability scan --request "<request>"
+cosia capability plan --request "<request>"
 cosia capability review
 cosia shell preview --command "<command>" --reason "<reason>"
 cosia shell apply <approval-id>
@@ -624,6 +626,7 @@ npm test
 ```powershell
 cosia tool list
 cosia capability scan --request "테스트 돌려봐"
+cosia capability plan --request "테스트 돌려봐"
 cosia capability facts --latest
 cosia capability review
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
@@ -636,12 +639,15 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 `cosia capability scan` creates a scan snapshot with stable fact-kind summaries such as `Hidden entries`, `Manifest-like files`, `Script-like keys`, and `Warnings`. It does not run shell probes, does not infer concrete runners, and does not emit wording like “Found Git repository” or “Found NPM project”.
 
+`cosia capability plan --request "<request>"` reads the latest valid scan and creates a deterministic abstract proposal. It does not create shell approvals, commands, tool candidates, or active tool registrations. Requests such as “git status 봐줘”, “npm test 해줘”, or “python 테스트 돌려봐” are normalized into capability families such as `change_tracking` or `project_check`, not concrete runner assumptions.
+
 `shell_request` does not execute commands. It creates a one-shot shell approval preview for local CLI/REPL review. An approval stores the exact command and cwd hash, expires, and can be executed only once. Gateway/Telegram shell execution is blocked by default.
 
 Approved Shell Bridge is temporary. The long-term direction is documented in `Docs/architecture/governed-terminal-long-term.md`: a Governed Terminal substrate with command classification, probes, candidate tests, and tool acquisition.
 
 ## Roadmap
 
+- v0.31.0: Deterministic capability proposal planner.
 - v0.30.0: Generic workspace fact scan snapshots.
 - v0.29.0: Zero-base capability planner and approved shell bridge.
 - Next decision checkpoint: keep polishing `status/start/chat/Telegram/improve` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
