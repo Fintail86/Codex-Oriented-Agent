@@ -20,6 +20,40 @@ The goal is to make future cleanup work explicit: what should be refactored, wha
 - `test-split`: test organization cleanup.
 - `artifact-boundary`: tracked vs private/generated artifact cleanup.
 
+## Completed Cleanup Slices
+
+- `18e87f5` `Centralize provider default helpers`
+  - Centralized provider id -> provider type fallback in runtime config helpers.
+  - Reused the shared provider default helper from provider profiles, policy normalization, and provider registry.
+  - Removed duplicated provider template/type fallback code from provider profile handling.
+- `a2b9bed` `Extract provider profile CLI commands`
+  - Moved `cosia provider profile add/use/list/show/check/remove` command registration out of `src/cli.ts`.
+  - Kept provider profile command behavior and output stable.
+  - Established `src/cli_commands/` as the CLI command module extraction target.
+
+## Remaining Refactor Queue
+
+1. Extract gateway/Telegram CLI commands from `src/cli.ts`.
+   - Keep command names, aliases, token handling, and output stable.
+   - Move connector command registration into `src/cli_commands/`.
+2. Extract tool growth and tool acquisition CLI commands.
+   - Keep active registration approval behavior unchanged.
+   - Do not change command_adapter runtime semantics.
+3. Extract memory/session CLI commands.
+   - Keep deprecated `--scope` behavior until the alias removal item is executed.
+   - Do not remove memory legacy compatibility during command extraction.
+4. Split `tests/runtime.test.ts` into feature-focused files.
+   - Start with provider/config and gateway/Telegram tests because their CLI boundaries are actively changing.
+5. Clean documentation drift.
+   - Archive or add the v0.39 plan.
+   - Update stale provider/default provider guidance.
+   - Mark historical plan sections as superseded where needed.
+6. Split large runtime domains.
+   - Start with capability/tool acquisition only after CLI and tests are easier to review.
+   - Treat memory manager split as a separate high-risk refactor.
+7. Remove legacy compatibility paths one group at a time.
+   - Only after repair/warning behavior and tests are in place.
+
 ## Item Format
 
 Each cleanup item should follow this format:
@@ -89,7 +123,7 @@ Current state:
 - Provider profiles are the intended provider selection path.
 - Legacy `model.defaultProvider` may still be read for warning/repair compatibility.
 - Some docs and tests still mention `codex-cli` as an MVP or historical provider baseline.
-- Provider template/type fallback logic is duplicated in runtime config, policy repair, and provider profile resolution.
+- Provider template/type fallback helpers are centralized, but legacy provider fallback and stale docs remain.
 
 Goal:
 - Make explicit provider profiles the only normal provider selection path.
@@ -97,7 +131,7 @@ Goal:
 - Remove hardcoded/default provider assumptions after warning and migration paths are stable.
 
 Removal/refactor steps:
-- Centralize provider template/type helper logic.
+- Keep centralized provider template/type helper logic as the single source of truth.
 - Keep legacy `model.defaultProvider` as warning/repair-only until removal criteria are satisfied.
 - Replace outdated docs that imply a hardcoded default provider.
 - Remove legacy fallback behavior only after tests prove missing active provider fails with profile setup guidance.
@@ -155,16 +189,17 @@ Risk: medium
 Current state:
 - `src/cli.ts` contains many unrelated command groups.
 - Provider profile, gateway connector, tool growth, memory, session, and policy commands are mixed in one large entrypoint.
+- Provider profile commands have been extracted to `src/cli_commands/provider_profiles.ts`.
 
 Goal:
 - Keep the CLI command surface unchanged while moving command group wiring into focused modules.
+- Keep `src/cli.ts` as an assembler for top-level command groups.
 
 Removal/refactor steps:
-- Extract provider profile commands.
-- Extract gateway connector commands.
+- Extract gateway connector commands next.
 - Extract tool growth and tool acquisition commands.
 - Extract memory/session commands.
-- Keep `src/cli.ts` as a thin assembler.
+- Extract policy/config commands after gateway/tool/memory command groups are stable.
 
 Verification:
 - Existing CLI tests continue to pass.
@@ -350,13 +385,14 @@ Do not:
 
 ## Suggested Execution Order
 
-1. Fix docs/archive drift and provider setup wording.
-2. Split CLI command modules without behavior changes.
-3. Split tests by feature area.
-4. Centralize provider/config helper logic.
-5. Split large runtime modules by domain.
-6. Remove deprecated CLI aliases one group at a time.
-7. Remove legacy data compatibility paths one group at a time.
+1. Extract gateway/Telegram CLI commands.
+2. Extract tool growth and tool acquisition CLI commands.
+3. Extract memory/session CLI commands.
+4. Split tests by feature area.
+5. Fix docs/archive drift and provider setup wording.
+6. Split large runtime modules by domain.
+7. Remove deprecated CLI aliases one group at a time.
+8. Remove legacy data compatibility paths one group at a time.
 
 ## Verification Checklist For Cleanup Work
 
