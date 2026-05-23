@@ -1,10 +1,7 @@
 import { parseModelOutput } from "../model_provider.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
-import { modelExposedToolIds } from "../../tool_catalog.js";
 
-const finalAfterToolResultPattern = new RegExp(
-  `Tool: (${modelExposedToolIds.filter((tool) => tool !== "write_file").map(escapeRegex).join("|")})`
-);
+const toolResultPattern = /^Tool: ([a-zA-Z0-9_.-]+)/gm;
 
 export class MockProvider implements ModelProvider {
   readonly id = "mock";
@@ -15,6 +12,36 @@ export class MockProvider implements ModelProvider {
 
   async complete(input: ModelInput): Promise<ModelOutput> {
     const normalizedPrompt = input.prompt.toLowerCase();
+    if (input.prompt.includes("TOOL_DRAFT_REQUEST")) {
+      return parseModelOutput(JSON.stringify({
+        type: "final",
+        content: JSON.stringify({
+          targetToolId: "local.project_check.mock",
+          capabilityFamily: "project_check",
+          permission: "project_check",
+          exposure: "model",
+          executorKind: "command_adapter",
+          executorPlan: {
+            executable: "node",
+            args: ["--version"],
+            cwdPolicy: "workspace_root",
+            timeoutMs: 30000,
+            outputCapBytes: 12000,
+            redaction: false
+          },
+          inputSchemaDraft: {
+            type: "object",
+            properties: {}
+          },
+          safetyRationale: "Mock project check draft.",
+          testPlan: "Run the fixed command once with output cap.",
+          rollbackPlan: "Deactivate the active tool and remove it from agent allowedTools.",
+          groundingReferences: []
+        }),
+        memoryCandidates: [],
+        skillCandidates: []
+      }));
+    }
     if (normalizedPrompt.includes("call read_file on a relevant path before returning final") && !input.prompt.includes("Tool: read_file")) {
       return parseModelOutput(JSON.stringify({
         type: "tool_call",
@@ -23,7 +50,7 @@ export class MockProvider implements ModelProvider {
       }));
     }
 
-    if (finalAfterToolResultPattern.test(input.prompt)) {
+    if (hasNonWriteToolResult(input.prompt)) {
       return parseModelOutput(JSON.stringify({
         type: "final",
         content: `Mock response for ${input.sessionId}.`,
@@ -106,10 +133,6 @@ export class MockProvider implements ModelProvider {
   }
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function mockToolArgs(tool: string, value: string): Record<string, unknown> {
   if (tool === "search_files") {
     return { query: value };
@@ -121,6 +144,11 @@ function mockToolArgs(tool: string, value: string): Record<string, unknown> {
     };
   }
   return { path: value };
+}
+
+function hasNonWriteToolResult(prompt: string): boolean {
+  toolResultPattern.lastIndex = 0;
+  return [...prompt.matchAll(toolResultPattern)].some((match) => match[1] !== "write_file");
 }
 
 function mockMemoryCandidates(prompt: string) {

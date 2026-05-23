@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { toolNameValues } from "./tool_catalog.js";
 
 export const memoryScopeSchema = z.enum([
   "global",
@@ -35,7 +34,7 @@ export const toolPermissionSchema = z.enum([
 
 export type ToolPermission = z.infer<typeof toolPermissionSchema>;
 
-export const toolNameSchema = z.enum(toolNameValues);
+export const toolNameSchema = z.string().min(1);
 export type ToolName = z.infer<typeof toolNameSchema>;
 
 export const agentIdentitySchema = z.object({
@@ -255,6 +254,7 @@ export type ToolResult = {
 export type ToolDefinition = {
   name: ToolName;
   permission: ToolPermission;
+  source?: "catalog" | "active";
   execute(args: unknown, ctx: ToolContext): Promise<ToolResult>;
 };
 

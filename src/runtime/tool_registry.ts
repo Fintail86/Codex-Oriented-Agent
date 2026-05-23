@@ -7,9 +7,11 @@ import { readText, resolveExistingInside, resolveInside, writeText } from "./fs_
 import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
+import { detectSecrets } from "./risk_classifier.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
 import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
-import { getToolCatalogEntry } from "./tool_catalog.js";
+import { getActiveToolRecord, type CommandAdapterPlan } from "./tool_acquisition.js";
+import { getToolCatalogEntry, type CatalogToolId } from "./tool_catalog.js";
 import type { ToolContext, ToolDefinition, ToolName, ToolPermission, ToolResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -95,11 +97,12 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
-  private registerCatalogTool(name: ToolName, execute: ToolDefinition["execute"]): void {
+  private registerCatalogTool(name: CatalogToolId, execute: ToolDefinition["execute"]): void {
     const catalog = getToolCatalogEntry(name);
     this.register({
       name,
       permission: catalog.permission as ToolPermission,
+      source: "catalog",
       execute
     });
   }
@@ -114,7 +117,10 @@ export class ToolRegistry {
 
   async execute(name: ToolName, args: unknown, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const tool = this.get(name);
+      const tool = this.tools.get(name) ?? activeToolDefinition(name, ctx.workspaceRoot);
+      if (!tool) {
+        return { ok: false, content: `Tool is not registered: ${name}` };
+      }
       const argsSummary = summarizeToolArgs(name, args);
       if (!ctx.allowedTools.includes(name)) {
         await ctx.policyAudit?.({
@@ -168,6 +174,25 @@ export class ToolRegistry {
   }
 }
 
+function activeToolDefinition(name: ToolName, workspaceRoot: string): ToolDefinition | undefined {
+  const active = getActiveToolRecord(workspaceRoot, name);
+  if (!active || active.status !== "active" || active.executorKind !== "command_adapter") {
+    return undefined;
+  }
+  const plan = active.executorPlan as CommandAdapterPlan;
+  return {
+    name,
+    permission: active.permission,
+    source: "active",
+    execute: async (args) => {
+      if (args && typeof args === "object" && Object.keys(args as Record<string, unknown>).length > 0) {
+        return { ok: false, content: "Active command_adapter MVP does not accept model-provided arguments." };
+      }
+      return runActiveCommandAdapter(plan, workspaceRoot);
+    }
+  };
+}
+
 function summarizeToolArgs(name: ToolName, args: unknown): Record<string, unknown> {
   if (name === "shell_request") {
     return summarizeShellToolArgs(args);
@@ -188,6 +213,27 @@ async function runWorkspaceCommand(command: string, args: string[], cwd: string)
     return {
       ok: false,
       content: truncateToolOutput(`Exit code: ${String(err.code ?? "unknown")}\n${output}`, toolOutputMaxChars)
+    };
+  }
+}
+
+async function runActiveCommandAdapter(plan: CommandAdapterPlan, workspaceRoot: string): Promise<ToolResult> {
+  try {
+    const result = await execFileAsync(plan.executable, plan.args, {
+      cwd: workspaceRoot,
+      timeout: plan.timeoutMs,
+      maxBuffer: plan.outputCapBytes
+    });
+    return {
+      ok: true,
+      content: truncateToolOutput(redactToolOutput(formatCommandOutput(result.stdout, result.stderr)), plan.outputCapBytes)
+    };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | string };
+    const output = formatCommandOutput(err.stdout ?? "", err.stderr ?? err.message);
+    return {
+      ok: false,
+      content: truncateToolOutput(redactToolOutput(`Exit code: ${String(err.code ?? "unknown")}\n${output}`), plan.outputCapBytes)
     };
   }
 }
@@ -431,4 +477,9 @@ function truncateToolOutput(content: string, maxChars: number): string {
   const headChars = Math.ceil(available / 2);
   const tailChars = Math.floor(available / 2);
   return `${content.slice(0, headChars)}${middleMarker}${content.slice(content.length - tailChars)}${marker}`;
+}
+
+function redactToolOutput(content: string): string {
+  const secret = detectSecrets(content);
+  return secret.matched ? secret.redactedPreview : content;
 }

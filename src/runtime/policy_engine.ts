@@ -4,7 +4,7 @@ import { resolveInside } from "./fs_utils.js";
 import { defaultPolicy, type PolicyConfig } from "./policy_manager.js";
 import { defaultRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
 import { isBundledToolId } from "./tool_catalog.js";
-import type { ToolDefinition, ToolName } from "./types.js";
+import type { ToolDefinition } from "./types.js";
 
 export type PolicyDecision = {
   allowed: boolean;
@@ -16,7 +16,7 @@ export type PolicyDecision = {
 export type RuntimePolicyState = {
   requireTools?: boolean;
   userPrompt: string;
-  executedTools: ToolName[];
+  executedTools: string[];
 };
 
 export class PolicyEngine {
@@ -32,6 +32,10 @@ export class PolicyEngine {
       if (!bundledToolConfig?.enabled) {
         return { allowed: false, ruleId: "tool.config_disabled", reason: `Bundled tool is disabled by runtime config: ${tool.name}` };
       }
+    } else if (tool.source === "active") {
+      // Workspace-local active tools are governed by ActiveToolRegistry,
+      // agent allowlists, and permission checks. They are not POLICY.tools
+      // static catalog entries.
     } else if (!toolPolicy) {
       return { allowed: false, ruleId: "tool.unconfigured", reason: `Tool is not configured by policy: ${tool.name}` };
     } else if (!toolPolicy.enabled) {

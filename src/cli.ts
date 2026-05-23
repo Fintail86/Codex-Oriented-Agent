@@ -50,6 +50,17 @@ import { ToolRegistry } from "./runtime/tool_registry.js";
 import { formatShellApprovalList, formatShellApprovalPreview, ShellApprovalLedger } from "./runtime/shell_approval.js";
 import { memoryScopeSchema, memoryTierSchema } from "./runtime/types.js";
 import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runtime/types.js";
+import {
+  formatActiveTool,
+  formatActiveToolList,
+  formatToolActivation,
+  formatToolCandidate,
+  formatToolCandidateReview,
+  formatToolCandidateTestRun,
+  formatToolDraftResult,
+  ToolAcquisitionManager,
+  type ActiveToolRecord
+} from "./runtime/tool_acquisition.js";
 import { COSIA_VERSION } from "./runtime/version.js";
 import { readText } from "./runtime/fs_utils.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "./runtime/workspace.js";
@@ -1799,17 +1810,99 @@ program
 
 program
   .command("tool")
-  .argument("[action-or-tool-id]", "`list`, `run`, a catalog tool id, or a hyphen alias like git-status")
+  .argument("[action-or-tool-id]", "`list`, `run`, `draft`, `candidate`, `active`, `activate`, `deactivate`, or a tool id")
   .argument("[tool-id]", "Tool id when using `run`")
+  .argument("[extra-id]", "Extra id for nested tool commands.")
   .option("--args <json>", "JSON object arguments for the tool.")
   .option("--path <path>", "Compatibility shortcut for tools that accept a workspace path.")
   .option("--staged", "Compatibility shortcut for staged diffs.", false)
   .option("--max-count <n>", "Compatibility shortcut for tools that accept maxCount.")
-  .description("List or run policy-gated catalog tools.")
-  .action(async (actionOrToolId: string | undefined, toolId: string | undefined, options: ToolCliOptions) => {
+  .option("--from-capability <id>", "Create a draft from a capability proposal.")
+  .option("--provider <provider>", "Model provider for LLM tool draft generation.", "default")
+  .option("--agent <agent-id>", "Target agent id for activation.")
+  .option("--reason <reason>", "Reason for discard/reject/deactivate.")
+  .option("--yes", "Apply an activation. Required for tool activate.", false)
+  .option("--all", "Show all records, including inactive/discarded/rejected.", false)
+  .description("List, draft, review, activate, or run policy-gated tools.")
+  .action(async (actionOrToolId: string | undefined, toolId: string | undefined, extraId: string | undefined, options: ToolCliOptions) => {
     await main(async (workspaceRoot) => {
+      const acquisition = new ToolAcquisitionManager(workspaceRoot);
       if (!actionOrToolId || actionOrToolId === "list") {
-        console.log(formatToolCatalog());
+        console.log(formatToolCatalog(acquisition.listActiveTools({ includeInactive: true })));
+        return;
+      }
+
+      if (actionOrToolId === "draft") {
+        if (!options.fromCapability) {
+          throw new Error("Usage: cosia tool draft --from-capability <capability-id>");
+        }
+        console.log(formatToolDraftResult(await acquisition.draftFromCapability(options.fromCapability, {
+          providerId: options.provider
+        })));
+        return;
+      }
+
+      if (actionOrToolId === "candidate") {
+        const action = toolId ?? "review";
+        if (action === "review") {
+          console.log(formatToolCandidateReview(acquisition.listCandidates({ all: options.all })));
+          return;
+        }
+        if (action === "show") {
+          if (!extraId) throw new Error("Usage: cosia tool candidate show <candidate-id>");
+          console.log(formatToolCandidate(acquisition.getCandidate(extraId)));
+          return;
+        }
+        if (action === "discard") {
+          if (!extraId || !options.reason) throw new Error("Usage: cosia tool candidate discard <candidate-id> --reason \"<reason>\"");
+          console.log(formatToolCandidate(acquisition.discardCandidate(extraId, options.reason)));
+          return;
+        }
+        if (action === "reject") {
+          if (!extraId || !options.reason) throw new Error("Usage: cosia tool candidate reject <candidate-id> --reason \"<reason>\"");
+          console.log(formatToolCandidate(acquisition.rejectCandidate(extraId, options.reason)));
+          return;
+        }
+        if (action === "approve") {
+          if (!extraId) throw new Error("Usage: cosia tool candidate approve <candidate-id>");
+          console.log(formatToolCandidate(acquisition.approveCandidate(extraId)));
+          return;
+        }
+        if (action === "test") {
+          if (!extraId) throw new Error("Usage: cosia tool candidate test <candidate-id>");
+          console.log(formatToolCandidateTestRun(await acquisition.testCandidate(extraId)));
+          return;
+        }
+        throw new Error(`Unknown tool candidate action: ${action}`);
+      }
+
+      if (actionOrToolId === "active") {
+        const action = toolId ?? "list";
+        if (action === "list") {
+          console.log(formatActiveToolList(acquisition.listActiveTools({ includeInactive: options.all })));
+          return;
+        }
+        if (action === "show") {
+          if (!extraId) throw new Error("Usage: cosia tool active show <tool-id>");
+          console.log(formatActiveTool(acquisition.getActiveTool(extraId)));
+          return;
+        }
+        throw new Error(`Unknown tool active action: ${action}`);
+      }
+
+      if (actionOrToolId === "activate") {
+        if (!toolId || !options.agent) {
+          throw new Error("Usage: cosia tool activate <candidate-id> --agent <agent-id> --yes");
+        }
+        console.log(formatToolActivation(await acquisition.activateCandidate(toolId, options.agent, { yes: options.yes })));
+        return;
+      }
+
+      if (actionOrToolId === "deactivate") {
+        if (!toolId || !options.reason) {
+          throw new Error("Usage: cosia tool deactivate <tool-id> --reason \"<reason>\"");
+        }
+        console.log(formatActiveTool(await acquisition.deactivateTool(toolId, options.reason)));
         return;
       }
 
@@ -1824,7 +1917,7 @@ program
       const normalizedToolId = normalizeCliToolId(requestedTool);
       if (!normalizedToolId) {
         console.log(`[FAILED] Unknown tool: ${requestedTool}`);
-        console.log("Run `cosia tool list` to see registered catalog tools.");
+        console.log("Run `cosia tool list` to see registered tools.");
         process.exitCode = 1;
         return;
       }
@@ -2053,11 +2146,17 @@ type ToolCliOptions = {
   path?: string;
   staged: boolean;
   maxCount?: string;
+  fromCapability?: string;
+  provider: string;
+  agent?: string;
+  reason?: string;
+  yes: boolean;
+  all: boolean;
 };
 
-function normalizeCliToolId(value: string): ToolName | undefined {
+function normalizeCliToolId(value: string): ToolName {
   const candidate = value.replace(/-/g, "_");
-  return isToolId(candidate) ? candidate : undefined;
+  return isToolId(candidate) ? candidate : value;
 }
 
 function parseCliToolArgs(toolId: ToolName, options: ToolCliOptions): Record<string, unknown> {
@@ -2090,7 +2189,7 @@ function parseJsonObjectOption(value: string, name: string): Record<string, unkn
   return parsed as Record<string, unknown>;
 }
 
-function formatToolCatalog(): string {
+function formatToolCatalog(activeTools: ActiveToolRecord[] = []): string {
   const grouped = new Map<string, ToolName[]>();
   for (const id of toolNameValues) {
     const entry = getToolCatalogEntry(id);
@@ -2102,7 +2201,7 @@ function formatToolCatalog(): string {
     lines.push(group === "core" ? "Core Runtime Tools" : `Bundled Extension Tools: ${group}`);
     lines.push("Tool                 Permission       Exposure   Default  Description");
     for (const id of ids) {
-      const entry = toolCatalog[id];
+      const entry = toolCatalog[id as keyof typeof toolCatalog];
       lines.push(`${id.padEnd(20)} ${entry.permission.padEnd(16)} ${entry.exposure.padEnd(10)} ${String(entry.defaultEnabled).padEnd(8)} ${entry.description}`);
     }
     lines.push("");
@@ -2110,6 +2209,17 @@ function formatToolCatalog(): string {
   lines.push("Run:");
   lines.push("  cosia tool run <tool-id> --args \"{...}\"");
   lines.push("  cosia shell preview --command \"<command>\" --reason \"<reason>\"");
+  lines.push("  cosia tool draft --from-capability <capability-id>");
+  lines.push("  cosia tool candidate review");
+  lines.push("  cosia tool activate <candidate-id> --agent <agent-id> --yes");
+  if (activeTools.length) {
+    lines.push("");
+    lines.push("Workspace Active Tools");
+    lines.push("Tool                 Status       Permission       Exposure   Agents");
+    for (const tool of activeTools) {
+      lines.push(`${tool.id.padEnd(20)} ${tool.status.padEnd(12)} ${tool.permission.padEnd(16)} ${tool.exposure.padEnd(10)} ${tool.targetAgentIds.join(",") || "-"}`);
+    }
+  }
   lines.push("");
   lines.push("Zero-base capability flow:");
   lines.push("  cosia capability scan --request \"<request>\"");

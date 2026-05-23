@@ -1,10 +1,10 @@
-# COSIA v0.32.0
+# COSIA v0.33.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
+A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed tool draft/candidate acquisition, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.32.0 links deterministic capability proposals to user-approved one-shot shell previews. COSIA still does not draft commands automatically: `--from-capability` requires the user to provide the exact command with `--command`.
+v0.33.0 adds the first ToolDraft / ToolCandidate / ActiveToolRegistry path. LLM ToolDraft output is treated as untrusted design data, normalized through strict allowlists, and only fixed `command_adapter` candidates can be tested and activated. `ts_module` remains draft/review-only until a separate security roadmap exists.
 
 ## Requirements
 
@@ -68,6 +68,12 @@ cosia capability scan --request "변경 상태 확인"
 cosia capability plan --request "변경 상태 확인"
 cosia shell preview --from-capability <proposal-id> --command "<exact command>"
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
+cosia tool draft --from-capability <proposal-id> --provider mock
+cosia tool candidate review
+cosia tool candidate test <candidate-id>
+cosia tool candidate approve <candidate-id>
+cosia tool activate <candidate-id> --agent <agent-id> --yes
+cosia tool active list
 cosia provider list
 cosia provider check codex-cli
 cosia provider check openrouter
@@ -634,6 +640,14 @@ cosia shell preview --from-capability <proposal-id> --command "<exact command>"
 cosia shell run --from-capability <proposal-id> --command "<exact command>" --yes
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia shell apply <approval-id>
+cosia tool draft --from-capability <proposal-id> --provider mock
+cosia tool candidate review
+cosia tool candidate show <candidate-id>
+cosia tool candidate test <candidate-id>
+cosia tool candidate approve <candidate-id>
+cosia tool activate <candidate-id> --agent <agent-id> --yes
+cosia tool active list
+cosia tool deactivate <tool-id> --reason "<reason>"
 ```
 
 `cosia tool list` shows active catalog tools. The initial model-facing surface is intentionally small: `read_file`, `write_file`, `search_files`, and `shell_request`.
@@ -648,10 +662,17 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 `shell_request` does not execute commands. It creates a one-shot shell approval preview for local CLI/REPL review. An approval stores the exact command and cwd hash, expires, and can be executed only once. Gateway/Telegram shell execution is blocked by default.
 
+`cosia tool draft --from-capability <proposal-id>` asks the configured model for an untrusted ToolDraft package. The runtime stores the draft first, then normalizes it into a ToolCandidate only if all required allowlist gates pass. Candidate text and evidence may reference capabilities and shell approvals, but draft generation cannot create shell approvals, active tools, policy changes, config edits, or agent `allowedTools` changes.
+
+`command_adapter` candidates are fixed executable + fixed args plans with `cwdPolicy=workspace_root`, output caps, timeouts, audit, and redaction forced on. They do not accept model-provided argument interpolation. A candidate can be approved before testing, but activation requires the latest passed candidate test hash to match the current candidate content hash.
+
+Active tools are workspace-local records, not static catalog entries. A model sees an active tool only when the active record is `active`, exposure is `model`, the target agent allows the tool id, and policy permits the tool permission. Deactivation removes the active tool from the target agent allowlist and from effective prompt/provider visibility.
+
 Approved Shell Bridge is temporary. The long-term direction is documented in `Docs/architecture/governed-terminal-long-term.md`: a Governed Terminal substrate with command classification, probes, candidate tests, and tool acquisition.
 
 ## Roadmap
 
+- v0.33.0: LLM ToolDraft, ToolCandidate, and command_adapter active tool MVP.
 - v0.32.0: Capability-linked shell approval previews.
 - v0.31.0: Deterministic capability proposal planner.
 - v0.30.0: Generic workspace fact scan snapshots.

@@ -39,6 +39,13 @@ import { getStatusReport } from "../src/runtime/status_report.js";
 import { codexTemplates } from "../src/runtime/templates.js";
 import { checkTelegramGateway, loadTelegramGatewayState, processTelegramUpdate, saveTelegramGatewayState, startTelegramGateway } from "../src/runtime/telegram_gateway.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
+import {
+  ToolAcquisitionManager,
+  candidateContentHash,
+  formatToolCandidate,
+  formatToolDraftResult,
+  type ToolCandidateRecord
+} from "../src/runtime/tool_acquisition.js";
 import type { ModelProvider } from "../src/runtime/types.js";
 import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspace.js";
 
@@ -131,7 +138,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.32.0\"");
+    expect(policyJson).toContain("\"version\": \"0.33.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1174,6 +1181,121 @@ describe("capability planner", () => {
     const scan = await new EnvironmentDiscovery(root).scan();
     expect(scan.warnings.some((warning) => warning.kind === "skipped_directory" && warning.path === "outside-link")).toBe(true);
     expect(scan.facts.some((fact) => fact.path === "outside-link/outside.txt")).toBe(false);
+  });
+});
+
+describe("tool acquisition", () => {
+  async function plannedCapability(root: string, request = "테스트 돌려봐") {
+    const planner = new CapabilityPlanner(root);
+    await planner.scan({ userNeed: request });
+    return planner.plan({ userNeed: request }).proposal;
+  }
+
+  it("stores an untrusted LLM draft separately from a normalized command_adapter candidate", async () => {
+    const root = await initializedWorkspace();
+    const proposal = await plannedCapability(root);
+    const manager = new ToolAcquisitionManager(root);
+
+    const result = await manager.draftFromCapability(proposal.id, { providerId: "mock" });
+
+    expect(result.draft.status).toBe("candidate_created");
+    expect(result.candidate).toBeDefined();
+    expect(result.candidate?.status).toBe("pending");
+    expect(result.candidate?.executorKind).toBe("command_adapter");
+    expect((result.candidate?.executorPlan as { redaction?: boolean }).redaction).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("redaction forced"))).toBe(true);
+    expect(new ShellApprovalLedger(root).list()).toHaveLength(0);
+    expect(formatToolDraftResult(result)).toContain("Candidate created from normalized draft");
+
+    const candidate = result.candidate as ToolCandidateRecord;
+    expect(candidateContentHash({ ...candidate, status: "approved" })).toBe(candidate.candidateContentHash);
+  });
+
+  it("keeps ts_module candidates review-only and blocks execution testing", async () => {
+    const root = await initializedWorkspace();
+    const proposal = await plannedCapability(root, "실행 능력 후보 검토");
+    const manager = new ToolAcquisitionManager(root);
+    const result = await manager.draftFromCapability(proposal.id, {
+      rawDraft: {
+        targetToolId: "local.runtime_execution.tsdemo",
+        capabilityFamily: "runtime_execution",
+        permission: "read_only",
+        exposure: "model",
+        executorKind: "ts_module",
+        executorPlan: {
+          code: "export async function run() { return 'unsafe'; }"
+        },
+        groundingReferences: []
+      }
+    });
+
+    expect(result.candidate?.executorKind).toBe("ts_module");
+    expect(formatToolCandidate(result.candidate as ToolCandidateRecord)).toContain("Activation: blocked until ts_module security roadmap");
+
+    const run = await manager.testCandidate((result.candidate as ToolCandidateRecord).id);
+    expect(run.status).toBe("failed");
+    expect(run.outputSummary).toContain("ts_module execution is blocked");
+  });
+
+  it("tests, approves, activates, executes, and deactivates a fixed command_adapter tool", async () => {
+    const root = await initializedWorkspace();
+    await new AgentManager(root).createAgent("architect-agent", "architect");
+    const proposal = await plannedCapability(root);
+    const manager = new ToolAcquisitionManager(root);
+    const result = await manager.draftFromCapability(proposal.id, {
+      rawDraft: {
+        targetToolId: "local.project_check.nodever",
+        capabilityFamily: "project_check",
+        permission: "project_check",
+        exposure: "model",
+        executorKind: "command_adapter",
+        executorPlan: {
+          executable: "node",
+          args: ["--version"],
+          cwdPolicy: "workspace_root",
+          timeoutMs: 30000,
+          outputCapBytes: 12000,
+          redaction: true
+        },
+        inputSchemaDraft: {},
+        safetyRationale: "A fixed project check command with no model-provided args.",
+        testPlan: "Run once with timeout and output cap.",
+        rollbackPlan: "Deactivate and remove from agent allowedTools.",
+        groundingReferences: []
+      }
+    });
+    const candidateId = (result.candidate as ToolCandidateRecord).id;
+
+    const testRun = await manager.testCandidate(candidateId);
+    expect(testRun.status).toBe("passed");
+    const approved = manager.approveCandidate(candidateId);
+    expect(approved.status).toBe("approved");
+    const activation = await manager.activateCandidate(candidateId, "architect-agent", { yes: true });
+    expect(activation.status).toBe("active");
+
+    const agent = await new AgentManager(root).loadAgent("architect-agent");
+    expect(agent.allowedTools).toContain("local.project_check.nodever");
+    const prompt = await buildPromptBundle({
+      workspaceRoot: root,
+      agent,
+      session: await new SessionManager(root).createSession("architect-agent", "active tool prompt"),
+      userPrompt: "check",
+      policy: await new PolicyManager(root).loadPolicy()
+    });
+    expect(prompt.prompt).toContain("local.project_check.nodever");
+
+    const execResult = await new ToolRegistry().execute("local.project_check.nodever", {}, {
+      workspaceRoot: root,
+      allowedTools: agent.allowedTools,
+      sourceChannel: "cli"
+    });
+    expect(execResult.ok).toBe(true);
+    expect(execResult.content).toContain("v");
+
+    const deactivated = await manager.deactivateTool("local.project_check.nodever", "test cleanup");
+    expect(deactivated.status).toBe("deactivated");
+    const updatedAgent = await new AgentManager(root).loadAgent("architect-agent");
+    expect(updatedAgent.allowedTools).not.toContain("local.project_check.nodever");
   });
 });
 
@@ -2839,7 +2961,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.32.0");
+    expect(emptyReport.version).toBe("0.33.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

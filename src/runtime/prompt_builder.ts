@@ -4,6 +4,7 @@ import { readText } from "./fs_utils.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import { loadRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
 import { SkillManager, type SkillSelectionManifest } from "./skill_manager.js";
+import { listEffectiveActiveModelToolIds } from "./tool_acquisition.js";
 import { isBundledToolId, toolCatalog } from "./tool_catalog.js";
 import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
 
@@ -224,7 +225,7 @@ async function loadDynamicBlocks(
 
 async function runtimePromptBlocks(input: PromptInput): Promise<PromptBlock[]> {
   const runtime = await loadRuntimeConfig(input.workspaceRoot);
-  const availableTools = effectiveAvailableModelTools(input.agent.allowedTools, input.policy, runtime.config);
+  const availableTools = effectiveAvailableModelTools(input.workspaceRoot, input.agent.allowedTools, input.policy, runtime.config);
   const requireToolsText = input.requireTools
     ? `# REQUIRE-TOOLS MODE
 
@@ -277,12 +278,14 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
 }
 
 function effectiveAvailableModelTools(
+  workspaceRoot: string,
   allowedTools: ToolName[],
   policy: PolicyConfig | undefined,
   runtime: RuntimeConfig
 ): ToolName[] {
-  return allowedTools.filter((tool) => {
-    const entry = toolCatalog[tool];
+  const catalog = toolCatalog as Record<string, typeof toolCatalog[keyof typeof toolCatalog] | undefined>;
+  const catalogTools = allowedTools.filter((tool) => {
+    const entry = catalog[tool];
     if (!entry || entry.exposure !== "model") {
       return false;
     }
@@ -298,6 +301,11 @@ function effectiveAvailableModelTools(
     }
     return !(policy?.disabledPermissions ?? []).includes(entry.permission);
   });
+  return [
+    ...catalogTools,
+    ...listEffectiveActiveModelToolIds(workspaceRoot, allowedTools, policy)
+      .filter((tool) => !catalogTools.includes(tool))
+  ];
 }
 
 function assembleWithBudget(
