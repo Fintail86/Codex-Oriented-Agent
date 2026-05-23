@@ -4,7 +4,15 @@ import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
-import { formatShellApprovalPreview, type ShellApproval } from "./shell_approval.js";
+import {
+  buildShellApprovalRecord,
+  ensureShellApprovalStorage,
+  formatShellApprovalPreview,
+  insertShellApprovalRecord,
+  ShellApprovalLedger,
+  type CreateShellApprovalInput,
+  type ShellApproval
+} from "./shell_approval.js";
 
 export const legacyEnvironmentScanId = "legacy_v0.29";
 const defaultMaxDepth = 3;
@@ -121,6 +129,8 @@ export type CapabilityProposal = {
   status: z.infer<typeof capabilityStatusSchema>;
   discardedAt?: string;
   discardReason?: string;
+  convertedShellApprovalId?: string;
+  convertedAt?: string;
 };
 
 export type CapabilityScanResult = EnvironmentScanResult & {
@@ -131,6 +141,14 @@ export type CapabilityPlanResult = {
   scan: EnvironmentScan;
   proposal: CapabilityProposal;
   groundingFacts: EnvironmentFact[];
+};
+
+export type CapabilityShellConversionResult = {
+  approval?: ShellApproval;
+  proposal: CapabilityProposal;
+  message?: string;
+  didCreate: boolean;
+  shouldExitNonZero?: boolean;
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -307,15 +325,117 @@ export class CapabilityPlanner {
     return next;
   }
 
-  convertToShell(id: string, _source: { sourceChannel: "cli" | "repl" | "gateway"; sourceSessionId?: string; sourceAgentId?: string; sourceRunId?: string }): ShellApproval {
-    this.getProposal(id);
-    throw new Error("Capability proposal has no v0.31 shell preview. Shell proposal mapping is deferred to v0.32+.");
+  convertToShell(
+    id: string,
+    source: {
+      command: string;
+      cwd?: string;
+      reason?: string;
+      expectedEffect?: string;
+      sourceChannel: "cli" | "repl" | "gateway";
+      sourceSessionId?: string;
+      sourceAgentId?: string;
+      sourceRunId?: string;
+      now?: Date;
+      ttlMs?: number;
+      maxStaleAgeMs?: number;
+      failAfterShellInsertForTest?: boolean;
+    }
+  ): CapabilityShellConversionResult {
+    const proposal = this.getProposal(id);
+    const integrity = this.integrityWarningsForProposal(proposal);
+    if (proposal.convertedShellApprovalId) {
+      const linkedApproval = new ShellApprovalLedger(this.workspaceRoot).get(proposal.convertedShellApprovalId);
+      return {
+        proposal,
+        approval: linkedApproval,
+        didCreate: false,
+        message: formatLinkedApprovalMessage(proposal, linkedApproval, integrity),
+        shouldExitNonZero: true
+      };
+    }
+    validateProposalForShellConversion(proposal, integrity);
+    const scanResult = this.loadSourceScanForConversion(proposal, source);
+    const approvalInput: CreateShellApprovalInput = {
+      command: source.command,
+      cwd: source.cwd,
+      reason: source.reason ?? defaultCapabilityShellReason(proposal),
+      expectedEffect: source.expectedEffect ?? defaultCapabilityShellEffect(proposal),
+      sourceSessionId: source.sourceSessionId,
+      sourceAgentId: source.sourceAgentId,
+      sourceRunId: source.sourceRunId,
+      sourceCapabilityId: proposal.id,
+      sourceChannel: source.sourceChannel,
+      now: source.now,
+      ttlMs: source.ttlMs
+    };
+    const approval = buildShellApprovalRecord(this.workspaceRoot, approvalInput);
+    const convertedAt = (source.now ?? new Date()).toISOString();
+    const next = normalizeCapabilityProposal({
+      ...proposal,
+      status: "converted_to_shell",
+      convertedShellApprovalId: approval.id,
+      convertedAt
+    });
+    withCapabilityDb(this.workspaceRoot, (db) => {
+      db.exec("BEGIN");
+      try {
+        ensureShellApprovalStorage(db);
+        insertShellApprovalRecord(db, approval);
+        if (source.failAfterShellInsertForTest) {
+          throw new Error("Injected capability shell conversion failure.");
+        }
+        upsertCapabilityProposal(db, next);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+    return {
+      approval,
+      proposal: next,
+      didCreate: true
+    };
   }
 
   groundingFactsForProposal(id: string): EnvironmentFact[] {
     const proposal = this.getProposal(id);
     const scanResult = this.listFacts({ scanId: proposal.sourceScanId });
     return selectFactsByIds(scanResult.facts, proposal.groundingFactIds);
+  }
+
+  integrityWarningsForProposal(proposal: CapabilityProposal): string[] {
+    const warnings: string[] = [];
+    if (proposal.status === "converted_to_shell" && !proposal.convertedShellApprovalId) {
+      warnings.push("status is converted_to_shell but convertedShellApprovalId is missing");
+    }
+    if (proposal.convertedShellApprovalId && proposal.status !== "converted_to_shell") {
+      warnings.push("convertedShellApprovalId exists but status is not converted_to_shell");
+    }
+    if (proposal.convertedShellApprovalId && !new ShellApprovalLedger(this.workspaceRoot).get(proposal.convertedShellApprovalId)) {
+      warnings.push("linked approval missing");
+    }
+    return warnings;
+  }
+
+  private loadSourceScanForConversion(
+    proposal: CapabilityProposal,
+    options: { now?: Date; maxStaleAgeMs?: number }
+  ): EnvironmentScanResult {
+    let scanResult;
+    try {
+      scanResult = this.listFacts({ scanId: proposal.sourceScanId });
+    } catch {
+      throw new Error(`Capability proposal source scan not found: ${proposal.sourceScanId}`);
+    }
+    const now = options.now ?? new Date();
+    const maxStaleAgeMs = options.maxStaleAgeMs ?? defaultPlannerMaxStaleAgeMs;
+    const observedMs = Date.parse(scanResult.scan.observedAt);
+    if (!Number.isFinite(observedMs) || now.getTime() - observedMs > maxStaleAgeMs) {
+      throw new Error(`Capability proposal source scan is stale: ${proposal.sourceScanId}`);
+    }
+    return scanResult;
   }
 
   private loadLatestValidScan(userNeed: string, options: { now?: Date; maxStaleAgeMs?: number }): EnvironmentScanResult {
@@ -372,28 +492,9 @@ export class CapabilityPlanner {
           INSERT OR REPLACE INTO capability_proposals (
             id, source_scan_id, user_need, capability_family, status, risk_level, confidence,
             recommended_next_step, grounding_facts_json, grounding_fact_ids_json, hypotheses_json, possible_approaches_json,
-            record_json, created_at, updated_at, discarded_at, discard_reason
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM capability_proposals WHERE id = ?), ?), ?, ?, ?)
-        `).run(
-          proposal.id,
-          proposal.sourceScanId,
-          proposal.userNeed,
-          proposal.capabilityFamily,
-          proposal.status,
-          proposal.riskLevel,
-          proposal.confidence,
-          proposal.recommendedNextStep,
-          JSON.stringify(proposal.groundingFactIds),
-          JSON.stringify(proposal.groundingFactIds),
-          JSON.stringify(proposal.hypotheses),
-          JSON.stringify(proposal.possibleApproaches),
-          JSON.stringify(proposal),
-          proposal.id,
-          new Date().toISOString(),
-          new Date().toISOString(),
-          proposal.discardedAt ?? null,
-          proposal.discardReason ?? null
-        );
+            record_json, created_at, updated_at, discarded_at, discard_reason, converted_shell_approval_id, converted_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM capability_proposals WHERE id = ?), ?), ?, ?, ?, ?, ?)
+        `).run(...capabilityProposalValues(proposal));
       }
     });
   }
@@ -430,7 +531,9 @@ export function normalizeCapabilityProposal(proposal: CapabilityProposal): Capab
     groundingFactIds,
     hypotheses,
     possibleApproaches,
-    status: allRemoved ? "ignored" : proposal.status
+    status: allRemoved ? "ignored" : proposal.status,
+    convertedShellApprovalId: proposal.convertedShellApprovalId,
+    convertedAt: proposal.convertedAt
   };
 }
 
@@ -471,14 +574,14 @@ export function formatCapabilityPlan(result: CapabilityPlanResult): string {
   return formatCapabilityProposal(result.proposal, result.groundingFacts);
 }
 
-export function formatCapabilityReview(proposals: CapabilityProposal[]): string {
+export function formatCapabilityReview(proposals: CapabilityProposal[], warningsById: Map<string, string[]> = new Map()): string {
   if (!proposals.length) {
     return "No capability proposals.";
   }
-  return proposals.map(formatCapabilityProposalCompact).join("\n\n");
+  return proposals.map((proposal) => formatCapabilityProposalCompact(proposal, warningsById.get(proposal.id) ?? [])).join("\n\n");
 }
 
-export function formatCapabilityProposal(proposal: CapabilityProposal, groundingFacts: EnvironmentFact[] = []): string {
+export function formatCapabilityProposal(proposal: CapabilityProposal, groundingFacts: EnvironmentFact[] = [], integrityWarnings: string[] = []): string {
   return [
     `Capability proposal: ${proposal.id}`,
     `Status: ${proposal.status}`,
@@ -489,6 +592,9 @@ export function formatCapabilityProposal(proposal: CapabilityProposal, grounding
     `Confidence: ${proposal.confidence}`,
     `Next: ${proposal.recommendedNextStep}`,
     `Grounding facts: ${proposal.groundingFactIds.join(", ") || "none"}`,
+    proposal.convertedShellApprovalId ? `Linked shell approval: ${proposal.convertedShellApprovalId}` : undefined,
+    proposal.convertedAt ? `Converted at: ${proposal.convertedAt}` : undefined,
+    integrityWarnings.length ? `Integrity warnings:\n${integrityWarnings.map((warning) => `- ${warning}`).join("\n")}` : undefined,
     "",
     "Grounding fact summary:",
     groundingFacts.length ? groundingFacts.map(formatFact).join("\n") : "- none",
@@ -498,7 +604,7 @@ export function formatCapabilityProposal(proposal: CapabilityProposal, grounding
     "",
     "Approaches:",
     proposal.possibleApproaches.length ? proposal.possibleApproaches.map((item) => `- ${item.title} (${item.kind}, ${item.riskLevel}) [${item.groundingFactIds.join(", ")}]\n  ${item.summary}`).join("\n") : "- none"
-  ].join("\n");
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 export function formatCapabilityShellPreview(approval: ShellApproval): string {
@@ -586,7 +692,9 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         discarded_at TEXT,
-        discard_reason TEXT
+        discard_reason TEXT,
+        converted_shell_approval_id TEXT,
+        converted_at TEXT
       );
     `);
     if (!hasColumn(db, "environment_facts", "scan_id")) {
@@ -598,6 +706,8 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
     ensureColumn(db, "capability_proposals", "possible_approaches_json", "TEXT");
     ensureColumn(db, "capability_proposals", "discarded_at", "TEXT");
     ensureColumn(db, "capability_proposals", "discard_reason", "TEXT");
+    ensureColumn(db, "capability_proposals", "converted_shell_approval_id", "TEXT");
+    ensureColumn(db, "capability_proposals", "converted_at", "TEXT");
     const legacyCount = db.prepare("SELECT COUNT(*) AS count FROM environment_facts WHERE scan_id IS NULL OR scan_id = ''").get() as { count: number };
     if (legacyCount.count > 0) {
       const observedAt = new Date(0).toISOString();
@@ -618,12 +728,49 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
       CREATE INDEX IF NOT EXISTS idx_environment_scans_observed_at ON environment_scans(observed_at);
       CREATE INDEX IF NOT EXISTS idx_capability_proposals_status ON capability_proposals(status);
       CREATE INDEX IF NOT EXISTS idx_capability_proposals_source_scan_id ON capability_proposals(source_scan_id);
+      CREATE INDEX IF NOT EXISTS idx_capability_proposals_converted_shell_approval_id ON capability_proposals(converted_shell_approval_id);
     `);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+function upsertCapabilityProposal(db: DatabaseSync, proposal: CapabilityProposal): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT OR REPLACE INTO capability_proposals (
+      id, source_scan_id, user_need, capability_family, status, risk_level, confidence,
+      recommended_next_step, grounding_facts_json, grounding_fact_ids_json, hypotheses_json, possible_approaches_json,
+      record_json, created_at, updated_at, discarded_at, discard_reason, converted_shell_approval_id, converted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM capability_proposals WHERE id = ?), ?), ?, ?, ?, ?, ?)
+  `).run(...capabilityProposalValues(proposal, now));
+}
+
+function capabilityProposalValues(proposal: CapabilityProposal, now = new Date().toISOString()): Array<string | null> {
+  return [
+    proposal.id,
+    proposal.sourceScanId,
+    proposal.userNeed,
+    proposal.capabilityFamily,
+    proposal.status,
+    proposal.riskLevel,
+    proposal.confidence,
+    proposal.recommendedNextStep,
+    JSON.stringify(proposal.groundingFactIds),
+    JSON.stringify(proposal.groundingFactIds),
+    JSON.stringify(proposal.hypotheses),
+    JSON.stringify(proposal.possibleApproaches),
+    JSON.stringify(proposal),
+    proposal.id,
+    now,
+    now,
+    proposal.discardedAt ?? null,
+    proposal.discardReason ?? null,
+    proposal.convertedShellApprovalId ?? null,
+    proposal.convertedAt ?? null
+  ];
 }
 
 function readEnvironmentScan(workspaceRoot: string, options: { latest?: boolean; scanId?: string }): EnvironmentScanResult {
@@ -1007,14 +1154,16 @@ function formatWarning(warning: EnvironmentScanWarning): string {
   return parts.join(" | ");
 }
 
-function formatCapabilityProposalCompact(proposal: CapabilityProposal): string {
+function formatCapabilityProposalCompact(proposal: CapabilityProposal, integrityWarnings: string[] = []): string {
+  const warning = integrityWarningSummary(proposal, integrityWarnings);
   return [
-    `${proposal.id}\t${proposal.status}\t${proposal.capabilityFamily}\trisk:${proposal.riskLevel}\tconfidence:${proposal.confidence}`,
+    `${proposal.id}\t${proposal.status}\t${proposal.capabilityFamily}\trisk:${proposal.riskLevel}\tconfidence:${proposal.confidence}${warning ? `\tWARNING: ${warning}` : ""}`,
     `Need: ${proposal.userNeed}`,
     `Next: ${proposal.recommendedNextStep}`,
     `Source scan: ${proposal.sourceScanId}`,
+    proposal.convertedShellApprovalId ? `Linked shell approval: ${proposal.convertedShellApprovalId}` : undefined,
     `Grounding: ${proposal.groundingFactIds.join(", ") || "none"}`
-  ].join("\n");
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function publicScan(scan: EnvironmentScan): Record<string, unknown> {
@@ -1051,6 +1200,74 @@ function selectFactsByIds(facts: EnvironmentFact[], ids: string[]): EnvironmentF
   return sortFacts(facts.filter((fact) => wanted.has(fact.id)));
 }
 
+function validateProposalForShellConversion(proposal: CapabilityProposal, integrityWarnings: string[]): void {
+  if (integrityWarnings.length > 0) {
+    throw new Error(formatIntegrityWarning(proposal, integrityWarnings));
+  }
+  if (proposal.status === "discarded") {
+    throw new Error(`Capability proposal is discarded and cannot be converted. Reason: ${proposal.discardReason ?? "none"}`);
+  }
+  if (proposal.status !== "pending") {
+    throw new Error(`Capability proposal is not pending: ${proposal.status}`);
+  }
+  if (proposal.recommendedNextStep !== "shell_preview") {
+    throw new Error(`Capability proposal is not eligible for shell preview: ${proposal.recommendedNextStep}`);
+  }
+}
+
+function defaultCapabilityShellReason(proposal: CapabilityProposal): string {
+  return `A ${capabilityFamilyLabel(proposal.capabilityFamily)} capability was requested and the user provided this command for one-shot shell approval.`;
+}
+
+function defaultCapabilityShellEffect(proposal: CapabilityProposal): string {
+  return `May execute a user-provided ${capabilityFamilyLabel(proposal.capabilityFamily)} command and may produce output or local side effects depending on the command.`;
+}
+
+function capabilityFamilyLabel(family: CapabilityFamily): string {
+  return family.replace(/_/g, " ");
+}
+
+function formatLinkedApprovalMessage(proposal: CapabilityProposal, approval: ShellApproval | undefined, integrityWarnings: string[]): string {
+  if (integrityWarnings.length > 0) {
+    return formatIntegrityWarning(proposal, integrityWarnings);
+  }
+  const approvalId = proposal.convertedShellApprovalId;
+  const status = approval?.status ?? "unknown";
+  return [
+    "This capability proposal already has a linked shell approval.",
+    "No new approval was created.",
+    "No command was executed.",
+    "Provided command was not used.",
+    `Approval: ${approvalId ?? "missing"}`,
+    `Status: ${status}`,
+    approvalId ? "Use:" : undefined,
+    approvalId ? `  cosia shell apply ${approvalId}` : undefined
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatIntegrityWarning(proposal: CapabilityProposal, warnings: string[]): string {
+  return [
+    "Integrity warning:",
+    ...warnings.map((warning) => `- ${warning}`),
+    `Proposal: ${proposal.id}`,
+    proposal.convertedShellApprovalId ? `Linked approval: ${proposal.convertedShellApprovalId}` : undefined,
+    "No new approval was created."
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function integrityWarningSummary(proposal: CapabilityProposal, warnings: string[] = []): string | undefined {
+  if (warnings.length > 0) {
+    return warnings[0];
+  }
+  if (proposal.status === "converted_to_shell" && !proposal.convertedShellApprovalId) {
+    return "converted shell approval id missing";
+  }
+  if (proposal.convertedShellApprovalId && proposal.status !== "converted_to_shell") {
+    return "linked approval status mismatch";
+  }
+  return undefined;
+}
+
 function normalizeFactFromRow(recordJson: string, scanId: string, observedAt: string): EnvironmentFact {
   const parsed = JSON.parse(recordJson) as Partial<EnvironmentFact>;
   return {
@@ -1079,7 +1296,9 @@ function normalizeStoredProposal(recordJson: string): CapabilityProposal {
     confidence: parsed.confidence === "medium" || parsed.confidence === "high" ? parsed.confidence : "low",
     status: capabilityStatusSchema.safeParse(parsed.status).success ? parsed.status as z.infer<typeof capabilityStatusSchema> : "pending",
     discardedAt: parsed.discardedAt,
-    discardReason: parsed.discardReason
+    discardReason: parsed.discardReason,
+    convertedShellApprovalId: parsed.convertedShellApprovalId,
+    convertedAt: parsed.convertedAt
   });
 }
 

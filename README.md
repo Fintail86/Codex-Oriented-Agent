@@ -1,10 +1,10 @@
-# COSIA v0.31.0
+# COSIA v0.32.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.31.0 adds a deterministic capability proposal planner over the generic workspace fact layer. COSIA turns user requests plus scan facts into abstract capability proposals without assuming concrete tools, runners, or commands.
+v0.32.0 links deterministic capability proposals to user-approved one-shot shell previews. COSIA still does not draft commands automatically: `--from-capability` requires the user to provide the exact command with `--command`.
 
 ## Requirements
 
@@ -66,6 +66,7 @@ cosia chat --session <session-id>
 cosia tool list
 cosia capability scan --request "변경 상태 확인"
 cosia capability plan --request "변경 상태 확인"
+cosia shell preview --from-capability <proposal-id> --command "<exact command>"
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia provider list
 cosia provider check codex-cli
@@ -629,6 +630,8 @@ cosia capability scan --request "테스트 돌려봐"
 cosia capability plan --request "테스트 돌려봐"
 cosia capability facts --latest
 cosia capability review
+cosia shell preview --from-capability <proposal-id> --command "<exact command>"
+cosia shell run --from-capability <proposal-id> --command "<exact command>" --yes
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia shell apply <approval-id>
 ```
@@ -641,12 +644,15 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 `cosia capability plan --request "<request>"` reads the latest valid scan and creates a deterministic abstract proposal. It does not create shell approvals, commands, tool candidates, or active tool registrations. Requests such as “git status 봐줘”, “npm test 해줘”, or “python 테스트 돌려봐” are normalized into capability families such as `change_tracking` or `project_check`, not concrete runner assumptions.
 
+`cosia shell preview --from-capability <proposal-id> --command "<exact command>"` converts an eligible `shell_preview` proposal into a linked one-shot shell approval. It never extracts a command from the proposal and never creates a new approval if the proposal already has a linked approval. `cosia shell run --from-capability ... --yes` only runs when it creates a new approval; existing linked approvals must be executed through `cosia shell apply <approval-id>`.
+
 `shell_request` does not execute commands. It creates a one-shot shell approval preview for local CLI/REPL review. An approval stores the exact command and cwd hash, expires, and can be executed only once. Gateway/Telegram shell execution is blocked by default.
 
 Approved Shell Bridge is temporary. The long-term direction is documented in `Docs/architecture/governed-terminal-long-term.md`: a Governed Terminal substrate with command classification, probes, candidate tests, and tool acquisition.
 
 ## Roadmap
 
+- v0.32.0: Capability-linked shell approval previews.
 - v0.31.0: Deterministic capability proposal planner.
 - v0.30.0: Generic workspace fact scan snapshots.
 - v0.29.0: Zero-base capability planner and approved shell bridge.

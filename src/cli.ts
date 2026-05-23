@@ -1661,18 +1661,21 @@ program
         return;
       }
       if (action === "review") {
-        console.log(formatCapabilityReview(planner.listProposals({ all: options.all })));
+        const proposals = planner.listProposals({ all: options.all });
+        const warningsById = new Map(proposals.map((proposal) => [proposal.id, planner.integrityWarningsForProposal(proposal)]));
+        console.log(formatCapabilityReview(proposals, warningsById));
         return;
       }
       if (action === "show") {
         if (!id) throw new Error("Usage: cosia capability show <id>");
-        console.log(formatCapabilityProposal(planner.getProposal(id), planner.groundingFactsForProposal(id)));
+        const proposal = planner.getProposal(id);
+        console.log(formatCapabilityProposal(proposal, planner.groundingFactsForProposal(id), planner.integrityWarningsForProposal(proposal)));
         return;
       }
       if (action === "discard") {
         if (!id || !options.reason) throw new Error("Usage: cosia capability discard <id> --reason \"<reason>\"");
         const proposal = planner.discardProposal(id, options.reason);
-        console.log(formatCapabilityProposal(proposal, planner.groundingFactsForProposal(id)));
+        console.log(formatCapabilityProposal(proposal, planner.groundingFactsForProposal(id), planner.integrityWarningsForProposal(proposal)));
         return;
       }
       throw new Error(`Unknown capability action: ${action}`);
@@ -1687,7 +1690,7 @@ program
   .option("--cwd <cwd>", "Workspace-relative working directory.", ".")
   .option("--reason <reason>", "Reason for requesting shell execution.")
   .option("--expected-effect <text>", "Expected shell command effect.")
-  .option("--from-capability <id>", "Reserved for v0.32 shell proposal conversion; rejected in v0.31.")
+  .option("--from-capability <id>", "Create a one-shot shell approval from a capability proposal.")
   .option("--yes", "Apply a newly created preview immediately.", false)
   .option("--confirm <phrase>", "Approval-id-bound confirmation phrase for high-risk commands.")
   .description("Create, apply, cancel, or inspect one-shot user-approved shell command previews.")
@@ -1708,7 +1711,22 @@ program
       }
       if (action === "preview") {
         if (options.fromCapability) {
-          throw new Error("Capability-to-shell preview conversion is deferred to v0.32.");
+          if (!options.command) {
+            throw new Error("Usage: cosia shell preview --from-capability <proposal-id> --command \"<exact command>\"");
+          }
+          const result = new CapabilityPlanner(workspaceRoot).convertToShell(options.fromCapability, {
+            command: options.command,
+            cwd: options.cwd,
+            reason: options.reason,
+            expectedEffect: options.expectedEffect,
+            sourceChannel: "cli"
+          });
+          if (result.didCreate && result.approval) {
+            console.log(formatShellApprovalPreview(result.approval));
+          } else {
+            console.log(result.message ?? "No new shell approval was created.");
+          }
+          return;
         }
         if (!options.command || !options.reason) {
           throw new Error("Usage: cosia shell preview --command \"<command>\" --reason \"<reason>\"");
@@ -1731,7 +1749,27 @@ program
       }
       if (action === "run") {
         if (options.fromCapability) {
-          throw new Error("Capability-to-shell execution is deferred to v0.32.");
+          if (!options.command || !options.yes) {
+            throw new Error("Usage: cosia shell run --from-capability <proposal-id> --command \"<exact command>\" --yes");
+          }
+          const result = new CapabilityPlanner(workspaceRoot).convertToShell(options.fromCapability, {
+            command: options.command,
+            cwd: options.cwd,
+            reason: options.reason,
+            expectedEffect: options.expectedEffect,
+            sourceChannel: "cli"
+          });
+          if (!result.didCreate || !result.approval) {
+            console.log(result.message ?? "No new shell approval was created. No command was executed.");
+            process.exitCode = 1;
+            return;
+          }
+          console.log(formatShellApprovalPreview(result.approval));
+          const applyResult = await ledger.apply(result.approval.id, { confirm: options.confirm });
+          console.log("");
+          console.log(applyResult.content);
+          if (!applyResult.ok) process.exitCode = 1;
+          return;
         }
         if (!options.command || !options.reason || !options.yes) {
           throw new Error("Usage: cosia shell run --command \"<command>\" --reason \"<reason>\" --yes");

@@ -51,6 +51,7 @@ export type ShellApproval = {
   sourceSessionId?: string;
   sourceAgentId?: string;
   sourceRunId?: string;
+  sourceCapabilityId?: string;
   sourceChannel: "cli" | "repl" | "gateway";
   status: ShellApprovalStatus;
 };
@@ -69,6 +70,7 @@ export type CreateShellApprovalInput = {
   sourceSessionId?: string;
   sourceAgentId?: string;
   sourceRunId?: string;
+  sourceCapabilityId?: string;
   sourceChannel: "cli" | "repl" | "gateway";
   now?: Date;
   ttlMs?: number;
@@ -79,6 +81,8 @@ export type ShellExecutionResult = {
   ok: boolean;
   content: string;
 };
+
+export type ShellApprovalDb = DatabaseSync;
 
 const defaultTtlMs = 5 * 60 * 1000;
 const defaultTimeoutMs = 30_000;
@@ -94,36 +98,7 @@ export class ShellApprovalLedger {
   }
 
   create(input: CreateShellApprovalInput): ShellApproval {
-    const command = input.command.trim();
-    if (!command) {
-      throw new Error("Shell command is required.");
-    }
-    if (input.sourceChannel === "gateway") {
-      throw new Error("Gateway shell execution is blocked in v0.29.");
-    }
-    const cwd = normalizeCwd(this.workspaceRoot, input.cwd ?? ".");
-    const now = input.now ?? new Date();
-    const expiresAt = new Date(now.getTime() + (input.ttlMs ?? defaultTtlMs));
-    const assessment = assessShellRisk(command);
-    const approval: ShellApproval = {
-      id: `shell_${randomUUID().slice(0, 8)}`,
-      command: redactShellText(command),
-      commandHash: hashText(command),
-      cwd,
-      cwdHash: hashText(cwd),
-      reason: redactShellText(input.reason),
-      expectedEffect: redactShellText(input.expectedEffect ?? "Run the approved shell command once."),
-      risk: assessment.risk,
-      blocked: assessment.blocked,
-      warnings: assessment.warnings.map(redactShellText),
-      createdAt: now.toISOString(),
-      expiresAt: expiresAt.toISOString(),
-      sourceSessionId: input.sourceSessionId,
-      sourceAgentId: input.sourceAgentId,
-      sourceRunId: input.sourceRunId,
-      sourceChannel: input.sourceChannel,
-      status: "pending"
-    };
+    const approval = buildShellApprovalRecord(this.workspaceRoot, input);
     this.withDb((db) => {
       insertShellApproval(db, approval);
     });
@@ -262,6 +237,14 @@ export class ShellApprovalLedger {
   }
 }
 
+export function ensureShellApprovalStorage(db: DatabaseSync): void {
+  ensureShellApprovalTable(db);
+}
+
+export function insertShellApprovalRecord(db: DatabaseSync, approval: ShellApproval): void {
+  insertShellApproval(db, approval);
+}
+
 export function assessShellRisk(command: string): ShellRiskAssessment {
   const warnings: string[] = [];
   let risk: ShellApprovalRisk = "low";
@@ -298,10 +281,12 @@ export function formatShellApprovalPreview(approval: ShellApproval): string {
     `Approval: ${approval.id}`,
     `Status: ${approval.status}`,
     `Risk: ${approval.risk}${approval.blocked ? " (blocked)" : ""}`,
+    `Blocked: ${approval.blocked ? "yes" : "no"}`,
     `CWD: ${approval.cwd}`,
     `Command: ${approval.command}`,
     `Reason: ${approval.reason}`,
     `Expected effect: ${approval.expectedEffect}`,
+    approval.sourceCapabilityId ? `Source capability: ${approval.sourceCapabilityId}` : undefined,
     `Expires: ${approval.expiresAt}`,
     approval.warnings.length ? `Warnings:\n${approval.warnings.map((item) => `- ${item}`).join("\n")}` : undefined,
     "",
@@ -320,7 +305,8 @@ export function formatShellApprovalList(approvals: ShellApproval[], options: { n
     const stale = approval.status === "running" && Date.parse(approval.runningAt ?? approval.createdAt) < now.getTime() - staleRunningMs
       ? " stale-running"
       : "";
-    return `${approval.id}\t${approval.status}${stale}\trisk:${approval.risk}${approval.blocked ? ":blocked" : ""}\texpires:${approval.expiresAt}\t${approval.command}`;
+    const source = approval.sourceCapabilityId ? `\tsourceCapability:${approval.sourceCapabilityId}` : "";
+    return `${approval.id}\t${approval.status}${stale}\trisk:${approval.risk}${approval.blocked ? ":blocked" : ""}\texpires:${approval.expiresAt}${source}\t${approval.command}`;
   }).join("\n");
 }
 
@@ -362,22 +348,33 @@ function ensureShellApprovalTable(db: DatabaseSync): void {
       source_session_id TEXT,
       source_agent_id TEXT,
       source_run_id TEXT,
+      source_capability_id TEXT,
       source_channel TEXT NOT NULL,
       record_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_shell_approvals_status ON shell_approvals(status);
   `);
+  ensureShellColumn(db, "source_capability_id", "TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_shell_approvals_source_capability_id ON shell_approvals(source_capability_id);");
+}
+
+function ensureShellColumn(db: DatabaseSync, columnName: string, definition: string): void {
+  const columns = db.prepare("PRAGMA table_info(shell_approvals)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === columnName)) {
+    db.exec(`ALTER TABLE shell_approvals ADD COLUMN ${columnName} ${definition}`);
+  }
 }
 
 function insertShellApproval(db: DatabaseSync, approval: ShellApproval): void {
+  ensureShellApprovalTable(db);
   db.prepare(`
     INSERT INTO shell_approvals (
       id, command, command_hash, cwd, cwd_hash, reason, expected_effect, risk, blocked,
       warnings_json, status, created_at, expires_at, running_at, applied_at, failed_at,
       failure_reason, failure_kind, exit_code, duration_ms, source_session_id, source_agent_id,
-      source_run_id, source_channel, record_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      source_run_id, source_capability_id, source_channel, record_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(...approvalValues(approval), new Date().toISOString());
 }
 
@@ -406,6 +403,7 @@ function updateShellApproval(db: DatabaseSync, approval: ShellApproval): void {
       source_session_id = ?,
       source_agent_id = ?,
       source_run_id = ?,
+      source_capability_id = ?,
       source_channel = ?,
       record_json = ?,
       updated_at = ?
@@ -438,6 +436,7 @@ function approvalValues(approval: ShellApproval): Array<string | number | null> 
     approval.sourceSessionId ?? null,
     approval.sourceAgentId ?? null,
     approval.sourceRunId ?? null,
+    approval.sourceCapabilityId ?? null,
     approval.sourceChannel,
     JSON.stringify(approval)
   ];
@@ -467,7 +466,9 @@ type ShellApprovalRow = {
   source_session_id: string | null;
   source_agent_id: string | null;
   source_run_id: string | null;
+  source_capability_id?: string | null;
   source_channel: "cli" | "repl" | "gateway";
+  record_json: string;
 };
 
 function selectShellApproval(db: DatabaseSync, id: string): ShellApproval | undefined {
@@ -476,6 +477,12 @@ function selectShellApproval(db: DatabaseSync, id: string): ShellApproval | unde
 }
 
 function rowToApproval(row: ShellApprovalRow): ShellApproval {
+  let parsed: Partial<ShellApproval> = {};
+  try {
+    parsed = JSON.parse(row.record_json) as Partial<ShellApproval>;
+  } catch {
+    parsed = {};
+  }
   return {
     id: row.id,
     command: row.command,
@@ -499,8 +506,43 @@ function rowToApproval(row: ShellApprovalRow): ShellApproval {
     sourceSessionId: row.source_session_id ?? undefined,
     sourceAgentId: row.source_agent_id ?? undefined,
     sourceRunId: row.source_run_id ?? undefined,
+    sourceCapabilityId: row.source_capability_id ?? parsed.sourceCapabilityId ?? undefined,
     sourceChannel: row.source_channel,
     status: row.status
+  };
+}
+
+export function buildShellApprovalRecord(workspaceRoot: string, input: CreateShellApprovalInput): ShellApproval {
+  const command = input.command.trim();
+  if (!command) {
+    throw new Error("Shell command is required.");
+  }
+  if (input.sourceChannel === "gateway") {
+    throw new Error("Gateway shell execution is blocked in v0.29.");
+  }
+  const cwd = normalizeCwd(workspaceRoot, input.cwd ?? ".");
+  const now = input.now ?? new Date();
+  const expiresAt = new Date(now.getTime() + (input.ttlMs ?? defaultTtlMs));
+  const assessment = assessShellRisk(command);
+  return {
+    id: `shell_${randomUUID().slice(0, 8)}`,
+    command: redactShellText(command),
+    commandHash: hashText(command),
+    cwd,
+    cwdHash: hashText(cwd),
+    reason: redactShellText(input.reason),
+    expectedEffect: redactShellText(input.expectedEffect ?? "Run the approved shell command once."),
+    risk: assessment.risk,
+    blocked: assessment.blocked,
+    warnings: assessment.warnings.map(redactShellText),
+    createdAt: now.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    sourceSessionId: input.sourceSessionId,
+    sourceAgentId: input.sourceAgentId,
+    sourceRunId: input.sourceRunId,
+    sourceCapabilityId: input.sourceCapabilityId,
+    sourceChannel: input.sourceChannel,
+    status: "pending"
   };
 }
 
