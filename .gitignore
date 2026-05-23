@@ -7,7 +7,12 @@ skills/
 memory/*
 sessions/*
 *.log
-Docs/
+Docs/*
+!Docs/approved-plans.md
+!Docs/plans/
+!Docs/plans/*.md
+!Docs/architecture/
+!Docs/architecture/*.md
 .cosia-gateway/
 .cosia-reset-backups/
 config/runtime.local.json
