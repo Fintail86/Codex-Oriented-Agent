@@ -40,11 +40,11 @@ export type ProviderListItem = {
 };
 
 export function createProvider(id: string, workspaceRoot: string, options: ProviderCreateOptions = {}): ModelProvider {
-  const providerId = normalizeProviderId(id);
+  const profile = options.policy?.model.providerProfiles[id];
+  const providerId = profile ? profile.providerId : normalizeProviderId(id);
   if (providerId === "mock") {
     return new MockProvider();
   }
-  const profile = options.policy?.model.providerProfiles[providerId];
   const config = profile
     ? providerConfigForProfile(workspaceRoot, options.policy!, profile)
     : options.policy?.model.providers[providerId];
@@ -100,9 +100,8 @@ export async function checkProvider(
   policy: PolicyConfig,
   options: Omit<ProviderCreateOptions, "policy"> = {}
 ): Promise<ProviderCheckResult> {
-  const providerId = normalizeProviderId(id);
   try {
-    const provider = createProvider(providerId, workspaceRoot, { ...options, policy });
+    const provider = createProvider(id, workspaceRoot, { ...options, policy });
     const status = await provider.checkAuth();
     return {
       id: provider.id,
@@ -114,7 +113,7 @@ export async function checkProvider(
   } catch (error) {
     const providerError = providerErrorFromUnknown(error, "unknown_provider");
     return {
-      id: providerId,
+      id,
       ok: false,
       message: providerError.message,
       reason: providerError.reason,

@@ -759,6 +759,10 @@ describe("policy core", () => {
       providerId: "codex-cli",
       oauth: true
     });
+    const codexProfileProvider = createProvider("codex", root, {
+      policy: await new PolicyManager(root).loadPolicy()
+    });
+    expect(codexProfileProvider.id).toBe("codex");
     await addProviderProfile(root, "openrouter-test", {
       providerId: "openrouter",
       apiKey: "secret-openrouter-key",
