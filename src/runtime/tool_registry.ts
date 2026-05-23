@@ -10,7 +10,7 @@ import { PolicyManager } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
 import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
-import { getActiveToolRecord, type CommandAdapterPlan } from "./tool_acquisition.js";
+import { executeCommandAdapterPlan, getActiveToolRecord, recordActiveToolExecution, type CommandAdapterPlan } from "./tool_acquisition.js";
 import { getToolCatalogEntry, type CatalogToolId } from "./tool_catalog.js";
 import type { ToolContext, ToolDefinition, ToolName, ToolPermission, ToolResult } from "./types.js";
 
@@ -186,9 +186,20 @@ function activeToolDefinition(name: ToolName, workspaceRoot: string): ToolDefini
     source: "active",
     execute: async (args) => {
       if (args && typeof args === "object" && Object.keys(args as Record<string, unknown>).length > 0) {
+        recordActiveToolExecution(workspaceRoot, {
+          toolId: name,
+          status: "failed",
+          failureKind: "policy_denied",
+          durationMs: 0,
+          outputSummary: "Active command_adapter MVP rejected model-provided arguments.",
+          evidence: {
+            executorKind: "command_adapter",
+            reason: "model_provided_args_not_allowed"
+          }
+        });
         return { ok: false, content: "Active command_adapter MVP does not accept model-provided arguments." };
       }
-      return runActiveCommandAdapter(plan, workspaceRoot);
+      return runActiveCommandAdapter(name, plan, workspaceRoot);
     }
   };
 }
@@ -217,25 +228,24 @@ async function runWorkspaceCommand(command: string, args: string[], cwd: string)
   }
 }
 
-async function runActiveCommandAdapter(plan: CommandAdapterPlan, workspaceRoot: string): Promise<ToolResult> {
-  try {
-    const result = await execFileAsync(plan.executable, plan.args, {
-      cwd: workspaceRoot,
-      timeout: plan.timeoutMs,
-      maxBuffer: plan.outputCapBytes
-    });
-    return {
-      ok: true,
-      content: truncateToolOutput(redactToolOutput(formatCommandOutput(result.stdout, result.stderr)), plan.outputCapBytes)
-    };
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number | string };
-    const output = formatCommandOutput(err.stdout ?? "", err.stderr ?? err.message);
-    return {
-      ok: false,
-      content: truncateToolOutput(redactToolOutput(`Exit code: ${String(err.code ?? "unknown")}\n${output}`), plan.outputCapBytes)
-    };
-  }
+async function runActiveCommandAdapter(toolId: ToolName, plan: CommandAdapterPlan, workspaceRoot: string): Promise<ToolResult> {
+  const result = await executeCommandAdapterPlan(plan, workspaceRoot);
+  recordActiveToolExecution(workspaceRoot, {
+    toolId,
+    status: result.ok ? "passed" : "failed",
+    failureKind: result.failureKind,
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+    outputSummary: result.outputSummary,
+    evidence: {
+      executorKind: "command_adapter",
+      failureReason: result.failureReason
+    }
+  });
+  return {
+    ok: result.ok,
+    content: truncateToolOutput(redactToolOutput(result.outputSummary), plan.outputCapBytes)
+  };
 }
 
 function formatCommandOutput(stdout: string, stderr: string): string {

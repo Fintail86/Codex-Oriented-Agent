@@ -53,7 +53,11 @@ import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "./runti
 import {
   formatActiveTool,
   formatActiveToolList,
+  formatActiveToolVisibility,
+  formatLearnedBlueprint,
+  formatLearnedBlueprintList,
   formatToolActivation,
+  formatToolActivationPreview,
   formatToolCandidate,
   formatToolCandidateReview,
   formatToolCandidateTestRun,
@@ -1810,7 +1814,7 @@ program
 
 program
   .command("tool")
-  .argument("[action-or-tool-id]", "`list`, `run`, `draft`, `candidate`, `active`, `activate`, `deactivate`, or a tool id")
+  .argument("[action-or-tool-id]", "`list`, `run`, `draft`, `candidate`, `active`, `blueprint`, `activate`, `deactivate`, or a tool id")
   .argument("[tool-id]", "Tool id when using `run`")
   .argument("[extra-id]", "Extra id for nested tool commands.")
   .option("--args <json>", "JSON object arguments for the tool.")
@@ -1884,17 +1888,42 @@ program
         }
         if (action === "show") {
           if (!extraId) throw new Error("Usage: cosia tool active show <tool-id>");
-          console.log(formatActiveTool(acquisition.getActiveTool(extraId)));
+          const tool = acquisition.getActiveTool(extraId);
+          const visibility = await acquisition.activeToolVisibility(extraId);
+          console.log(`${formatActiveTool(tool)}\n\n${formatActiveToolVisibility(visibility)}`);
           return;
         }
         throw new Error(`Unknown tool active action: ${action}`);
       }
 
+      if (actionOrToolId === "blueprint") {
+        const action = toolId ?? "list";
+        if (action === "list") {
+          console.log(formatLearnedBlueprintList(acquisition.listBlueprints()));
+          return;
+        }
+        if (action === "show") {
+          if (!extraId) throw new Error("Usage: cosia tool blueprint show <blueprint-id>");
+          console.log(formatLearnedBlueprint(acquisition.getBlueprint(extraId)));
+          return;
+        }
+        if (action === "create-from-active") {
+          if (!extraId) throw new Error("Usage: cosia tool blueprint create-from-active <tool-id> --yes");
+          console.log(formatLearnedBlueprint(await Promise.resolve(acquisition.createBlueprintFromActive(extraId, { yes: options.yes }))));
+          return;
+        }
+        throw new Error(`Unknown tool blueprint action: ${action}`);
+      }
+
       if (actionOrToolId === "activate") {
         if (!toolId || !options.agent) {
-          throw new Error("Usage: cosia tool activate <candidate-id> --agent <agent-id> --yes");
+          throw new Error("Usage: cosia tool activate <candidate-id> --agent <agent-id> [--yes]");
         }
-        console.log(formatToolActivation(await acquisition.activateCandidate(toolId, options.agent, { yes: options.yes })));
+        if (!options.yes) {
+          console.log(formatToolActivationPreview(await acquisition.previewActivation(toolId, options.agent)));
+          return;
+        }
+        console.log(formatToolActivation(await acquisition.activateCandidate(toolId, options.agent, { yes: true })));
         return;
       }
 
@@ -2212,6 +2241,7 @@ function formatToolCatalog(activeTools: ActiveToolRecord[] = []): string {
   lines.push("  cosia tool draft --from-capability <capability-id>");
   lines.push("  cosia tool candidate review");
   lines.push("  cosia tool activate <candidate-id> --agent <agent-id> --yes");
+  lines.push("  cosia tool blueprint list");
   if (activeTools.length) {
     lines.push("");
     lines.push("Workspace Active Tools");

@@ -44,6 +44,7 @@ import {
   candidateContentHash,
   formatToolCandidate,
   formatToolDraftResult,
+  listEffectiveActiveModelToolIds,
   type ToolCandidateRecord
 } from "../src/runtime/tool_acquisition.js";
 import type { ModelProvider } from "../src/runtime/types.js";
@@ -138,7 +139,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.33.0\"");
+    expect(policyJson).toContain("\"version\": \"0.37.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1270,11 +1271,22 @@ describe("tool acquisition", () => {
     expect(testRun.status).toBe("passed");
     const approved = manager.approveCandidate(candidateId);
     expect(approved.status).toBe("approved");
+    const preview = await manager.previewActivation(candidateId, "architect-agent");
+    expect(preview.allowedToolsBefore).not.toContain("local.project_check.nodever");
+    expect(preview.allowedToolsAfter).toContain("local.project_check.nodever");
+    expect(preview.effectiveVisibility.visible).toBe(true);
+    expect((await new AgentManager(root).loadAgent("architect-agent")).allowedTools).not.toContain("local.project_check.nodever");
+    await expect(manager.activateCandidate(candidateId, "architect-agent")).rejects.toThrow("--yes");
     const activation = await manager.activateCandidate(candidateId, "architect-agent", { yes: true });
     expect(activation.status).toBe("active");
 
     const agent = await new AgentManager(root).loadAgent("architect-agent");
     expect(agent.allowedTools).toContain("local.project_check.nodever");
+    const disabledPolicy = {
+      ...await new PolicyManager(root).loadPolicy(),
+      disabledPermissions: ["project_check" as const]
+    };
+    expect(listEffectiveActiveModelToolIds(root, agent.allowedTools, disabledPolicy)).not.toContain("local.project_check.nodever");
     const prompt = await buildPromptBundle({
       workspaceRoot: root,
       agent,
@@ -1291,11 +1303,31 @@ describe("tool acquisition", () => {
     });
     expect(execResult.ok).toBe(true);
     expect(execResult.content).toContain("v");
+    const secondExecResult = await new ToolRegistry().execute("local.project_check.nodever", {}, {
+      workspaceRoot: root,
+      allowedTools: agent.allowedTools,
+      sourceChannel: "cli"
+    });
+    expect(secondExecResult.ok).toBe(true);
+    expect(manager.listActiveToolExecutions("local.project_check.nodever").filter((item) => item.status === "passed")).toHaveLength(2);
+
+    const blueprint = manager.createBlueprintFromActive("local.project_check.nodever", { yes: true });
+    expect(blueprint.sourceActiveToolIds).toContain("local.project_check.nodever");
+    expect(manager.listBlueprints().map((item) => item.id)).toContain(blueprint.id);
+
+    const rejectedArgs = await new ToolRegistry().execute("local.project_check.nodever", { path: "x" }, {
+      workspaceRoot: root,
+      allowedTools: agent.allowedTools,
+      sourceChannel: "cli"
+    });
+    expect(rejectedArgs.ok).toBe(false);
+    expect(manager.listActiveToolExecutions("local.project_check.nodever").some((item) => item.failureKind === "policy_denied")).toBe(true);
 
     const deactivated = await manager.deactivateTool("local.project_check.nodever", "test cleanup");
     expect(deactivated.status).toBe("deactivated");
     const updatedAgent = await new AgentManager(root).loadAgent("architect-agent");
     expect(updatedAgent.allowedTools).not.toContain("local.project_check.nodever");
+    expect((await manager.activeToolVisibility("local.project_check.nodever"))[0].visible).toBe(false);
   });
 });
 
@@ -1980,6 +2012,53 @@ describe("memory", () => {
     expect(events.some((event) => event.includes("memory review: 1 candidates, 0 auto-promoted, 1 pending, 1 conflicts"))).toBe(true);
     expect(memory.listPromotions()).toHaveLength(0);
     expect((await memory.listCandidates())[0].record?.status).toBe("pending");
+  });
+
+  it("records deduped tool candidate recommendation evidence from repeated shell approvals", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Repeated shell recommendation");
+    const shell = new ShellApprovalLedger(root);
+    for (let index = 0; index < 2; index += 1) {
+      const approval = shell.create({
+        command: "node --version",
+        reason: "Project check command was approved for one-shot shell execution.",
+        expectedEffect: "May inspect project runtime output.",
+        sourceSessionId: session.id,
+        sourceAgentId: "architect-agent",
+        sourceRunId: `run-${index}`,
+        sourceChannel: "cli"
+      });
+      const applied = await shell.apply(approval.id);
+      expect(applied.ok).toBe(true);
+    }
+
+    const policy = await new PolicyManager(root).loadPolicy();
+    const governor = new SelfImprovementGovernor(root);
+    await governor.afterRun({
+      policy,
+      session,
+      agentId: "architect-agent",
+      runId: "run-rec",
+      memoryCandidates: [],
+      skillCandidates: []
+    });
+    await governor.afterRun({
+      policy,
+      session,
+      agentId: "architect-agent",
+      runId: "run-rec-2",
+      memoryCandidates: [],
+      skillCandidates: []
+    });
+
+    const recommendations = governor.listRecords(true).filter((record) => record.type === "tool_recommendation"
+      && record.evidence.recommendationKind === "tool_candidate");
+    expect(recommendations).toHaveLength(1);
+    expect(recommendations[0].status).toBe("previewed");
+    expect(recommendations[0].evidence.sourceShellApprovalIds).toHaveLength(2);
   });
 
   it("defaults candidate owners by tier and keeps non-session candidates pending", async () => {
@@ -2961,7 +3040,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.33.0");
+    expect(emptyReport.version).toBe("0.37.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

@@ -1,10 +1,10 @@
-# COSIA v0.33.0
+# COSIA v0.37.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
 A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed tool draft/candidate acquisition, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
 
-v0.33.0 adds the first ToolDraft / ToolCandidate / ActiveToolRegistry path. LLM ToolDraft output is treated as untrusted design data, normalized through strict allowlists, and only fixed `command_adapter` candidates can be tested and activated. `ts_module` remains draft/review-only until a separate security roadmap exists.
+v0.37.0 hardens the active tool acquisition path. Tool activation is preview-first, active `command_adapter` execution records redacted evidence, Governor can surface tool candidate recommendations from repeated shell approvals, and successful local active tools can be captured as learned workspace blueprints. `ts_module` remains draft/review-only until a separate security roadmap exists.
 
 ## Requirements
 
@@ -668,10 +668,16 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 Active tools are workspace-local records, not static catalog entries. A model sees an active tool only when the active record is `active`, exposure is `model`, the target agent allows the tool id, and policy permits the tool permission. Deactivation removes the active tool from the target agent allowlist and from effective prompt/provider visibility.
 
+Learned local blueprints are evidence artifacts, not built-in knowledge packs. `cosia tool blueprint create-from-active <tool-id> --yes` can capture a repeatedly successful fixed `command_adapter` plan as future drafting context, but it never activates a tool automatically.
+
 Approved Shell Bridge is temporary. The long-term direction is documented in `Docs/architecture/governed-terminal-long-term.md`: a Governed Terminal substrate with command classification, probes, candidate tests, and tool acquisition.
 
 ## Roadmap
 
+- v0.37.0: Learned local blueprint records from successful active command_adapter tools.
+- v0.36.0: Governor tool candidate recommendation evidence from repeated shell approval patterns.
+- v0.35.0: command_adapter runtime hardening with fixed args, env allowlist, and execution evidence.
+- v0.34.0: Active tool activation hardening, preview, deactivation, and effective visibility checks.
 - v0.33.0: LLM ToolDraft, ToolCandidate, and command_adapter active tool MVP.
 - v0.32.0: Capability-linked shell approval previews.
 - v0.31.0: Deterministic capability proposal planner.

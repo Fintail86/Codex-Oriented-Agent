@@ -6,6 +6,7 @@ import { MemoryManager, type CandidateReview, type MemoryReviewSummary } from ".
 import { PolicyAuditLog } from "./policy_audit.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
+import { ShellApprovalLedger, type ShellApproval } from "./shell_approval.js";
 import { SkillManager } from "./skill_manager.js";
 import type { MemoryCandidateRecord, PolicyAuditEvent, RiskLevel, SessionMetadata, SkillCandidateRecord } from "./types.js";
 
@@ -407,6 +408,65 @@ export class SelfImprovementGovernor {
       };
       this.upsertRecord(record);
     }
+    this.recordRepeatedShellCandidateRecommendations(session, agentId, runId, policy);
+  }
+
+  private recordRepeatedShellCandidateRecommendations(session: SessionMetadata, agentId: string, runId: string, policy: PolicyConfig): void {
+    const approvals = new ShellApprovalLedger(this.workspaceRoot)
+      .list()
+      .filter((approval) => approval.status === "applied")
+      .filter((approval) => (approval.sourceSessionId ?? session.id) === session.id)
+      .filter((approval) => (approval.sourceAgentId ?? agentId) === agentId);
+    const groups = groupBy(approvals, (approval) => approval.commandHash);
+    for (const [fingerprint, items] of Object.entries(groups)) {
+      if (items.length < 2) {
+        continue;
+      }
+      const first = items[0];
+      const capabilityFamily = capabilityFamilyFromShellApproval(first);
+      const suggestedTargetToolId = `local.${capabilityFamily}.${fingerprint.slice(0, 4)}`;
+      const dedupeKey = [
+        capabilityFamily,
+        fingerprint,
+        agentId,
+        session.id,
+        suggestedTargetToolId
+      ].join("|");
+      if (this.hasRecommendation(dedupeKey)) {
+        continue;
+      }
+      const record: ImprovementRecord = {
+        id: randomUUID(),
+        type: "tool_recommendation",
+        status: "previewed",
+        riskLevel: maxShellRisk(items),
+        sourceRunId: runId,
+        sourceSessionId: session.id,
+        sourceAgentId: agentId,
+        targetId: suggestedTargetToolId,
+        rationale: "Repeated approved shell command may be worth reviewing as a governed command_adapter candidate.",
+        policySnapshot: redactEvidence({
+          disabledPermissions: policy.disabledPermissions,
+          governor: {
+            activeRegistration: "user_approval_required",
+            shellAutoExecution: false
+          }
+        }),
+        evidence: redactEvidence({
+          recommendationKind: "tool_candidate",
+          dedupeKey,
+          capabilityFamily,
+          sourceShellCommandFingerprint: fingerprint,
+          sourceShellApprovalIds: items.map((approval) => approval.id),
+          sourceAgentId: agentId,
+          sourceSessionId: session.id,
+          suggestedTargetToolId,
+          suggestedNextStep: "Review, test, approve, and activate with explicit CLI commands."
+        }),
+        createdAt: new Date().toISOString()
+      };
+      this.upsertRecord(record);
+    }
   }
 
   private hasRecommendation(dedupeKey: string): boolean {
@@ -781,6 +841,36 @@ function countBy<T>(items: T[], selector: (item: T) => string): Record<string, n
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
+}
+
+function groupBy<T>(items: T[], selector: (item: T) => string): Record<string, T[]> {
+  const groups: Record<string, T[]> = {};
+  for (const item of items) {
+    const key = selector(item);
+    groups[key] = [...(groups[key] ?? []), item];
+  }
+  return groups;
+}
+
+function capabilityFamilyFromShellApproval(approval: ShellApproval): string {
+  const text = `${approval.reason} ${approval.expectedEffect}`.toLowerCase();
+  if (/test|check|검증|테스트|확인/.test(text)) {
+    return "project_check";
+  }
+  if (/change|diff|status|변경/.test(text)) {
+    return "change_tracking";
+  }
+  return "runtime_execution";
+}
+
+function maxShellRisk(approvals: ShellApproval[]): RiskLevel {
+  if (approvals.some((approval) => approval.risk === "high")) {
+    return "high";
+  }
+  if (approvals.some((approval) => approval.risk === "medium")) {
+    return "medium";
+  }
+  return "low";
 }
 
 function shortId(value?: string): string {
