@@ -41,6 +41,34 @@ export type TelegramGatewayState = {
   updatedAt: string;
 };
 
+export type TelegramStateIssue = {
+  chatId: string;
+  sessionId: string;
+  kind: "missing_session";
+};
+
+export type TelegramStateInspection = {
+  chatCount: number;
+  staleSessions: TelegramStateIssue[];
+};
+
+export type TelegramStateRepairResult = {
+  checkedChats: number;
+  staleSessionsFound: number;
+  staleSessionsCleared: number;
+  repaired: boolean;
+  clearedSessionIds: string[];
+  preservedNextOffset?: number;
+  note: string;
+};
+
+export type TelegramStateResetResult = {
+  removedChats: number;
+  preservedNextOffset?: number;
+  reset: boolean;
+  note: string;
+};
+
 export type TelegramStartOptions = {
   providerId?: string;
   once?: boolean;
@@ -448,6 +476,97 @@ export async function saveTelegramGatewayState(workspaceRoot: string, state: Tel
   await writeFile(telegramStatePath(workspaceRoot), `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
+export async function inspectTelegramGatewayState(workspaceRoot: string): Promise<TelegramStateInspection> {
+  const state = await loadTelegramGatewayState(workspaceRoot);
+  const staleSessions: TelegramStateIssue[] = [];
+  for (const [chatId, chatState] of Object.entries(state.chats)) {
+    if (chatState.activeSessionId && !(await telegramSessionExists(workspaceRoot, chatState.activeSessionId))) {
+      staleSessions.push({
+        chatId,
+        sessionId: chatState.activeSessionId,
+        kind: "missing_session"
+      });
+    }
+  }
+  return {
+    chatCount: Object.keys(state.chats).length,
+    staleSessions
+  };
+}
+
+export async function repairTelegramGatewayState(
+  workspaceRoot: string,
+  options: { staleSessions?: boolean } = {}
+): Promise<TelegramStateRepairResult> {
+  if (!options.staleSessions) {
+    throw new Error("No Telegram state repair selected. Use --stale-sessions.");
+  }
+  const state = await loadTelegramGatewayState(workspaceRoot);
+  const now = new Date().toISOString();
+  const clearedSessionIds: string[] = [];
+  const nextChats: Record<string, GatewayChatState> = {};
+
+  for (const [chatId, chatState] of Object.entries(state.chats)) {
+    if (chatState.activeSessionId && !(await telegramSessionExists(workspaceRoot, chatState.activeSessionId))) {
+      clearedSessionIds.push(chatState.activeSessionId);
+      nextChats[chatId] = {
+        ...chatState,
+        activeSessionId: undefined,
+        pendingCommand: undefined,
+        updatedAt: now
+      };
+      continue;
+    }
+    nextChats[chatId] = chatState;
+  }
+
+  const repaired = clearedSessionIds.length > 0;
+  if (repaired) {
+    await saveTelegramGatewayState(workspaceRoot, {
+      ...state,
+      chats: nextChats,
+      failureCount: shouldClearFailure(state.lastFailure, clearedSessionIds) ? 0 : state.failureCount,
+      lastFailure: shouldClearFailure(state.lastFailure, clearedSessionIds) ? undefined : state.lastFailure,
+      updatedAt: now
+    });
+  }
+
+  return {
+    checkedChats: Object.keys(state.chats).length,
+    staleSessionsFound: clearedSessionIds.length,
+    staleSessionsCleared: clearedSessionIds.length,
+    repaired,
+    clearedSessionIds: [...new Set(clearedSessionIds)],
+    preservedNextOffset: state.nextOffset,
+    note: repaired
+      ? "Cleared missing active session references. Restart a running gateway for the in-memory state to refresh."
+      : "No stale Telegram active session references found."
+  };
+}
+
+export async function resetTelegramGatewayState(
+  workspaceRoot: string,
+  options: { preserveOffset?: boolean } = {}
+): Promise<TelegramStateResetResult> {
+  const state = await loadTelegramGatewayState(workspaceRoot);
+  const preserveOffset = options.preserveOffset ?? true;
+  const nextOffset = preserveOffset ? state.nextOffset : undefined;
+  await saveTelegramGatewayState(workspaceRoot, {
+    ...(nextOffset !== undefined ? { nextOffset } : {}),
+    chats: {},
+    failureCount: 0,
+    updatedAt: new Date().toISOString()
+  });
+  return {
+    removedChats: Object.keys(state.chats).length,
+    preservedNextOffset: nextOffset,
+    reset: true,
+    note: preserveOffset
+      ? "Telegram runtime chat state reset. Update offset was preserved to avoid replaying old Telegram updates."
+      : "Telegram runtime chat state reset. Update offset was cleared."
+  };
+}
+
 export async function formatGatewayStatus(workspaceRoot: string, options: { json?: boolean } = {}): Promise<string> {
   const state = await loadTelegramGatewayState(workspaceRoot);
   const lock = await readGatewayProcessLock(workspaceRoot);
@@ -493,6 +612,41 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Failure count: ${state.failureCount}`,
     state.lastFailure ? `  Last failure: ${state.lastFailure}` : undefined,
     legacyLock ? `  Legacy lock: present${legacyLockStale ? " stale" : ""}` : undefined
+  ].filter(Boolean).join("\n");
+}
+
+export function formatTelegramStateInspection(result: TelegramStateInspection): string {
+  return [
+    "Telegram gateway state",
+    `Active chats: ${result.chatCount}`,
+    `Stale active sessions: ${result.staleSessions.length}`,
+    ...result.staleSessions.map((issue) => `- chat ${issue.chatId}: missing session ${issue.sessionId}`),
+    result.staleSessions.length
+      ? "Repair: cosia gateway telegram repair --stale-sessions"
+      : undefined
+  ].filter(Boolean).join("\n");
+}
+
+export function formatTelegramStateRepair(result: TelegramStateRepairResult): string {
+  return [
+    "Telegram gateway state repair",
+    `Repaired: ${result.repaired}`,
+    `Checked chats: ${result.checkedChats}`,
+    `Stale sessions found: ${result.staleSessionsFound}`,
+    `Stale sessions cleared: ${result.staleSessionsCleared}`,
+    result.preservedNextOffset !== undefined ? `Preserved next offset: ${result.preservedNextOffset}` : undefined,
+    result.clearedSessionIds.length ? `Cleared session ids: ${result.clearedSessionIds.join(", ")}` : undefined,
+    `Note: ${result.note}`
+  ].filter(Boolean).join("\n");
+}
+
+export function formatTelegramStateReset(result: TelegramStateResetResult): string {
+  return [
+    "Telegram gateway state reset",
+    `Reset: ${result.reset}`,
+    `Removed chats: ${result.removedChats}`,
+    result.preservedNextOffset !== undefined ? `Preserved next offset: ${result.preservedNextOffset}` : undefined,
+    `Note: ${result.note}`
   ].filter(Boolean).join("\n");
 }
 
@@ -544,6 +698,20 @@ export function resolveTelegramToken(
 
 function telegramStatePath(workspaceRoot: string): string {
   return join(telegramGatewayDir(workspaceRoot), "state.json");
+}
+
+async function telegramSessionExists(workspaceRoot: string, sessionId: string): Promise<boolean> {
+  if (!/^[A-Za-z0-9_.-]+$/.test(sessionId)) {
+    return false;
+  }
+  return pathExists(join(workspaceRoot, "sessions", sessionId, "session.json"));
+}
+
+function shouldClearFailure(lastFailure: string | undefined, clearedSessionIds: string[]): boolean {
+  if (!lastFailure) {
+    return false;
+  }
+  return clearedSessionIds.some((sessionId) => lastFailure.includes(sessionId));
 }
 
 function splitTelegramInputs(text: string): string[] {

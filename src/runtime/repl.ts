@@ -11,9 +11,9 @@ import {
   isPendingExpired,
   previewMutationCommand,
   type PendingCommand
-} from "./command_catalog.js";
-import { interpretHashCommand } from "./command_interpreter.js";
-import { parseHashCommand, retrieveCommandCandidates } from "./command_intent.js";
+} from "./runtime_command_executor.js";
+import { interpretRuntimeHashCommand } from "./runtime_command_interpreter.js";
+import { parseRuntimeHashCommand, retrieveRuntimeCommandCandidates } from "./runtime_command_catalog.js";
 import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import { PolicyManager } from "./policy_manager.js";
@@ -393,7 +393,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           writeLine(output, toolGrowthHash.output);
           continue;
         }
-        let intent = parseHashCommand(prompt);
+        let intent = parseRuntimeHashCommand(prompt);
         const commandContext = {
           workspaceRoot: options.workspaceRoot,
           session,
@@ -410,14 +410,14 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           }
         };
         if (intent.type === "no_match") {
-          const candidates = retrieveCommandCandidates(prompt, 8, options.workspaceRoot);
+          const candidates = retrieveRuntimeCommandCandidates(prompt, 8, options.workspaceRoot);
           if (candidates.length === 0) {
             writeLine(output, "[BLOCKED] Natural command not recognized.");
             writeLine(output, "Try #상태 보여줘, #show status, #리뷰 보여줘, or type /help.");
             continue;
           }
           try {
-            intent = await interpretHashCommand({
+            intent = await interpretRuntimeHashCommand({
               input: prompt,
               candidates,
               workspaceRoot: options.workspaceRoot,

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { commandDefinitions } from "./command_intent.js";
+import { runtimeCommandDefinitions } from "./runtime_command_catalog.js";
 
 export type CommandTriggerIssue = {
   severity: "warning" | "info";
@@ -128,7 +128,7 @@ function builtInTriggerPack(locale: string): TriggerPack {
   if (locale !== "ko") {
     return {};
   }
-  return Object.fromEntries(commandDefinitions.map((definition) => [definition.commandId, definition.triggers.ko]));
+  return Object.fromEntries(runtimeCommandDefinitions.map((definition) => [definition.commandId, definition.triggers.ko]));
 }
 
 function readOverridePack(path: string): TriggerPack {

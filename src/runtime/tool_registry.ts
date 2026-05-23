@@ -34,7 +34,7 @@ const shellRequestArgs = z.object({
   command: z.string().min(1),
   cwd: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional()),
   reason: z.string().min(1),
-  expectedEffect: z.string().min(1).optional()
+  expectedEffect: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional())
 });
 
 const toolOutputMaxChars = 12000;
@@ -162,8 +162,14 @@ export class ToolRegistry {
         });
         const parsed = writeFileArgs.parse(args);
         const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
-        const approved = ctx.approveOverwrite ? await ctx.approveOverwrite(resolved) : false;
+        const approvalRequest = {
+          path: parsed.path,
+          resolvedPath: resolved,
+          content: parsed.content
+        };
+        const approved = ctx.approveOverwrite ? await ctx.approveOverwrite(resolved, approvalRequest) : false;
         if (!approved) {
+          await ctx.onOverwriteApprovalRequired?.(approvalRequest);
           return { ok: false, content: `Overwrite denied: ${parsed.path}` };
         }
       }

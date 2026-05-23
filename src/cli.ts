@@ -12,7 +12,7 @@ import { initProject } from "./runtime/init_project.js";
 import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, getDoctorReport, previewReset, repairDoctor, type ResetMode } from "./runtime/doctor.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "./runtime/memory_manager.js";
 import { formatMvpChecklist } from "./runtime/mvp_checklist.js";
-import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "./runtime/command_triggers.js";
+import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "./runtime/runtime_command_triggers.js";
 import {
   CapabilityPlanner,
   capabilityScanJson,
@@ -46,7 +46,19 @@ import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResul
 import { formatStatusReport, getStatusReport } from "./runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "./runtime/start_flow.js";
 import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult, restartGateway, startGateway, stopGateway, unlockStaleGateway } from "./runtime/gateway_supervisor.js";
-import { checkTelegramGateway, formatTelegramCheck, resolveTelegramToken, startTelegramGateway, unlockStaleTelegramGateway } from "./runtime/telegram_gateway.js";
+import {
+  checkTelegramGateway,
+  formatTelegramCheck,
+  formatTelegramStateInspection,
+  formatTelegramStateRepair,
+  formatTelegramStateReset,
+  inspectTelegramGatewayState,
+  repairTelegramGatewayState,
+  resetTelegramGatewayState,
+  resolveTelegramToken,
+  startTelegramGateway,
+  unlockStaleTelegramGateway
+} from "./runtime/telegram_gateway.js";
 import {
   addTelegramChatId,
   enableTelegramConnector,
@@ -427,6 +439,49 @@ telegram
   .action(async () => {
     await main(async (workspaceRoot) => {
       console.log(formatTelegramCheck(await checkTelegramGateway(workspaceRoot)));
+    });
+  });
+
+telegram
+  .command("state")
+  .description("Inspect Telegram gateway runtime state without printing secrets.")
+  .action(async () => {
+    await main(async (workspaceRoot) => {
+      console.log(formatTelegramStateInspection(await inspectTelegramGatewayState(workspaceRoot)));
+    });
+  });
+
+telegram
+  .command("repair")
+  .option("--stale-sessions", "Clear active chat sessions that no longer exist.", false)
+  .description("Repair Telegram gateway runtime state without changing connector settings.")
+  .action(async (options: { staleSessions: boolean }) => {
+    await main(async (workspaceRoot) => {
+      console.log(formatTelegramStateRepair(await repairTelegramGatewayState(workspaceRoot, {
+        staleSessions: options.staleSessions
+      })));
+    });
+  });
+
+telegram
+  .command("reset-state")
+  .option("--yes", "Apply the reset. Without this, only show the safe command.", false)
+  .option("--no-preserve-offset", "Also clear the Telegram update offset.", true)
+  .description("Reset Telegram runtime chat state while keeping token/chat-id connector settings.")
+  .action(async (options: { yes: boolean; preserveOffset: boolean }) => {
+    await main(async (workspaceRoot) => {
+      if (!options.yes) {
+        console.log([
+          "Telegram gateway state reset preview",
+          "No changes were made.",
+          "Apply:",
+          "  cosia gateway telegram reset-state --yes"
+        ].join("\n"));
+        return;
+      }
+      console.log(formatTelegramStateReset(await resetTelegramGatewayState(workspaceRoot, {
+        preserveOffset: options.preserveOffset
+      })));
     });
   });
 

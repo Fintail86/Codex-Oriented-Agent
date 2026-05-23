@@ -25,8 +25,8 @@ import { chunkTelegramMessage } from "../src/runtime/gateway_format.js";
 import { gatewayProcessLockPath, sessionLockPath, withSessionLock } from "../src/runtime/gateway_locks.js";
 import { formatGatewayStatus, gatewayStopRequestPath, restartGateway, startGateway, stopGateway, unlockStaleGateway, writeGatewayStopRequest } from "../src/runtime/gateway_supervisor.js";
 import { pathExists } from "../src/runtime/fs_utils.js";
-import { interpretHashCommand, validateInterpreterResult } from "../src/runtime/command_interpreter.js";
-import { parseHashCommand, retrieveCommandCandidates } from "../src/runtime/command_intent.js";
+import { interpretRuntimeHashCommand, validateRuntimeCommandInterpreterResult } from "../src/runtime/runtime_command_interpreter.js";
+import { parseRuntimeHashCommand, retrieveRuntimeCommandCandidates } from "../src/runtime/runtime_command_catalog.js";
 import { formatChatHelp, runChatRepl } from "../src/runtime/repl.js";
 import { formatReviewInbox, ReviewInboxService } from "../src/runtime/review_inbox.js";
 import { runSession } from "../src/runtime/runner.js";
@@ -37,7 +37,17 @@ import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_m
 import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { codexTemplates } from "../src/runtime/templates.js";
-import { checkTelegramGateway, formatTelegramCheck, loadTelegramGatewayState, processTelegramUpdate, saveTelegramGatewayState, startTelegramGateway } from "../src/runtime/telegram_gateway.js";
+import {
+  checkTelegramGateway,
+  formatTelegramCheck,
+  inspectTelegramGatewayState,
+  loadTelegramGatewayState,
+  processTelegramUpdate,
+  repairTelegramGatewayState,
+  resetTelegramGatewayState,
+  saveTelegramGatewayState,
+  startTelegramGateway
+} from "../src/runtime/telegram_gateway.js";
 import { addProviderProfile, listProviderProfileSummaries, useProviderProfile } from "../src/runtime/provider_profiles.js";
 import { addTelegramChatId, enableTelegramConnector, setTelegramToken } from "../src/runtime/telegram_connector_config.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
@@ -213,6 +223,8 @@ describe("runtime setup", () => {
     expect(prompt).toContain("Available tools for this run:");
     expect(prompt).toContain("shell_request");
     expect(prompt).toContain("shell_request does not execute commands");
+    expect(prompt).toContain("Static prompt blocks such as AGENT STYLE");
+    expect(prompt).toContain("prompt-loaded context snapshots");
 
     const policy = await new PolicyManager(root).loadPolicy();
     policy.disabledPermissions = [...policy.disabledPermissions, "shell_request"];
@@ -2860,6 +2872,18 @@ describe("model parsing and run loop", () => {
     });
     const readable = await sessions.listPromptManifests(session.id, 1);
     expect(readable[0]).toMatchObject({ sessionId: session.id, modelStep: 1 });
+    const debugDir = join(root, "sessions", session.id, "debug");
+    const debugMetadata = JSON.parse(await readFile(join(debugDir, "LAST_TURN.json"), "utf8")) as Record<string, unknown>;
+    expect(debugMetadata).toMatchObject({
+      sessionId: session.id,
+      modelStep: 1
+    });
+    expect(debugMetadata.promptChars).toBeGreaterThan(0);
+    const lastUserMessage = await readFile(join(debugDir, "LAST_USER_MESSAGE.md"), "utf8");
+    const lastPrompt = await readFile(join(debugDir, "LAST_PROMPT.md"), "utf8");
+    expect(lastUserMessage).toContain("Summarize the goal");
+    expect(lastPrompt).toContain("CURRENT USER REQUEST");
+    expect(lastPrompt).toContain("Summarize the goal");
   });
 
   it("records run lineage when execution agent overrides session assignment", async () => {
@@ -3142,6 +3166,40 @@ describe("model parsing and run loop", () => {
     expect(calls).toBe(4);
     const context = await readFile(join(root, "sessions", session.id, "CONTEXT_MEMORY.md"), "utf8");
     expect(context).toContain("search_files, read_file");
+    const audit = await new PolicyAuditLog(root).list(session.id, 10);
+    expect(audit.some((event) => event.eventType === "final_rejection" && event.ruleId === "runtime.file_inspection.read_file_required")).toBe(true);
+  });
+
+  it("requires read_file for explicit file inspection even outside require-tools mode", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Inspect style source");
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async (input) => {
+        calls += 1;
+        if (calls === 1) {
+          return parseModelOutput('{"type":"final","content":"style file checked without tool","memoryCandidates":[]}');
+        }
+        if (input.prompt.includes("Call read_file on a relevant path") && !input.prompt.includes("Tool: read_file")) {
+          return parseModelOutput('{"type":"tool_call","tool":"read_file","args":{"path":"agents/architect-agent/STYLE.md"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"style after read_file","memoryCandidates":[]}');
+      }
+    };
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "스타일 파일을 확인하고 현재 스타일을 알려줘.",
+      provider
+    });
+
+    expect(content).toBe("style after read_file");
+    expect(calls).toBe(3);
     const audit = await new PolicyAuditLog(root).list(session.id, 10);
     expect(audit.some((event) => event.eventType === "final_rejection" && event.ruleId === "runtime.file_inspection.read_file_required")).toBe(true);
   });
@@ -3550,54 +3608,54 @@ describe("status and listing", () => {
   });
 
   it("parses hash natural command arguments deterministically", () => {
-    expect(parseHashCommand("#show status")).toMatchObject({
+    expect(parseRuntimeHashCommand("#show status")).toMatchObject({
       type: "matched",
       commandId: "status.show"
     });
-    expect(parseHashCommand("#show review")).toMatchObject({
+    expect(parseRuntimeHashCommand("#show review")).toMatchObject({
       type: "matched",
       commandId: "review.list"
     });
-    expect(parseHashCommand("#리뷰 3번 디스카드해 이유는 중복")).toMatchObject({
+    expect(parseRuntimeHashCommand("#리뷰 3번 디스카드해 이유는 중복")).toMatchObject({
       type: "matched",
       commandId: "review.discard",
       args: { target: "3", reason: "중복" }
     });
-    expect(parseHashCommand("#리뷰 b5038e0e 디스카드해 이유는 중복")).toMatchObject({
+    expect(parseRuntimeHashCommand("#리뷰 b5038e0e 디스카드해 이유는 중복")).toMatchObject({
       type: "matched",
       commandId: "review.discard",
       args: { target: "b5038e0e", reason: "중복" }
     });
-    expect(parseHashCommand("#메모리 검색 required provider")).toMatchObject({
+    expect(parseRuntimeHashCommand("#메모리 검색 required provider")).toMatchObject({
       type: "matched",
       commandId: "memory.search",
       args: { query: "required provider" }
     });
-    expect(parseHashCommand("#memory search required provider")).toMatchObject({
+    expect(parseRuntimeHashCommand("#memory search required provider")).toMatchObject({
       type: "matched",
       commandId: "memory.search",
       args: { query: "required provider" }
     });
-    expect(parseHashCommand("#컨플릭트 메모리 전부 디스카드해")).toMatchObject({
+    expect(parseRuntimeHashCommand("#컨플릭트 메모리 전부 디스카드해")).toMatchObject({
       type: "needs_input",
       commandId: "review.discard_conflicts"
     });
-    expect(parseHashCommand("#컨플릭트 메모리 전부 디스카드해 사유는 테스트 중복")).toMatchObject({
+    expect(parseRuntimeHashCommand("#컨플릭트 메모리 전부 디스카드해 사유는 테스트 중복")).toMatchObject({
       type: "matched",
       commandId: "review.discard_conflicts",
       args: { reason: "테스트 중복" }
     });
-    expect(parseHashCommand("#리뷰 3번 디스카드해 사유는 중복")).toMatchObject({
+    expect(parseRuntimeHashCommand("#리뷰 3번 디스카드해 사유는 중복")).toMatchObject({
       type: "matched",
       commandId: "review.discard",
       args: { target: "3", reason: "중복" }
     });
-    expect(parseHashCommand("#discard all conflicting memories because duplicate")).toMatchObject({
+    expect(parseRuntimeHashCommand("#discard all conflicting memories because duplicate")).toMatchObject({
       type: "matched",
       commandId: "review.discard_conflicts",
       args: { reason: "duplicate" }
     });
-    expect(parseHashCommand("#메모리 정리")).toMatchObject({
+    expect(parseRuntimeHashCommand("#메모리 정리")).toMatchObject({
       type: "ambiguous"
     });
   });
@@ -3605,11 +3663,11 @@ describe("status and listing", () => {
   it("retrieves command candidates and validates LLM command interpreter output", async () => {
     const root = await initializedWorkspace();
     const policy = await new PolicyManager(root).loadPolicy();
-    const candidates = retrieveCommandCandidates("#please discard duplicate conflicting memories because duplicate");
+    const candidates = retrieveRuntimeCommandCandidates("#please discard duplicate conflicting memories because duplicate");
     expect(candidates.map((candidate) => candidate.commandId)).toContain("review.discard_conflicts");
 
     let capturedPrompt = "";
-    const interpreted = await interpretHashCommand({
+    const interpreted = await interpretRuntimeHashCommand({
       input: "#please discard duplicate conflicting memories because duplicate",
       candidates,
       workspaceRoot: root,
@@ -3637,7 +3695,7 @@ describe("status and listing", () => {
     expect(capturedPrompt).toContain("review.discard_conflicts");
     expect(capturedPrompt).not.toContain("doctor.reset");
 
-    expect(validateInterpreterResult(JSON.stringify({
+    expect(validateRuntimeCommandInterpreterResult(JSON.stringify({
       type: "matched",
       commandId: "doctor.reset",
       confidence: "high",
@@ -3655,17 +3713,18 @@ describe("status and listing", () => {
       "review.list": ["상태"]
     }), "utf8");
 
-    expect(retrieveCommandCandidates("#상태 커스텀", 8, root)[0].commandId).toBe("status.show");
-    expect(retrieveCommandCandidates("#상태", 8, root)[0].commandId).toBe("review.list");
+    expect(retrieveRuntimeCommandCandidates("#상태 커스텀", 8, root)[0].commandId).toBe("status.show");
+    expect(retrieveRuntimeCommandCandidates("#상태", 8, root)[0].commandId).toBe("review.list");
+    expect(retrieveRuntimeCommandCandidates("게이트웨이 살아 있어?", 8, root)[0].commandId).toBe("gateway.status");
   });
 
   it("retries malformed command interpreter JSON once", async () => {
     const root = await initializedWorkspace();
     const policy = await new PolicyManager(root).loadPolicy();
-    const candidates = retrieveCommandCandidates("#please show current workspace status");
+    const candidates = retrieveRuntimeCommandCandidates("#please show current workspace status");
     let attempts = 0;
     let retryPrompt = "";
-    const interpreted = await interpretHashCommand({
+    const interpreted = await interpretRuntimeHashCommand({
       input: "#please show current workspace status",
       candidates,
       workspaceRoot: root,
@@ -3962,6 +4021,256 @@ describe("status and listing", () => {
     const chunks = chunkTelegramMessage(`one\n\n${"x".repeat(80)}\n${"y".repeat(80)}`, 90);
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks[1]).toContain("[continued 2/");
+  });
+
+  it("clears missing active Telegram sessions and guides the user to create or select a session", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    const state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: "session_missing"
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        text: "hello"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(state.chats["123"]?.activeSessionId).toBeUndefined();
+    expect(sent.at(-1)?.text).toContain("no longer exists");
+    expect(sent.at(-1)?.text).toContain("/new <goal>");
+  });
+
+  it("guides plain gateway status questions to explicit gateway commands", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    const state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {},
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        text: "지금 게이트웨이 살아 있어?"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("명령으로 확인");
+    expect(sent.at(-1)?.text).toContain("#게이트웨이 상태 보여줘");
+    expect(sent.at(-1)?.text).not.toContain("No active session");
+    expect(state.chats["123"]?.activeSessionId).toBeUndefined();
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        text: "리뷰 보여줘"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("런타임 명령");
+    expect(sent.at(-1)?.text).toContain("#리뷰 보여줘");
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        text: "#게이트웨이 상태 보여줘"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("COSIA Gateway Status");
+    expect(sent.at(-1)?.text).toContain("Gateway:");
+    expect(sent.at(-1)?.text).toContain("Connectors");
+    expect(sent.at(-1)?.text).not.toContain("Workspace");
+  });
+
+  it("turns Telegram write_file overwrite denials into explicit pending apply previews", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Style update approval");
+    const stylePath = join(root, "agents", "cosia-agent", "STYLE.md");
+    const originalStyle = await readFile(stylePath, "utf8");
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowMutations: true,
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        text: "[MOCK_WRITE_ONLY:agents/cosia-agent/STYLE.md]"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("[PREVIEW] File overwrite requires approval.");
+    expect(sent.at(-1)?.text).toContain("#적용");
+    expect(state.chats["123"]?.pendingCommand?.commandId).toBe("write_file.overwrite");
+    expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        text: "승인할게 변경해"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("대화 문장만으로는 파일 변경을 적용하지 않습니다");
+    expect(sent.at(-1)?.text).toContain("#적용");
+    expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        text: "#적용"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("[SUCCESS] File overwrite applied.");
+    expect(state.chats["123"]?.pendingCommand).toBeUndefined();
+    expect(await readFile(stylePath, "utf8")).toBe("mock write");
+  });
+
+  it("repairs and resets stale Telegram gateway state without connector settings", async () => {
+    const root = await initializedWorkspace();
+    await saveTelegramGatewayState(root, {
+      nextOffset: 20,
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: "session_missing",
+          pendingCommand: {
+            id: "pending_1",
+            commandId: "pending.show",
+            args: {},
+            safety: "read_only",
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 300000).toISOString(),
+            createdAtMs: Date.now(),
+            expiresAtMs: Date.now() + 300000,
+            preview: "preview"
+          }
+        }
+      },
+      failureCount: 1,
+      lastFailure: "open sessions/session_missing/session.json",
+      updatedAt: new Date().toISOString()
+    });
+
+    expect((await inspectTelegramGatewayState(root)).staleSessions).toHaveLength(1);
+    const repair = await repairTelegramGatewayState(root, { staleSessions: true });
+    expect(repair).toMatchObject({
+      repaired: true,
+      staleSessionsCleared: 1,
+      preservedNextOffset: 20
+    });
+    const repaired = await loadTelegramGatewayState(root);
+    expect(repaired.chats["123"]?.activeSessionId).toBeUndefined();
+    expect(repaired.chats["123"]?.pendingCommand).toBeUndefined();
+    expect(repaired.failureCount).toBe(0);
+    expect(repaired.lastFailure).toBeUndefined();
+
+    const reset = await resetTelegramGatewayState(root);
+    expect(reset).toMatchObject({
+      removedChats: 1,
+      preservedNextOffset: 20
+    });
+    const resetState = await loadTelegramGatewayState(root);
+    expect(resetState.chats).toEqual({});
+    expect(resetState.nextOffset).toBe(20);
   });
 
   it("runs Telegram long polling once, uses stored offset, and persists next offset", async () => {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { commandDefinitionById, type CommandDefinition, type CommandIntentResult, usageHint, validateCommandArgs } from "./command_intent.js";
+import { runtimeCommandDefinitionById, type RuntimeCommandDefinition, type RuntimeCommandResult, runtimeCommandUsageHint, validateRuntimeCommandArgs } from "./runtime_command_catalog.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import { createProvider } from "./model/provider_registry.js";
 import { extractJsonObject } from "./model/model_provider.js";
@@ -30,9 +30,9 @@ const interpretedCommandSchema = z.discriminatedUnion("type", [
   })
 ]);
 
-export type CommandInterpreterOptions = {
+export type RuntimeCommandInterpreterOptions = {
   input: string;
-  candidates: CommandDefinition[];
+  candidates: RuntimeCommandDefinition[];
   workspaceRoot: string;
   providerId: string;
   policy: PolicyConfig;
@@ -41,12 +41,12 @@ export type CommandInterpreterOptions = {
   completePrompt?: (prompt: string) => Promise<string>;
 };
 
-export async function interpretHashCommand(options: CommandInterpreterOptions): Promise<CommandIntentResult> {
+export async function interpretRuntimeHashCommand(options: RuntimeCommandInterpreterOptions): Promise<RuntimeCommandResult> {
   if (options.candidates.length === 0) {
     return { type: "no_match" };
   }
 
-  const basePrompt = buildCommandInterpreterPrompt(options.input, options.candidates);
+  const basePrompt = buildRuntimeCommandInterpreterPrompt(options.input, options.candidates);
   let lastRaw = "";
   let lastError: unknown;
   for (let attempt = 0; attempt <= interpreterRetryCount; attempt += 1) {
@@ -54,11 +54,11 @@ export async function interpretHashCommand(options: CommandInterpreterOptions): 
       ? basePrompt
       : `${basePrompt}
 
-${commandInterpreterRetryInstruction(lastError, lastRaw)}
+${runtimeCommandInterpreterRetryInstruction(lastError, lastRaw)}
 `;
     lastRaw = await completeInterpreterPrompt(prompt, options);
     try {
-      return validateInterpreterResult(lastRaw, options.candidates);
+      return validateRuntimeCommandInterpreterResult(lastRaw, options.candidates);
     } catch (error) {
       lastError = error;
       if (attempt >= interpreterRetryCount) {
@@ -73,14 +73,15 @@ ${commandInterpreterRetryInstruction(lastError, lastRaw)}
   return { type: "no_match" };
 }
 
-export function buildCommandInterpreterPrompt(input: string, candidates: CommandDefinition[]): string {
+export function buildRuntimeCommandInterpreterPrompt(input: string, candidates: RuntimeCommandDefinition[]): string {
   return [
-    "You are COSIA's hash command interpreter.",
+    "You are COSIA's constrained runtime command translator.",
     "",
     "Task:",
     "- Translate the user's hash-prefixed natural command into one runtime command result.",
     "- You do not execute anything.",
     "- You must choose only from the provided command candidates.",
+    "- You must not invent command ids, CLI commands, shell commands, tool calls, activation actions, or policy changes.",
     "- If the request is unclear, return ambiguous or no_match.",
     "",
     "Strict formatting:",
@@ -118,13 +119,13 @@ export function buildCommandInterpreterPrompt(input: string, candidates: Command
   ].join("\n");
 }
 
-export function validateInterpreterResult(raw: string, candidates: CommandDefinition[]): CommandIntentResult {
+export function validateRuntimeCommandInterpreterResult(raw: string, candidates: RuntimeCommandDefinition[]): RuntimeCommandResult {
   const parsed = interpretedCommandSchema.parse(JSON.parse(extractJsonObject(raw)));
   if (parsed.type !== "matched") {
     return parsed;
   }
 
-  const known = commandDefinitionById(parsed.commandId);
+  const known = runtimeCommandDefinitionById(parsed.commandId);
   if (!known) {
     return {
       type: "ambiguous",
@@ -142,7 +143,7 @@ export function validateInterpreterResult(raw: string, candidates: CommandDefini
     };
   }
 
-  const invalid = validateCommandArgs(parsed.commandId, parsed.args);
+  const invalid = validateRuntimeCommandArgs(parsed.commandId, parsed.args);
   if (invalid) {
     return invalid;
   }
@@ -150,7 +151,7 @@ export function validateInterpreterResult(raw: string, candidates: CommandDefini
   return parsed;
 }
 
-export function commandInterpreterRetryInstruction(error: unknown, malformedOutput = ""): string {
+export function runtimeCommandInterpreterRetryInstruction(error: unknown, malformedOutput = ""): string {
   return `You returned invalid JSON. Fix the error below and return ONLY raw command interpreter JSON.
 
 Parse error:
@@ -162,7 +163,7 @@ ${previewText(malformedOutput, 600)}
 Return ONLY one JSON object matching the command interpreter result schema.`;
 }
 
-async function completeInterpreterPrompt(prompt: string, options: CommandInterpreterOptions): Promise<string> {
+async function completeInterpreterPrompt(prompt: string, options: RuntimeCommandInterpreterOptions): Promise<string> {
   if (options.completePrompt) {
     return options.completePrompt(prompt);
   }
@@ -182,7 +183,7 @@ async function completeInterpreterPrompt(prompt: string, options: CommandInterpr
   return output.step.content;
 }
 
-function commandCandidateForPrompt(candidate: CommandDefinition): Record<string, unknown> {
+function commandCandidateForPrompt(candidate: RuntimeCommandDefinition): Record<string, unknown> {
   return {
     commandId: candidate.commandId,
     safety: candidate.safety,

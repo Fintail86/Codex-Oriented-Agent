@@ -28,6 +28,16 @@ export type ContextStatus = ContextHealth & {
   compactRecommended: boolean;
 };
 
+export type LastTurnDebugInput = {
+  userMessage: string;
+  prompt: string;
+  runId: string;
+  modelStep: number;
+  promptChars: number;
+  estimatedTokens: number;
+  timestamp?: string;
+};
+
 export class SessionManager {
   constructor(private readonly workspaceRoot: string) {}
 
@@ -186,6 +196,22 @@ export class SessionManager {
     const path = join(this.sessionDir(sessionId), "CONTEXT_MEMORY.md");
     const current = (await pathExists(path)) ? await readText(path) : "# CONTEXT MEMORY\n\n";
     await writeText(path, `${current.trimEnd()}\n\n${content.trim()}\n`);
+  }
+
+  async writeLastTurnDebug(sessionId: string, input: LastTurnDebugInput): Promise<void> {
+    const timestamp = input.timestamp ?? new Date().toISOString();
+    const metadata = {
+      sessionId,
+      runId: input.runId,
+      modelStep: input.modelStep,
+      timestamp,
+      promptChars: input.promptChars,
+      estimatedTokens: input.estimatedTokens
+    };
+    const debugDir = join(this.sessionDir(sessionId), "debug");
+    await writeText(join(debugDir, "LAST_TURN.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+    await writeText(join(debugDir, "LAST_USER_MESSAGE.md"), renderDebugText("LAST USER MESSAGE", input.userMessage, metadata));
+    await writeText(join(debugDir, "LAST_PROMPT.md"), renderDebugText("LAST PROMPT", input.prompt, metadata));
   }
 
   async listPromptManifests(sessionId: string, limit = 1): Promise<PromptManifest[]> {
@@ -401,6 +427,25 @@ export function isPlaceholderSessionSummary(content: string): boolean {
     .replace(/^# SESSION SUMMARY\s*/i, "")
     .trim();
   return normalized.length === 0 || normalized === "No compact session summary yet.";
+}
+
+function renderDebugText(title: string, content: string, metadata: Record<string, unknown>): string {
+  return [
+    `# ${title}`,
+    "",
+    "> This debug file is overwritten on each model step for this session.",
+    "",
+    "## Metadata",
+    "",
+    "```json",
+    JSON.stringify(metadata, null, 2),
+    "```",
+    "",
+    "## Content",
+    "",
+    content.trimEnd(),
+    ""
+  ].join("\n");
 }
 
 function renderContextMemory(preamble: string, runs: string[]): string {

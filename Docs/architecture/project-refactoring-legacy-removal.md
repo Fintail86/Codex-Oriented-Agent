@@ -44,14 +44,24 @@ The goal is to make future cleanup work explicit: what should be refactored, wha
    - Do not remove memory legacy compatibility during command extraction.
 4. Split `tests/runtime.test.ts` into feature-focused files.
    - Start with provider/config and gateway/Telegram tests because their CLI boundaries are actively changing.
-5. Clean documentation drift.
+5. Finish constrained runtime command boundary cleanup.
+   - Keep runtime command catalog/parser/interpreter/executor names distinct from abandoned open-ended intent execution.
+   - Keep the LLM interpreter constrained to supplied command candidates only.
+   - Continue moving gateway/REPL command execution duplication behind shared runtime command executor helpers.
+6. Add a COSIA-owned OAuth provider auth boundary.
+   - Keep current external CLI delegation working.
+   - Plan browser/device OAuth flow, token storage, refresh, and secret redaction as provider-auth infrastructure.
+7. Add provider onboarding flows.
+   - Show selectable provider options during initial provider setup.
+   - Move provider-specific auth/setup steps behind provider onboarding handlers instead of scattered flags.
+8. Clean documentation drift.
    - Archive or add the v0.39 plan.
    - Update stale provider/default provider guidance.
    - Mark historical plan sections as superseded where needed.
-6. Split large runtime domains.
+9. Split large runtime domains.
    - Start with capability/tool acquisition only after CLI and tests are easier to review.
    - Treat memory manager split as a separate high-risk refactor.
-7. Remove legacy compatibility paths one group at a time.
+10. Remove legacy compatibility paths one group at a time.
    - Only after repair/warning behavior and tests are in place.
 
 ## Item Format
@@ -148,6 +158,86 @@ Do not:
 - Do not use example profile names that imply a private/default profile.
 - Do not let Telegram or another connector own model provider selection.
 
+### COSIA-Owned OAuth Provider Auth Boundary
+
+Type: refactor
+Priority: P1
+Risk: high
+
+Current state:
+- OAuth provider profiles can exist, but the current Codex OAuth path delegates login/status to an external CLI.
+- Provider profile auth shape has an OAuth mode, but COSIA does not yet own a browser/device authorization flow, callback handling, token refresh, or private token lifecycle.
+- This makes Codex OAuth work only when the expected external CLI is installed and already authenticated.
+
+Goal:
+- Introduce a provider-auth boundary that can support COSIA-owned OAuth flows without hardcoded provider defaults.
+- Allow a future command such as `cosia provider profile add <name> --provider <provider-id> --oauth` to start the required browser/device flow directly when that provider supports it.
+- Store OAuth tokens only in private secret storage, with refresh/expiry metadata separated from public runtime config.
+- Keep OAuth secrets out of CLI output, check/status output, audit, evidence, docs, and tracked files.
+
+Removal/refactor steps:
+- Split provider auth handling from provider profile CRUD and provider runtime creation.
+- Define provider-specific OAuth capability descriptors, including supported flow type, scopes, token endpoint/callback behavior, and check/refresh behavior.
+- Add a private OAuth token store under the existing private secret boundary.
+- Add browser/device-flow orchestration with explicit user action and clear timeout/cancel behavior.
+- Keep external CLI OAuth delegation as a compatibility provider-auth implementation until the COSIA-owned flow is implemented and verified.
+- Add migration guidance that explains when a profile uses external CLI delegation versus COSIA-owned OAuth storage.
+
+Verification:
+- Fresh init still has no active provider profile.
+- OAuth setup never writes tokens to tracked config.
+- Provider profile list/show/check never prints access tokens, refresh tokens, auth codes, or callback URLs containing secrets.
+- Missing OAuth support fails with provider-specific setup guidance rather than falling back to a default provider.
+- Token refresh failures produce clear recovery commands without exposing secret values.
+- Existing external CLI OAuth path continues to work until a deliberate legacy removal item replaces it.
+
+Do not:
+- Do not store OAuth tokens in `config/runtime.private.json` or tracked factory defaults.
+- Do not make Codex OAuth a hardcoded default again.
+- Do not mix Telegram connector configuration with provider OAuth state.
+- Do not implement provider-specific OAuth endpoints from memory; verify against official provider documentation before implementation.
+
+### Provider Onboarding Flow And Integration Handlers
+
+Type: refactor
+Priority: P1
+Risk: high
+
+Current state:
+- Provider profile setup is mostly flag-driven.
+- Users must already know provider ids, auth modes, model requirements, and which follow-up setup command to run.
+- Telegram connector setup has a clearer `enable/set/check` style flow, but provider setup does not yet have an equivalent guided onboarding path.
+- Codex OAuth currently depends on external CLI delegation rather than a COSIA-owned onboarding flow.
+
+Goal:
+- Add a guided provider setup path that first lists supported provider choices and then runs the selected provider's required integration steps.
+- Keep provider selection owned by COSIA runtime config, not Gateway or any connector.
+- Treat each provider as having an onboarding handler that can declare required auth mode, required fields, validation checks, setup hints, and secret handling.
+- Integrate the future COSIA-owned Codex OAuth/browser flow into this onboarding layer rather than special-casing it in generic CLI parsing.
+
+Removal/refactor steps:
+- Define a provider onboarding registry separate from Telegram/gateway connector configuration.
+- Add a setup flow that can show available provider choices without implying a default provider.
+- Keep existing direct commands such as `provider profile add <name> --provider ...` as scriptable paths, but route validation and secret handling through the same provider onboarding handlers.
+- Add provider-specific setup handlers for Codex OAuth, API-key providers, env-var providers, and OpenAI-compatible base URL providers.
+- Ensure provider setup can prompt for required fields with hidden input for secrets.
+- Add provider-specific `check` behavior that uses the same resolver as runtime provider creation.
+- Document which provider setup flows are first-class and which are compatibility-only.
+
+Verification:
+- Fresh init still creates no active provider.
+- Provider setup lists available provider options but does not auto-select one.
+- Scriptable `provider profile add` and guided setup produce equivalent `ProviderProfile` records.
+- Provider-specific checks never print OAuth tokens, API keys, auth codes, refresh tokens, or secret-bearing callback URLs.
+- Codex OAuth setup is represented as a provider onboarding flow rather than a hardcoded default provider.
+- Gateway start uses the selected active provider profile and does not own provider selection.
+
+Do not:
+- Do not make provider onboarding behave like Telegram connector configuration; providers and connectors remain separate domains.
+- Do not reintroduce `codex-cli` or any other provider as the default choice.
+- Do not store provider secrets in public runtime config.
+- Do not hide scriptable CLI paths behind an interactive-only wizard.
+
 ### Stale Documentation Detection
 
 Type: docs-fix
@@ -237,6 +327,40 @@ Verification:
 Do not:
 - Do not remove aliases in the same commit as CLI modularization.
 - Do not leave users with a generic unknown option error when a migration hint is available.
+
+### Constrained Runtime Command Boundary
+
+Type: refactor
+Priority: P1
+Risk: medium
+
+Current state:
+- Runtime hash commands are now named around `runtime_command_*` modules rather than open-ended command intent.
+- The runtime command interpreter is intended to be a constrained translator: it can only select from supplied runtime command candidates.
+- Gateway and REPL still contain some routing-specific command execution branches, especially for session-free commands and pending-command UX.
+
+Goal:
+- Keep explicit `#` and slash command handling separate from ordinary session conversation.
+- Make `RuntimeCommandCatalog`, deterministic parsing, constrained LLM translation, and runtime command execution clear boundaries.
+- Prevent regression toward arbitrary natural-language command execution, CLI command invention, shell command invention, or active tool activation.
+
+Removal/refactor steps:
+- Keep `runtime_command_catalog.ts` as the catalog/parser boundary for registered runtime commands.
+- Keep `runtime_command_interpreter.ts` constrained to supplied candidates only.
+- Move duplicate gateway/REPL read-only command execution paths behind shared `runtime_command_executor.ts` helpers where practical.
+- Keep plain-text runtime command hints as guidance only; they must not execute commands without `#`, `/`, or CLI syntax.
+- Rename or document any remaining helper names that still imply deprecated open-ended intent routing.
+
+Verification:
+- `#게이트웨이 상태 보여줘` returns gateway status, while `#상태 보여줘` returns general COSIA status.
+- Plain `게이트웨이 살아 있어?` guides the user to an explicit runtime command and does not execute.
+- Interpreter output selecting an unknown command id or a command outside the candidate shortlist is rejected.
+- Existing REPL and Telegram command tests pass.
+
+Do not:
+- Do not let the interpreter invent new command ids.
+- Do not translate ordinary plain text into runtime command execution.
+- Do not route shell, activation, config mutation, or write operations without preview/approval gates.
 
 ### Test Suite Split
 

@@ -13,7 +13,7 @@ import { SelfImprovementGovernor } from "./self_improvement.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
-import type { AgentStep, ModelProvider, ToolName } from "./types.js";
+import type { AgentStep, ModelProvider, OverwriteApprovalRequest, ToolName } from "./types.js";
 import type { MemoryReviewSummary } from "./memory_manager.js";
 
 type RunOptions = {
@@ -29,6 +29,8 @@ type RunOptions = {
   refreshReferenceMemoryAfterRun?: boolean;
   onEvent?: (message: string) => void;
   onMemoryReview?: (summary: MemoryReviewSummary) => void;
+  onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
+  stopAfterOverwriteApprovalRequired?: boolean;
   manualSkillIds?: string[];
   agentId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
@@ -86,6 +88,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   const toolNames: ToolName[] = [];
   let finalContent = "";
   let lastStep: AgentStep | undefined;
+  let overwriteApprovalRequired = false;
   const maxToolCalls = 5;
   const maxModelAttempts = maxToolCalls + 2;
   let toolCallCount = 0;
@@ -114,6 +117,15 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     });
     await appendPromptManifest(workspaceRoot, session.id, promptResult.manifest);
     const prompt = promptResult.prompt;
+    await sessions.writeLastTurnDebug(session.id, {
+      userMessage: options.prompt,
+      prompt,
+      runId,
+      modelStep: depth + 1,
+      promptChars: promptResult.manifest.promptChars,
+      estimatedTokens: promptResult.manifest.estimatedTokens,
+      timestamp: promptResult.manifest.timestamp
+    });
     const output = await complete(provider, prompt, session.id).catch((error: unknown) => {
       throw new Error(formatProviderFailure(error, provider.id));
     });
@@ -182,12 +194,20 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       runId,
       sourceChannel: options.sourceChannel ?? "cli",
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false,
+      onOverwriteApprovalRequired: async (request) => {
+        overwriteApprovalRequired = true;
+        await options.onOverwriteApprovalRequired?.(request);
+      },
       policyAudit: recordPolicyEvent
     });
     toolCallCount += 1;
     options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
     toolNames.push(output.step.tool);
     toolResults.push(`Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`);
+    if (overwriteApprovalRequired && options.stopAfterOverwriteApprovalRequired) {
+      finalContent = "File overwrite approval is pending. The requested file change has not been applied yet.";
+      break;
+    }
   }
 
   if (!finalContent) {

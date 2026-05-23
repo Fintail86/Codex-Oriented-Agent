@@ -1,6 +1,7 @@
 import { AgentManager } from "./agent_manager.js";
 import {
   applyPendingCommand,
+  createWriteFileOverwritePendingCommand,
   executeReadOnlyCommand,
   formatAmbiguousCommand,
   formatNeedsInput,
@@ -9,9 +10,9 @@ import {
   previewMutationCommand,
   type CommandCatalogContext,
   type PendingCommand
-} from "./command_catalog.js";
-import { interpretHashCommand } from "./command_interpreter.js";
-import { parseHashCommand, retrieveCommandCandidates } from "./command_intent.js";
+} from "./runtime_command_executor.js";
+import { interpretRuntimeHashCommand } from "./runtime_command_interpreter.js";
+import { runtimeCommandDefinitionById, parseRuntimeHashCommand, retrieveRuntimeCommandCandidates, type RuntimeCommandDefinition } from "./runtime_command_catalog.js";
 import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import type { PolicyConfig } from "./policy_manager.js";
@@ -20,6 +21,7 @@ import { formatReviewInbox, formatReviewNext, formatReviewStats, ReviewInboxServ
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
+import type { SessionMetadata } from "./types.js";
 
 export type GatewayChatState = {
   activeSessionId?: string;
@@ -47,12 +49,17 @@ export type GatewayMessageResult = {
 export async function handleGatewayMessage(options: GatewayMessageOptions): Promise<GatewayMessageResult> {
   const now = options.now ?? (() => Date.now());
   const input = options.input.trim();
-  const state = {
+  let state: GatewayChatState = {
     ...options.state,
     providerId: options.state.providerId ?? options.providerId
   };
   if (!input) {
     return done("Send /help for available commands.", state);
+  }
+  const staleSession = await clearMissingActiveSession(options.workspaceRoot, state);
+  state = staleSession.state;
+  if (staleSession.cleared && !input.startsWith("/") && !input.startsWith("#")) {
+    return done(formatMissingActiveSession(staleSession.sessionId), state);
   }
   if (input.startsWith("/")) {
     return handleSlashCommand({ ...options, input, state, now });
@@ -60,9 +67,20 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   if (input.startsWith("#")) {
     return handleHashCommand({ ...options, input, state, now });
   }
+  const commandHint = plainRuntimeCommandHint(input, options.workspaceRoot);
+  if (commandHint) {
+    return done(commandHint, state);
+  }
   if (!state.activeSessionId) {
     return done("No active session. Use /sessions, /use <session-id>, or /new <goal>.", state);
   }
+  if (state.pendingCommand && looksLikePlainApproval(input)) {
+    if (isPendingExpired(state.pendingCommand, now)) {
+      return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...state, pendingCommand: undefined }));
+    }
+    return done(formatPlainApprovalNeedsApply(state.pendingCommand), state);
+  }
+  let pendingOverwrite: PendingCommand | undefined;
   const output = await withSessionLock(options.workspaceRoot, state.activeSessionId, {
     owner: options.owner
   }, async () => runSession(options.workspaceRoot, {
@@ -70,8 +88,21 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     prompt: input,
     providerId: state.providerId,
     sourceChannel: "gateway",
+    stopAfterOverwriteApprovalRequired: true,
+    onOverwriteApprovalRequired: async (request) => {
+      pendingOverwrite = await createWriteFileOverwritePendingCommand({
+        path: request.path,
+        content: request.content,
+        workspaceRoot: options.workspaceRoot,
+        now,
+        ctx: await buildCatalogContext({ ...options, state, now })
+      });
+    },
     onEvent: () => undefined
   }));
+  if (pendingOverwrite) {
+    return done(pendingOverwrite.preview, touch({ ...state, pendingCommand: pendingOverwrite }));
+  }
   return done(output, state);
 }
 
@@ -200,13 +231,13 @@ async function handleHashCommand(options: GatewayMessageOptions & {
   state: GatewayChatState;
   now: () => number;
 }): Promise<GatewayMessageResult> {
-  let intent = parseHashCommand(options.input);
+  let intent = parseRuntimeHashCommand(options.input);
   if (intent.type === "no_match") {
-    const candidates = retrieveCommandCandidates(options.input, 8, options.workspaceRoot);
+    const candidates = retrieveRuntimeCommandCandidates(options.input, 8, options.workspaceRoot);
     if (!candidates.length) {
       return done("[BLOCKED] Natural command not recognized. Try #상태 보여줘, #리뷰 보여줘, or /help.", options.state);
     }
-    intent = await interpretHashCommand({
+    intent = await interpretRuntimeHashCommand({
       input: options.input,
       candidates,
       workspaceRoot: options.workspaceRoot,
@@ -258,10 +289,14 @@ async function handleHashCommand(options: GatewayMessageOptions & {
   return done("[BLOCKED] This natural command is recognized but is not available through the gateway yet.", options.state);
 }
 
-async function executeSessionFreeReadOnly(intent: Extract<ReturnType<typeof parseHashCommand>, { type: "matched" }>, options: GatewayMessageOptions & {
+async function executeSessionFreeReadOnly(intent: Extract<ReturnType<typeof parseRuntimeHashCommand>, { type: "matched" }>, options: GatewayMessageOptions & {
   state: GatewayChatState;
 }): Promise<string | undefined> {
   switch (intent.commandId) {
+    case "gateway.status": {
+      const { formatGatewayStatus } = await import("./gateway_supervisor.js");
+      return formatGatewayStatus(options.workspaceRoot, { json: false });
+    }
     case "status.show":
       return formatStatusReport(await getStatusReport(options.workspaceRoot, options.state.providerId ?? options.providerId));
     case "session.list":
@@ -324,7 +359,7 @@ async function buildCatalogContext(options: GatewayMessageOptions & {
 }): Promise<CommandCatalogContext> {
   const sessions = new SessionManager(options.workspaceRoot);
   const activeSessionId = options.state.activeSessionId;
-  let session = activeSessionId ? await sessions.loadSession(activeSessionId) : undefined;
+  let session = activeSessionId ? await loadSessionIfPresent(sessions, activeSessionId) : undefined;
   if (!session) {
     const list = await sessions.listSessions();
     session = list.find((item) => item.status === "active") ?? list[0];
@@ -366,4 +401,131 @@ function done(output: string, state: GatewayChatState): GatewayMessageResult {
 
 function touch(state: GatewayChatState): GatewayChatState {
   return { ...state, updatedAt: new Date().toISOString() };
+}
+
+async function clearMissingActiveSession(
+  workspaceRoot: string,
+  state: GatewayChatState
+): Promise<{ state: GatewayChatState; cleared: boolean; sessionId?: string }> {
+  const sessionId = state.activeSessionId;
+  if (!sessionId) {
+    return { state, cleared: false };
+  }
+  try {
+    await new SessionManager(workspaceRoot).loadSession(sessionId);
+    return { state, cleared: false };
+  } catch (error) {
+    if (!isMissingSessionError(error)) {
+      throw error;
+    }
+    return {
+      state: touch({
+        ...state,
+        activeSessionId: undefined,
+        pendingCommand: undefined
+      }),
+      cleared: true,
+      sessionId
+    };
+  }
+}
+
+async function loadSessionIfPresent(sessions: SessionManager, sessionId: string): Promise<SessionMetadata | undefined> {
+  try {
+    return await sessions.loadSession(sessionId);
+  } catch (error) {
+    if (isMissingSessionError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function isMissingSessionError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function formatMissingActiveSession(sessionId: string | undefined): string {
+  return [
+    "The active COSIA session for this Telegram chat no longer exists.",
+    sessionId ? `Missing session: ${sessionId}` : undefined,
+    "",
+    "Start a new Telegram session:",
+    "/new <goal>",
+    "",
+    "Or select an existing session:",
+    "/sessions",
+    "/use <session-id>"
+  ].filter(Boolean).join("\n");
+}
+
+function looksLikePlainApproval(input: string): boolean {
+  return /\b(apply|approve|approved|confirm)\b/i.test(input)
+    || /(승인|적용|동의|진행)/.test(input);
+}
+
+function plainRuntimeCommandHint(input: string, workspaceRoot: string): string | undefined {
+  const exact = parseRuntimeHashCommand(`#${input}`);
+  if (exact.type === "matched" && !exact.commandId.startsWith("pending.")) {
+    const definition = runtimeCommandDefinitionById(exact.commandId);
+    return definition ? formatPlainRuntimeCommandHint(definition) : undefined;
+  }
+  if (exact.type === "needs_input") {
+    return [
+      "이 요청은 COSIA 런타임 명령으로 처리해야 합니다.",
+      "일반 대화로 추측하거나 자동 실행하지 않습니다.",
+      "",
+      exact.hint
+    ].join("\n");
+  }
+  if (exact.type === "ambiguous") {
+    return [
+      "이 요청은 여러 COSIA 런타임 명령으로 해석될 수 있습니다.",
+      "일반 대화로 추측하거나 자동 실행하지 않습니다.",
+      "",
+      exact.hint
+    ].join("\n");
+  }
+  if (!mentionsRuntimeTarget(input)) {
+    return undefined;
+  }
+  const candidates = retrieveRuntimeCommandCandidates(input, 2, workspaceRoot);
+  if (candidates.length !== 1) {
+    return undefined;
+  }
+  return formatPlainRuntimeCommandHint(candidates[0]);
+}
+
+function formatPlainRuntimeCommandHint(definition: RuntimeCommandDefinition): string {
+  const slashAlternative = definition.commandId === "status.show" ? "  /status" : undefined;
+  return [
+    "이 요청은 COSIA 런타임 명령으로 확인하는 편이 정확합니다.",
+    "일반 대화로 추측하거나 자동 실행하지 않습니다.",
+    "",
+    "Telegram에서 명시 실행:",
+    `  ${definition.examples[0]}`,
+    slashAlternative,
+    "",
+    "명령 접두어 # 또는 /를 붙여 다시 보내줘."
+  ].filter(Boolean).join("\n");
+}
+
+function mentionsRuntimeTarget(input: string): boolean {
+  return /(cosia|코시아|게이트웨이|gateway|세션|session|리뷰|review|메모리|memory|컨텍스트|context|프로바이더|provider|정책|policy|스킬|skill|도구|tool)/i.test(input);
+}
+
+function formatPlainApprovalNeedsApply(pending: PendingCommand): string {
+  return [
+    "승인 대기 작업이 있습니다.",
+    `Pending command: ${pending.commandId}`,
+    "",
+    "대화 문장만으로는 파일 변경을 적용하지 않습니다.",
+    "실제로 적용하려면 다음 중 하나를 보내주세요:",
+    "  #적용",
+    "  /apply",
+    "",
+    "취소하려면:",
+    "  #취소",
+    "  /cancel"
+  ].join("\n");
 }

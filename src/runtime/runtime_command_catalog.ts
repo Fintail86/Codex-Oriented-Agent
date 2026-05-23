@@ -1,20 +1,20 @@
 import { isToolId } from "./tool_catalog.js";
 
-export type CommandSafety =
+export type RuntimeCommandSafety =
   | "read_only"
   | "preview_mutation"
   | "mutation"
   | "dangerous";
 
-export type CommandIntentResult =
+export type RuntimeCommandResult =
   | { type: "matched"; commandId: string; confidence: "high" | "medium"; args: Record<string, unknown> }
   | { type: "needs_input"; commandId: string; missing: string[]; hint: string }
   | { type: "ambiguous"; candidates: string[]; hint: string }
   | { type: "no_match" };
 
-export type CommandDefinition = {
+export type RuntimeCommandDefinition = {
   commandId: string;
-  safety: CommandSafety;
+  safety: RuntimeCommandSafety;
   description: string;
   argsSchema: {
     required?: string[];
@@ -27,7 +27,18 @@ export type CommandDefinition = {
   };
 };
 
-export const commandDefinitions: CommandDefinition[] = [
+export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
+  {
+    commandId: "gateway.status",
+    safety: "read_only",
+    description: "Show COSIA gateway process and connector status.",
+    argsSchema: {},
+    examples: ["#게이트웨이 상태 보여줘", "#show gateway status"],
+    triggers: {
+      ko: ["게이트웨이 상태", "게이트웨이 살아", "게이트웨이 켜져", "게이트웨이 실행 중", "게이트웨이 동작 중"],
+      en: ["gateway status", "show gateway status", "check gateway status", "gateway running", "gateway alive"]
+    }
+  },
   {
     commandId: "status.show",
     safety: "read_only",
@@ -228,7 +239,7 @@ export const commandDefinitions: CommandDefinition[] = [
   }
 ];
 
-export function parseHashCommand(input: string): CommandIntentResult {
+export function parseRuntimeHashCommand(input: string): RuntimeCommandResult {
   const body = input.trim().replace(/^#/, "").trim();
   const normalized = normalizeCommandText(body);
   if (!normalized) {
@@ -333,6 +344,9 @@ export function parseHashCommand(input: string): CommandIntentResult {
     return matched("review.conflicted_memory");
   }
 
+  if (/^게이트웨이\s*(상태|살아\s*있|켜져|실행\s*중|동작\s*중).*$/.test(normalized) || /^(gateway status|show gateway status|check gateway status|gateway running|gateway alive)$/.test(normalized)) {
+    return matched("gateway.status");
+  }
   if (/^(상태|상태\s*(보여줘|확인|조회)|현재\s*상태.*(분석|보여줘|확인)|진단|진단해줘)$/.test(normalized)) {
     return matched("status.show");
   }
@@ -372,14 +386,14 @@ export function parseHashCommand(input: string): CommandIntentResult {
   return { type: "no_match" };
 }
 
-export function retrieveCommandCandidates(input: string, limit = 8, workspaceRoot?: string): CommandDefinition[] {
+export function retrieveRuntimeCommandCandidates(input: string, limit = 8, workspaceRoot?: string): RuntimeCommandDefinition[] {
   const body = input.trim().replace(/^#/, "").trim();
   const normalized = normalizeCommandText(body);
   if (!normalized) {
     return [];
   }
   const triggerOverrides = workspaceRoot ? readTriggerOverrides(workspaceRoot, "ko") : {};
-  const scored = commandDefinitions
+  const scored = runtimeCommandDefinitions
     .map((definition) => ({
       definition,
       score: scoreDefinition(normalized, definition, triggerOverrides[definition.commandId])
@@ -389,12 +403,12 @@ export function retrieveCommandCandidates(input: string, limit = 8, workspaceRoo
   return scored.slice(0, limit).map((item) => item.definition);
 }
 
-export function commandDefinitionById(commandId: string): CommandDefinition | undefined {
-  return commandDefinitions.find((definition) => definition.commandId === commandId);
+export function runtimeCommandDefinitionById(commandId: string): RuntimeCommandDefinition | undefined {
+  return runtimeCommandDefinitions.find((definition) => definition.commandId === commandId);
 }
 
-export function validateCommandArgs(commandId: string, args: Record<string, unknown>): CommandIntentResult | undefined {
-  const definition = commandDefinitionById(commandId);
+export function validateRuntimeCommandArgs(commandId: string, args: Record<string, unknown>): RuntimeCommandResult | undefined {
+  const definition = runtimeCommandDefinitionById(commandId);
   if (!definition) {
     return {
       type: "ambiguous",
@@ -405,7 +419,7 @@ export function validateCommandArgs(commandId: string, args: Record<string, unkn
   const missing = (definition.argsSchema.required ?? [])
     .filter((key) => typeof args[key] !== "string" || !String(args[key]).trim());
   if (missing.length > 0) {
-    return needsInput(commandId, missing, usageHint(definition));
+    return needsInput(commandId, missing, runtimeCommandUsageHint(definition));
   }
   if (commandId === "review.list" && args.filter !== undefined && !["all", "memory", "skill"].includes(String(args.filter))) {
     return needsInput(commandId, ["filter"], "Filter must be one of: all, memory, skill.");
@@ -416,15 +430,15 @@ export function validateCommandArgs(commandId: string, args: Record<string, unkn
   return undefined;
 }
 
-export function usageHint(definition: CommandDefinition): string {
+export function runtimeCommandUsageHint(definition: RuntimeCommandDefinition): string {
   return `Try: ${definition.examples[0]}`;
 }
 
-function matched(commandId: string, args: Record<string, unknown> = {}): CommandIntentResult {
+function matched(commandId: string, args: Record<string, unknown> = {}): RuntimeCommandResult {
   return { type: "matched", commandId, confidence: "high", args };
 }
 
-function needsInput(commandId: string, missing: string[], hint: string): CommandIntentResult {
+function needsInput(commandId: string, missing: string[], hint: string): RuntimeCommandResult {
   return { type: "needs_input", commandId, missing, hint };
 }
 
@@ -435,9 +449,10 @@ function normalizeCommandText(value: string): string {
     .trim();
 }
 
-function scoreDefinition(normalized: string, definition: CommandDefinition, koOverride?: string[]): number {
+function scoreDefinition(normalized: string, definition: RuntimeCommandDefinition, koOverride?: string[]): number {
   let score = 0;
-  for (const trigger of [...(koOverride ?? definition.triggers.ko), ...definition.triggers.en]) {
+  const koTriggers = [...new Set([...(koOverride ?? []), ...definition.triggers.ko])];
+  for (const trigger of [...koTriggers, ...definition.triggers.en]) {
     const normalizedTrigger = normalizeCommandText(trigger);
     if (!normalizedTrigger) {
       continue;

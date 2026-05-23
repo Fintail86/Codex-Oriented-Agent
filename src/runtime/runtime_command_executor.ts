@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
 import type { PolicyConfig } from "./policy_manager.js";
+import { readText, resolveInside } from "./fs_utils.js";
 import { PolicyManager, formatPolicySummary } from "./policy_manager.js";
 import { getStatusReport, formatStatusReport } from "./status_report.js";
 import { MemoryManager } from "./memory_manager.js";
@@ -9,6 +11,7 @@ import { ToolRegistry } from "./tool_registry.js";
 import { isToolId } from "./tool_catalog.js";
 import { formatShellApprovalPreview, ShellApprovalLedger } from "./shell_approval.js";
 import { checkProvider, listProviders } from "./model/provider_registry.js";
+import { detectSecrets } from "./risk_classifier.js";
 import {
   formatReviewBatchDiscard,
   formatReviewCleanup,
@@ -18,7 +21,7 @@ import {
   formatReviewUpdate,
   ReviewInboxService
 } from "./review_inbox.js";
-import type { CommandIntentResult, CommandSafety } from "./command_intent.js";
+import type { RuntimeCommandResult, RuntimeCommandSafety } from "./runtime_command_catalog.js";
 
 const pendingTtlMs = 5 * 60 * 1000;
 
@@ -27,7 +30,7 @@ export type PendingCommand = {
   commandId: string;
   preview: string;
   args: Record<string, unknown>;
-  safety: CommandSafety;
+  safety: RuntimeCommandSafety;
   createdAt: string;
   expiresAt: string;
   createdAtMs: number;
@@ -65,8 +68,12 @@ export type CommandCatalogContext = {
   };
 };
 
-export async function executeReadOnlyCommand(intent: Extract<CommandIntentResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<string | undefined> {
+export async function executeReadOnlyCommand(intent: Extract<RuntimeCommandResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<string | undefined> {
   switch (intent.commandId) {
+    case "gateway.status": {
+      const { formatGatewayStatus } = await import("./gateway_supervisor.js");
+      return formatGatewayStatus(ctx.workspaceRoot, { json: false });
+    }
     case "status.show":
       return formatStatusReport(await getStatusReport(ctx.workspaceRoot, ctx.providerId));
     case "review.list":
@@ -140,7 +147,7 @@ export async function executeReadOnlyCommand(intent: Extract<CommandIntentResult
   }
 }
 
-export async function previewMutationCommand(intent: Extract<CommandIntentResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<{ output: string; pending?: PendingCommand } | undefined> {
+export async function previewMutationCommand(intent: Extract<RuntimeCommandResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<{ output: string; pending?: PendingCommand } | undefined> {
   switch (intent.commandId) {
     case "shell.preview": {
       if (ctx.previewScope?.chatId) {
@@ -229,6 +236,9 @@ export async function previewMutationCommand(intent: Extract<CommandIntentResult
 export async function applyPendingCommand(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
   await validatePendingFreshness(pending, ctx);
   switch (pending.commandId) {
+    case "write_file.overwrite": {
+      return applyWriteFileOverwrite(pending, ctx);
+    }
     case "shell.apply": {
       if (ctx.previewScope?.chatId) {
         return "[BLOCKED] Shell execution is blocked through gateway channels in v0.29.";
@@ -264,6 +274,38 @@ export async function applyPendingCommand(pending: PendingCommand, ctx: CommandC
   }
 }
 
+export async function createWriteFileOverwritePendingCommand(input: {
+  path: string;
+  content: string;
+  workspaceRoot: string;
+  now: () => number;
+  ctx?: CommandCatalogContext;
+}): Promise<PendingCommand> {
+  const resolved = resolveInside(input.workspaceRoot, input.path);
+  const existing = await readText(resolved);
+  const existingHash = sha256(existing);
+  const contentHash = sha256(input.content);
+  const contentPreview = detectSecrets(input.content).redactedPreview || "(empty)";
+  const output = [
+    "[PREVIEW] File overwrite requires approval.",
+    `Path: ${input.path}`,
+    `Existing hash: ${existingHash.slice(0, 16)}`,
+    `New content chars: ${input.content.length}`,
+    `New content preview: ${contentPreview}`,
+    "",
+    "Run #적용 or /apply to overwrite once.",
+    "Run #취소 or /cancel to cancel.",
+    "",
+    "The file has not been changed yet."
+  ].join("\n");
+  return createPendingCommand("write_file.overwrite", {
+    path: input.path,
+    content: input.content,
+    existingHash,
+    contentHash
+  }, "mutation", output, input.now, input.ctx, []);
+}
+
 export async function cancelPendingCommand(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
   if (pending.commandId === "shell.apply") {
     const approval = new ShellApprovalLedger(ctx.workspaceRoot).cancel(String(pending.args.approvalId ?? ""));
@@ -275,7 +317,7 @@ export async function cancelPendingCommand(pending: PendingCommand, ctx: Command
 export function createPendingCommand(
   commandId: string,
   args: Record<string, unknown>,
-  safety: CommandSafety,
+  safety: RuntimeCommandSafety,
   preview: string,
   now: () => number,
   ctx?: CommandCatalogContext,
@@ -350,6 +392,39 @@ async function executeTool(name: ToolName, args: unknown, ctx: CommandCatalogCon
     sourceChannel: ctx.previewScope?.chatId ? "gateway" : "repl"
   });
   return result.content;
+}
+
+async function applyWriteFileOverwrite(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
+  const path = String(pending.args.path ?? "");
+  const content = String(pending.args.content ?? "");
+  const expectedExistingHash = String(pending.args.existingHash ?? "");
+  const expectedContentHash = String(pending.args.contentHash ?? "");
+  if (!path || !expectedExistingHash || !expectedContentHash) {
+    return "[BLOCKED] Pending file overwrite preview is malformed. Refresh the preview and try again.";
+  }
+  if (sha256(content) !== expectedContentHash) {
+    return "[BLOCKED] Pending file overwrite content changed. Refresh the preview and try again.";
+  }
+  const resolved = resolveInside(ctx.workspaceRoot, path);
+  const current = await readText(resolved);
+  if (sha256(current) !== expectedExistingHash) {
+    return "[BLOCKED] Pending file overwrite is stale. The target file changed after preview. Refresh the preview and try again.";
+  }
+  const result = await new ToolRegistry().execute("write_file", { path, content }, {
+    workspaceRoot: ctx.workspaceRoot,
+    allowedTools: ctx.agent.allowedTools,
+    sessionId: ctx.session.id,
+    agentId: ctx.agent.id,
+    sourceChannel: ctx.previewScope?.chatId ? "gateway" : "repl",
+    approveOverwrite: async () => true
+  });
+  if (!result.ok) {
+    return `[BLOCKED] File overwrite was not applied.\n${result.content}`;
+  }
+  return [
+    "[SUCCESS] File overwrite applied.",
+    `Path: ${path}`
+  ].join("\n");
 }
 
 function asReviewFilter(value: unknown): "all" | "memory" | "skill" {
@@ -445,4 +520,8 @@ async function validatePendingFreshness(pending: PendingCommand, ctx: CommandCat
 
 function randomId(): string {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
 }

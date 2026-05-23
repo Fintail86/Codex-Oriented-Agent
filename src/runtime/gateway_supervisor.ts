@@ -17,6 +17,7 @@ import { resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import {
   checkTelegramGateway,
+  inspectTelegramGatewayState,
   loadTelegramGatewayState,
   resolveTelegramToken,
   startTelegramGateway,
@@ -187,6 +188,7 @@ export async function unlockStaleGateway(workspaceRoot: string, options: { stale
 export async function formatGatewayStatus(workspaceRoot: string, options: { json?: boolean } = {}): Promise<string> {
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const state = await loadTelegramGatewayState(workspaceRoot);
+  const telegramStateInspection = await inspectTelegramGatewayState(workspaceRoot);
   const lock = await readGatewayProcessLock(workspaceRoot);
   const legacyTelegramLock = await readLegacyTelegramProcessLock(workspaceRoot);
   const stopRequest = await readGatewayStopRequest(workspaceRoot);
@@ -211,6 +213,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
         tokenStatus: tokenStatus.status,
         allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
         activeChats: Object.keys(state.chats).length,
+        staleActiveSessions: telegramStateInspection.staleSessions.length,
         nextOffset: state.nextOffset,
         failureCount: state.failureCount,
         lastFailure: state.lastFailure,
@@ -240,6 +243,8 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `    Token: ${report.connectors.telegram.tokenStatus}`,
     `    Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length}`,
     `    Active chats: ${Object.keys(state.chats).length}`,
+    `    Stale active sessions: ${telegramStateInspection.staleSessions.length}`,
+    telegramStateInspection.staleSessions.length ? "    Repair: cosia gateway telegram repair --stale-sessions" : undefined,
     `    Next offset: ${state.nextOffset ?? "none"}`,
     `    Failure count: ${state.failureCount}`,
     state.lastFailure ? `    Last failure: ${state.lastFailure}` : undefined,

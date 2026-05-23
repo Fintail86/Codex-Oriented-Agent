@@ -242,8 +242,15 @@ export type ToolContext = {
   agentId?: string;
   runId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
-  approveOverwrite?: (filePath: string) => Promise<boolean>;
+  approveOverwrite?: (filePath: string, request?: OverwriteApprovalRequest) => Promise<boolean>;
+  onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
   policyAudit?: (event: PolicyAuditEventInput) => Promise<void>;
+};
+
+export type OverwriteApprovalRequest = {
+  path: string;
+  resolvedPath: string;
+  content: string;
 };
 
 export type ToolResult = {

@@ -36,7 +36,7 @@ export class CodexCliProvider implements ModelProvider {
       const smoke = await runCodex(
         codexExecArgs(schemaPath, this.options.sandbox ?? "read-only"),
         boundaryPrompt(
-          "Say only this JSON object: {\"type\":\"final\",\"tool\":\"read_file\",\"args\":{\"path\":\"\",\"content\":\"\",\"query\":\"\",\"directory\":\"\"},\"content\":\"codex-ready\",\"memoryCandidates\":[],\"skillCandidates\":[]}"
+          "Say only this JSON object: {\"type\":\"final\",\"tool\":\"read_file\",\"args\":{\"path\":\"\",\"content\":\"\",\"query\":\"\",\"directory\":\"\",\"command\":\"\",\"cwd\":\"\",\"reason\":\"\",\"expectedEffect\":\"\"},\"content\":\"codex-ready\",\"memoryCandidates\":[],\"skillCandidates\":[]}"
         ),
         isolated,
         30_000
@@ -171,7 +171,34 @@ const agentStepJsonSchema = {
     },
     args: {
       type: "object",
-      additionalProperties: true
+      properties: {
+        path: {
+          type: "string"
+        },
+        content: {
+          type: "string"
+        },
+        query: {
+          type: "string"
+        },
+        directory: {
+          type: "string"
+        },
+        command: {
+          type: "string"
+        },
+        cwd: {
+          type: "string"
+        },
+        reason: {
+          type: "string"
+        },
+        expectedEffect: {
+          type: "string"
+        }
+      },
+      required: ["path", "content", "query", "directory", "command", "cwd", "reason", "expectedEffect"],
+      additionalProperties: false
     },
     content: {
       type: "string"

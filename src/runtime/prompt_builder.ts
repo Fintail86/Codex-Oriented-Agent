@@ -377,14 +377,18 @@ When the request asks about implementation, files, CLI commands, package metadat
 
 shell_request does not execute commands. It only creates a user-reviewable, one-shot shell approval preview. Do not claim the command has run until execution output is observed after approval. Prefer current active tools and capability proposals before shell_request.
 
+If a tool result says approval is required, overwrite was denied, a pending preview was created, or an operation has not been changed/applied yet, do not claim the requested change is active. State that the change is pending approval or was not applied, and tell the user to use the explicit apply flow when one is available.
+
+Static prompt blocks such as AGENT STYLE, AGENT IDENTITY, AGENT LOCAL RULES, and codex/*.md are prompt-loaded context snapshots. You may answer from them, but do not claim you inspected, checked, or read the underlying file in this run unless a current read_file tool result for that path appears in TOOL RESULTS. If you answer from a static block, name it as prompt-loaded context, not live file inspection.
+
 For a tool call:
-{"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
+{"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
 For a search tool call:
-{"type":"tool_call","tool":"search_files","args":{"path":"","content":"","query":"cosia","directory":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
+{"type":"tool_call","tool":"search_files","args":{"path":"","content":"","query":"cosia","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
 For a final answer:
-{"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":""},"content":"...","memoryCandidates":[],"skillCandidates":[]}
+{"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"...","memoryCandidates":[],"skillCandidates":[]}
 
 Available tools for this run: ${allowedTools.join(", ") || "none"}
 Maximum tool loop depth: 5`;

@@ -130,7 +130,6 @@ export class PolicyEngine {
     }
 
     if (
-      state.requireTools &&
       this.policy.fileInspection.requiresReadFile &&
       this.asksForActualFiles(state.userPrompt) &&
       !state.executedTools.includes("read_file")
