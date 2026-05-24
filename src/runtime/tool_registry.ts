@@ -148,6 +148,16 @@ export class ToolRegistry {
         argsSummary
       });
       if (!decision.allowed) {
+        if (name === "write_file" && decision.requiresApproval === "codex_amendment" && ctx.onCodexAmendmentRequired) {
+          const parsed = writeFileArgs.parse(args);
+          const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
+          const output = await ctx.onCodexAmendmentRequired({
+            path: parsed.path,
+            resolvedPath: resolved,
+            content: parsed.content
+          });
+          return { ok: false, content: output ?? decision.reason };
+        }
         return { ok: false, content: decision.reason };
       }
       if (name === "write_file" && await engine.requiresOverwriteApproval(args, ctx.workspaceRoot)) {

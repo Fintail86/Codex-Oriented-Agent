@@ -19,6 +19,7 @@ import { OpenAICompatibleProvider, type FetchLike } from "../src/runtime/model/p
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath, runtimePrivatePath, secretsPrivatePath } from "../src/runtime/runtime_config.js";
+import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { chunkTelegramMessage } from "../src/runtime/gateway_format.js";
@@ -154,7 +155,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.42.0\"");
+    expect(policyJson).toContain("\"version\": \"0.43.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -955,6 +956,69 @@ describe("policy core", () => {
     expect(result.ok).toBe(false);
     expect(result.content).toContain("protected Codex path");
     expect(JSON.stringify(auditEvents)).toContain("codex.protected_path");
+  });
+
+  it("previews and applies protected Codex source changes through amendment ledger", async () => {
+    const root = await initializedWorkspace();
+    const ledger = new CodexAmendmentLedger(root);
+    const originalRules = await readFile(join(root, "codex", "RULES.md"), "utf8");
+    const proposedRules = `${originalRules.trimEnd()}\n- Test amendment rule.\n`;
+
+    await expect(ledger.propose({
+      targetPath: "codex/POLICY.md",
+      proposedContent: "# mirror bypass",
+      reason: "Attempt direct mirror edit.",
+      sourceChannel: "cli"
+    })).rejects.toThrow("Generated Codex mirror cannot be amended directly");
+
+    await expect(ledger.propose({
+      targetPath: "codex/RULES.md",
+      proposedContent: "token = abcdefghijklmnopqrstuvwxyz",
+      reason: "Attempt secret persistence.",
+      sourceChannel: "cli"
+    })).rejects.toThrow("secret-like values");
+
+    const amendment = await ledger.propose({
+      targetPath: "codex/RULES.md",
+      proposedContent: proposedRules,
+      reason: "Add test rule.",
+      sourceChannel: "cli"
+    });
+    expect(amendment.status).toBe("pending");
+    expect(ledger.list().map((item) => item.id)).toContain(amendment.id);
+    expect(await readFile(join(root, "codex", "RULES.md"), "utf8")).toBe(originalRules);
+
+    const applied = await ledger.apply(amendment.id);
+    expect(applied.status).toBe("applied");
+    expect(await readFile(join(root, "codex", "RULES.md"), "utf8")).toBe(proposedRules);
+    await expect(ledger.apply(amendment.id)).rejects.toThrow("not pending");
+  });
+
+  it("blocks stale Codex amendment apply and syncs POLICY.md when POLICY.json is amended", async () => {
+    const root = await initializedWorkspace();
+    const ledger = new CodexAmendmentLedger(root);
+    const stale = await ledger.propose({
+      targetPath: "codex/USER.md",
+      proposedContent: "# USER\n\n- stale proposal\n",
+      reason: "Create stale amendment.",
+      sourceChannel: "cli"
+    });
+    await writeFile(join(root, "codex", "USER.md"), "# USER\n\n- changed outside preview\n", "utf8");
+    await expect(ledger.apply(stale.id)).rejects.toThrow("stale");
+    expect(ledger.get(stale.id)?.status).toBe("stale");
+
+    const policyPath = join(root, "codex", "POLICY.json");
+    const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
+    policy.version = "0.43.0-policy-amended";
+    const policyAmendment = await ledger.propose({
+      targetPath: "codex/POLICY.json",
+      proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
+      reason: "Update policy version marker.",
+      sourceChannel: "cli"
+    });
+    await ledger.apply(policyAmendment.id);
+    expect(await readFile(policyPath, "utf8")).toContain("0.43.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.43.0-policy-amended");
   });
 
   it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
@@ -3325,7 +3389,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.42.0");
+    expect(emptyReport.version).toBe("0.43.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4299,6 +4363,86 @@ describe("status and listing", () => {
     expect(sent.at(-1)?.text).toContain("[SUCCESS] File overwrite applied.");
     expect(state.chats["123"]?.pendingCommand).toBeUndefined();
     expect(await readFile(stylePath, "utf8")).toBe("mock write");
+  });
+
+  it("routes Telegram protected Codex writes through amendment pending apply previews", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Codex amendment approval");
+    const rulesPath = join(root, "codex", "RULES.md");
+    const originalRules = await readFile(rulesPath, "utf8");
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowMutations: true,
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        text: "[MOCK_WRITE_ONLY:codex/RULES.md]"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("[PREVIEW] Codex amendment requires approval.");
+    expect(sent.at(-1)?.text).toContain("#적용");
+    expect(state.chats["123"]?.pendingCommand?.commandId).toBe("codex.amendment.apply");
+    expect(await readFile(rulesPath, "utf8")).toBe(originalRules);
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        text: "승인할게 변경해"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("대화 문장만으로는 파일 변경을 적용하지 않습니다");
+    expect(await readFile(rulesPath, "utf8")).toBe(originalRules);
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        text: "#적용"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("[SUCCESS] Codex amendment applied.");
+    expect(state.chats["123"]?.pendingCommand).toBeUndefined();
+    expect(await readFile(rulesPath, "utf8")).toBe("mock write");
   });
 
   it("repairs and resets stale Telegram gateway state without connector settings", async () => {

@@ -4,6 +4,7 @@ import { AgentManager } from "./agent_manager.js";
 import {
   applyPendingCommand,
   cancelPendingCommand,
+  createCodexAmendmentPendingCommand,
   executeReadOnlyCommand,
   formatAmbiguousCommand,
   formatNeedsInput,
@@ -508,6 +509,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
       }
 
       let shouldRefreshMemory = false;
+      let pendingCodexAmendment: PendingCommand | undefined;
       const content = await withSessionLock(options.workspaceRoot, session.id, {
         owner: "cli:chat"
       }, async () => runSession(options.workspaceRoot, {
@@ -521,6 +523,30 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           requireTools: options.requireTools,
           promptStaticBlocks: staticBlocks,
           manualSkillIds: [...manualSkills],
+          stopAfterCodexAmendmentRequired: true,
+          onCodexAmendmentRequired: async (request) => {
+            pendingCodexAmendment = await createCodexAmendmentPendingCommand({
+              path: request.path,
+              content: request.content,
+              reason: "Model requested a protected Codex law change through write_file.",
+              workspaceRoot: options.workspaceRoot,
+              now,
+              ctx: {
+                workspaceRoot: options.workspaceRoot,
+                session,
+                agent,
+                providerId,
+                policy,
+                sessions,
+                memory,
+                skills,
+                reviewInbox,
+                now,
+                previewScope: { sessionId: session.id }
+              }
+            });
+            return pendingCodexAmendment.preview;
+          },
           refreshReferenceMemory: false,
           refreshReferenceMemoryAfterRun: false,
           onMemoryReview: (summary) => {
@@ -528,6 +554,11 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           },
           onEvent: (message) => writeLine(errorOutput, `[cosia] ${message}`)
         }));
+      if (pendingCodexAmendment) {
+        pendingCommand = pendingCodexAmendment;
+        writeLine(output, pendingCodexAmendment.preview);
+        continue;
+      }
       history.push({ prompt, response: content });
       lastPrompt = prompt;
       writeLine(output, content);

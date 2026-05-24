@@ -10,7 +10,7 @@ export type PolicyDecision = {
   allowed: boolean;
   ruleId: string;
   reason: string;
-  requiresApproval?: "overwrite";
+  requiresApproval?: "overwrite" | "codex_amendment";
 };
 
 export type RuntimePolicyState = {
@@ -186,7 +186,8 @@ export class PolicyEngine {
       return {
         allowed: false,
         ruleId: "codex.protected_path",
-        reason: `Generic write_file cannot modify protected Codex path: ${normalized}. Use an approved Codex amendment apply flow.`
+        reason: `Generic write_file cannot modify protected Codex path: ${normalized}. Use an approved Codex amendment apply flow.`,
+        requiresApproval: "codex_amendment"
       };
     }
     return {

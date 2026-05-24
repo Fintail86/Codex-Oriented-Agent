@@ -1,6 +1,8 @@
 import { AgentManager } from "./agent_manager.js";
 import {
+  createCodexAmendmentPendingCommand,
   applyPendingCommand,
+  cancelPendingCommand,
   createWriteFileOverwritePendingCommand,
   executeReadOnlyCommand,
   formatAmbiguousCommand,
@@ -81,6 +83,7 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     return done(formatPlainApprovalNeedsApply(state.pendingCommand), state);
   }
   let pendingOverwrite: PendingCommand | undefined;
+  let pendingCodexAmendment: PendingCommand | undefined;
   const output = await withSessionLock(options.workspaceRoot, state.activeSessionId, {
     owner: options.owner
   }, async () => runSession(options.workspaceRoot, {
@@ -89,6 +92,7 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     providerId: state.providerId,
     sourceChannel: "gateway",
     stopAfterOverwriteApprovalRequired: true,
+    stopAfterCodexAmendmentRequired: true,
     onOverwriteApprovalRequired: async (request) => {
       pendingOverwrite = await createWriteFileOverwritePendingCommand({
         path: request.path,
@@ -98,8 +102,22 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
         ctx: await buildCatalogContext({ ...options, state, now })
       });
     },
+    onCodexAmendmentRequired: async (request) => {
+      pendingCodexAmendment = await createCodexAmendmentPendingCommand({
+        path: request.path,
+        content: request.content,
+        reason: "Model requested a protected Codex law change through write_file.",
+        workspaceRoot: options.workspaceRoot,
+        now,
+        ctx: await buildCatalogContext({ ...options, state, now })
+      });
+      return pendingCodexAmendment.preview;
+    },
     onEvent: () => undefined
   }));
+  if (pendingCodexAmendment) {
+    return done(pendingCodexAmendment.preview, touch({ ...state, pendingCommand: pendingCodexAmendment }));
+  }
   if (pendingOverwrite) {
     return done(pendingOverwrite.preview, touch({ ...state, pendingCommand: pendingOverwrite }));
   }
@@ -218,7 +236,11 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
     return done(preview?.output ?? "[BLOCKED] Review discard preview is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
   }
   if (input === "/cancel") {
-    return done("[SUCCESS] Pending command cancelled.", touch({ ...state, pendingCommand: undefined }));
+    if (!state.pendingCommand) {
+      return done("[SUCCESS] Pending command cancelled.", touch({ ...state, pendingCommand: undefined }));
+    }
+    const output = await cancelGatewayPending(options);
+    return done(output, touch({ ...state, pendingCommand: undefined }));
   }
   if (input === "/apply") {
     return applyGatewayPending(options);
@@ -256,7 +278,11 @@ async function handleHashCommand(options: GatewayMessageOptions & {
     return done("[BLOCKED] Natural command not recognized. Try #상태 보여줘, #리뷰 보여줘, or /help.", options.state);
   }
   if (intent.commandId === "pending.cancel") {
-    return done("[SUCCESS] Pending command cancelled.", touch({ ...options.state, pendingCommand: undefined }));
+    if (!options.state.pendingCommand) {
+      return done("[SUCCESS] Pending command cancelled.", touch({ ...options.state, pendingCommand: undefined }));
+    }
+    const output = await cancelGatewayPending(options);
+    return done(output, touch({ ...options.state, pendingCommand: undefined }));
   }
   if (intent.commandId === "pending.show") {
     const pending = options.state.pendingCommand;
@@ -351,6 +377,17 @@ async function applyGatewayPending(options: GatewayMessageOptions & {
     owner: options.owner
   }, async () => applyPendingCommand(pending, await buildCatalogContext(options)));
   return done(output, touch({ ...options.state, pendingCommand: undefined }));
+}
+
+async function cancelGatewayPending(options: GatewayMessageOptions & {
+  state: GatewayChatState;
+  now: () => number;
+}): Promise<string> {
+  const pending = options.state.pendingCommand;
+  if (!pending) {
+    return "[SUCCESS] Pending command cancelled.";
+  }
+  return cancelPendingCommand(pending, await buildCatalogContext(options));
 }
 
 async function buildCatalogContext(options: GatewayMessageOptions & {

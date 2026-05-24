@@ -13,7 +13,7 @@ import { SelfImprovementGovernor } from "./self_improvement.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
-import type { AgentStep, ModelProvider, OverwriteApprovalRequest, ToolName } from "./types.js";
+import type { AgentStep, CodexAmendmentApprovalRequest, ModelProvider, OverwriteApprovalRequest, ToolName } from "./types.js";
 import type { MemoryReviewSummary } from "./memory_manager.js";
 
 type RunOptions = {
@@ -31,6 +31,8 @@ type RunOptions = {
   onMemoryReview?: (summary: MemoryReviewSummary) => void;
   onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
   stopAfterOverwriteApprovalRequired?: boolean;
+  onCodexAmendmentRequired?: (request: CodexAmendmentApprovalRequest) => Promise<string | void> | string | void;
+  stopAfterCodexAmendmentRequired?: boolean;
   manualSkillIds?: string[];
   agentId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
@@ -89,6 +91,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   let finalContent = "";
   let lastStep: AgentStep | undefined;
   let overwriteApprovalRequired = false;
+  let codexAmendmentRequired = false;
   const maxToolCalls = 5;
   const maxModelAttempts = maxToolCalls + 2;
   let toolCallCount = 0;
@@ -198,6 +201,10 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         overwriteApprovalRequired = true;
         await options.onOverwriteApprovalRequired?.(request);
       },
+      onCodexAmendmentRequired: async (request) => {
+        codexAmendmentRequired = true;
+        return options.onCodexAmendmentRequired?.(request);
+      },
       policyAudit: recordPolicyEvent
     });
     toolCallCount += 1;
@@ -206,6 +213,10 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     toolResults.push(`Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`);
     if (overwriteApprovalRequired && options.stopAfterOverwriteApprovalRequired) {
       finalContent = "File overwrite approval is pending. The requested file change has not been applied yet.";
+      break;
+    }
+    if (codexAmendmentRequired && options.stopAfterCodexAmendmentRequired) {
+      finalContent = "Codex amendment approval is pending. The requested Codex law change has not been applied yet.";
       break;
     }
   }

@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { registerAgentSessionCommands } from "./cli_commands/agent_session_commands.js";
 import { registerCapabilityShellCommands } from "./cli_commands/capability_shell_commands.js";
+import { registerCodexCommands } from "./cli_commands/codex_commands.js";
 import { registerConfigCommands } from "./cli_commands/config_commands.js";
 import { registerGatewayCommands } from "./cli_commands/gateway_commands.js";
 import { registerMemorySkillCommands } from "./cli_commands/memory_skill_commands.js";
@@ -30,6 +31,7 @@ registerMvpReviewImproveCommandCommands(program);
 registerAgentSessionCommands(program);
 registerMemorySkillCommands(program);
 registerPolicyCommands(program);
+registerCodexCommands(program);
 registerCapabilityShellCommands(program);
 registerToolCommands(program);
 registerStartRunChatCommands(program);

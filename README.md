@@ -1,4 +1,4 @@
-# COSIA v0.42.0
+# COSIA v0.43.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.42.0 makes provider onboarding a first-class setup path while preserving explicit provider profiles and connector/provider separation. v0.41.0 kept public behavior stable while splitting the large CLI entrypoint into focused command modules.
+v0.43.0 adds a dedicated Codex law amendment flow for protected `codex/*` files. v0.42.0 made provider onboarding a first-class setup path while preserving explicit provider profiles and connector/provider separation.
 
 ## Requirements
 
@@ -304,6 +304,8 @@ cosia session show <session-id>
 - Existing file overwrite requires explicit approval.
 - `codex/POLICY.json` is the Codex law source of truth.
 - `codex/POLICY.md` mirrors the JSON law for humans.
+- Protected Codex law files are changed through `cosia codex amendment propose/apply`, not generic `write_file`.
+- Telegram/REPL conversational approval does not change Codex law; `#적용`, `/apply`, or CLI `--yes` must apply a concrete pending amendment.
 - Runtime settings live in `config/runtime.defaults.json`, legacy `config/runtime.local.json`, and ignored `config/runtime.private.json`.
 - Secret values live in ignored `config/secrets.private.json` or explicitly configured env vars.
 - `config show`, `config check`, and `config migrate --from-policy` manage runtime configuration.
@@ -329,7 +331,7 @@ cosia session show <session-id>
 - `REF_MEMORY.md` is built from core memory plus the current session's session memory and the executing agent's agent memory.
 - Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
 - Memory tier promotion supports `session -> agent`, `session -> core`, and `agent -> core`; source memories are archived after successful promotion.
-- Core memory can create pending skill candidates, but Codex amendment remains deferred to a later diff-based gate.
+- Core memory can create pending skill candidates. Codex law mutation uses the dedicated amendment preview/apply flow.
 - Low-risk, no-conflict memory candidates can be auto-promoted by runtime policy.
 - Auto-promotions and tier promotions can be listed and reverted.
 - Secret-like candidates are high-risk and remain pending with redacted summaries.
@@ -715,6 +717,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.43.0: Codex law amendment preview/apply flow for protected `codex/*` files.
 - v0.42.0: Provider onboarding setup registry and OAuth boundary.
 - v0.41.0: CLI surface module split with behavior-preserving command registration.
 - v0.40.0: Identity surface refactor for the user-amendable Codex runtime direction.
@@ -729,6 +732,6 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 - v0.30.0: Generic workspace fact scan snapshots.
 - v0.29.0: Zero-base capability planner and approved shell bridge.
 - Next decision checkpoint: keep polishing `status/start/chat/Telegram/improve` if they are enough, or plan `cosia tui` if review comparison and repeated operations remain painful.
-- v1.0+: Codex amendment gate.
+- Future: diff/patch-style Codex amendments and behavior-file amendment flow.
 - Later policy maintenance: audit clear/archive commands after run-scoped audit review has settled.
 - Later context maintenance: optional automatic summary/archive after explicit workflows are validated.

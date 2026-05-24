@@ -3,6 +3,7 @@ import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import { readText, resolveInside } from "./fs_utils.js";
 import { PolicyManager, formatPolicySummary } from "./policy_manager.js";
+import { CodexAmendmentLedger, formatCodexAmendmentApplied, formatCodexAmendmentPreview } from "./codex_amendment.js";
 import { getStatusReport, formatStatusReport } from "./status_report.js";
 import { MemoryManager } from "./memory_manager.js";
 import { SessionManager } from "./session_manager.js";
@@ -239,6 +240,10 @@ export async function applyPendingCommand(pending: PendingCommand, ctx: CommandC
     case "write_file.overwrite": {
       return applyWriteFileOverwrite(pending, ctx);
     }
+    case "codex.amendment.apply": {
+      const applied = await new CodexAmendmentLedger(ctx.workspaceRoot).apply(String(pending.args.amendmentId ?? ""));
+      return formatCodexAmendmentApplied(applied);
+    }
     case "shell.apply": {
       if (ctx.previewScope?.chatId) {
         return "[BLOCKED] Shell execution is blocked through gateway channels in v0.29.";
@@ -306,10 +311,44 @@ export async function createWriteFileOverwritePendingCommand(input: {
   }, "mutation", output, input.now, input.ctx, []);
 }
 
+export async function createCodexAmendmentPendingCommand(input: {
+  path: string;
+  content: string;
+  reason: string;
+  workspaceRoot: string;
+  now: () => number;
+  ctx?: CommandCatalogContext;
+}): Promise<PendingCommand> {
+  const amendment = await new CodexAmendmentLedger(input.workspaceRoot).propose({
+    targetPath: input.path,
+    proposedContent: input.content,
+    reason: input.reason,
+    sourceSessionId: input.ctx?.session.id,
+    sourceAgentId: input.ctx?.agent.id,
+    sourceChannel: input.ctx?.previewScope?.chatId ? "gateway" : input.ctx ? "repl" : "cli"
+  });
+  const output = [
+    formatCodexAmendmentPreview(amendment),
+    "",
+    "Run #적용 or /apply to apply this Codex amendment once.",
+    "Run #취소 or /cancel to cancel."
+  ].join("\n");
+  return createPendingCommand("codex.amendment.apply", {
+    amendmentId: amendment.id,
+    path: amendment.targetPath,
+    previousHash: amendment.previousHash,
+    proposedHash: amendment.proposedHash
+  }, "mutation", output, input.now, input.ctx, []);
+}
+
 export async function cancelPendingCommand(pending: PendingCommand, ctx: CommandCatalogContext): Promise<string> {
   if (pending.commandId === "shell.apply") {
     const approval = new ShellApprovalLedger(ctx.workspaceRoot).cancel(String(pending.args.approvalId ?? ""));
     return `[SUCCESS] Shell approval cancelled: ${approval.id}`;
+  }
+  if (pending.commandId === "codex.amendment.apply") {
+    const amendment = new CodexAmendmentLedger(ctx.workspaceRoot).cancel(String(pending.args.amendmentId ?? ""), "Pending Codex amendment cancelled.");
+    return `[SUCCESS] Codex amendment cancelled: ${amendment.id}`;
   }
   return "[SUCCESS] Pending command cancelled.";
 }

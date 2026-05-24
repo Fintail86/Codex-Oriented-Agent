@@ -244,10 +244,17 @@ export type ToolContext = {
   sourceChannel?: "cli" | "repl" | "gateway";
   approveOverwrite?: (filePath: string, request?: OverwriteApprovalRequest) => Promise<boolean>;
   onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
+  onCodexAmendmentRequired?: (request: CodexAmendmentApprovalRequest) => Promise<string | void> | string | void;
   policyAudit?: (event: PolicyAuditEventInput) => Promise<void>;
 };
 
 export type OverwriteApprovalRequest = {
+  path: string;
+  resolvedPath: string;
+  content: string;
+};
+
+export type CodexAmendmentApprovalRequest = {
   path: string;
   resolvedPath: string;
   content: string;
