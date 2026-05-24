@@ -1,5 +1,5 @@
 {
-  "version": "0.39.0",
+  "version": "0.51.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -32,7 +32,28 @@
     "shell"
   ],
   "overwrite": {
-    "existingFileRequiresApproval": true
+    "existingFileRequiresApproval": false
+  },
+  "writes": {
+    "workspaceLocalDefault": "delegated_with_evidence",
+    "agentBehavior": "delegated_with_evidence",
+    "codexLaw": "codex_amendment_required",
+    "systemBoundary": "final_user_approval_required",
+    "outsideWorkspace": "denied"
+  },
+  "approval": {
+    "finalUserApprovalRequiredFor": [
+      "codex_self_amendment",
+      "system_level_boundary_change"
+    ],
+    "delegatedUnderPolicy": [
+      "workspace_local_file_write",
+      "agent_behavior_update",
+      "session_context_maintenance",
+      "low_risk_memory_promotion",
+      "tool_growth_candidate_work",
+      "bounded_command_adapter_execution"
+    ]
   },
   "requireTools": {
     "observationTools": [
@@ -98,25 +119,26 @@
     "archivePolicy": "explicit_cli_only",
     "promotionPaths": {
       "sessionToAgent": "manual_or_low_risk",
-      "sessionToCore": "manual_only",
-      "agentToCore": "manual_only",
-      "coreToSkillCandidate": "manual_only",
+      "sessionToCore": "manual_or_low_risk",
+      "agentToCore": "manual_or_low_risk",
+      "coreToSkillCandidate": "manual_or_low_risk",
       "coreToCodexAmendment": "deferred"
     },
     "autoPromotion": {
-      "mode": "conservative",
+      "mode": "balanced",
       "allowRiskLevels": [
         "low"
       ],
       "requireNoConflict": true,
       "allowTiers": [
-        "session"
-      ],
-      "denyTiers": [
-        "core",
+        "session",
         "agent"
       ],
+      "denyTiers": [
+        "core"
+      ],
       "allowScopes": [
+        "agent",
         "project",
         "session",
         "task",

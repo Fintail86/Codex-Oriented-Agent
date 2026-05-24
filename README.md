@@ -1,4 +1,4 @@
-# COSIA v0.50.0
+# COSIA v0.51.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.50.0 compresses the normal product flow around setup, chat/run, status, continuity, connector setup, and explicit approvals. Tool growth, capability internals, active tool registration, and blueprint work remain available as advanced governance surfaces, but normal use should not require manually walking the internal state machine.
+v0.51.0 aligns COSIA's delegation boundary: final user approval is reserved for Codex self-amendment and system-level boundary changes, while routine workspace-local work can be delegated under active Policy with evidence. Tool growth, capability internals, active tool registration, and blueprint work remain available as advanced governance surfaces, but normal use should not require manually walking the internal state machine.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ git --version
 rg --version
 ```
 
-If you choose the `codex-cli` provider profile, check that provider separately:
+If you choose the compatibility-only `codex-cli` provider profile, check that provider separately:
 
 ```powershell
 codex login
@@ -68,7 +68,8 @@ Normal setup starts with a workspace, an explicit provider profile, and the `sta
 cosia init
 
 cosia provider list-supported
-cosia provider setup --provider codex-cli --name codex --oauth --use
+cosia provider setup --provider openai-codex --name codex --oauth --use
+cosia provider oauth login codex
 cosia provider profile check codex
 
 cosia start
@@ -82,7 +83,8 @@ cosia doctor
 The scriptable profile commands remain available:
 
 ```powershell
-cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile add codex --provider openai-codex --oauth
+cosia provider oauth login codex
 cosia provider profile use codex
 cosia provider profile check codex
 ```
@@ -116,7 +118,7 @@ cosia apply <approval-id> --yes
 cosia cancel <approval-id> --reason "<reason>"
 ```
 
-In REPL or Telegram, session-local previews still use `/pending` or `#대기중인 작업 보여줘`, followed by `/apply` or `#적용`. Plain text such as "승인할게" is never treated as an apply command.
+In REPL or Telegram, session-local previews use `/pending`, followed by `/apply` or `/cancel`. Plain text such as "승인할게" is never treated as an apply command.
 
 Use `mock` only for deterministic runtime regression checks:
 
@@ -182,8 +184,9 @@ cosia run --session <session-id> --prompt "현재 구현 상태를 파일을 보
 Provider setup:
 
 - Fresh init has no active provider profile.
-- `codex-cli` is supported only through an explicit provider profile and uses the user's existing Codex CLI login.
-- COSIA never reads or stores Codex token files.
+- `openai-codex` is the first-class OpenAI Codex OAuth provider path.
+- `codex-cli` is compatibility-only and uses the user's existing Codex CLI login.
+- COSIA never prints OAuth token values.
 - `mock` is for deterministic regression tests only.
 - `openai-compatible` and `openrouter` are available through provider profiles.
 - API keys are entered with hidden input into `config/secrets.private.json`, or read from an explicitly configured env var.
@@ -193,7 +196,8 @@ Provider setup:
 Provider profile setup:
 
 ```powershell
-cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile add codex --provider openai-codex --oauth
+cosia provider oauth login codex
 cosia provider profile use codex
 cosia provider profile check codex
 
@@ -249,7 +253,8 @@ cosia cancel <approval-id> --reason "<reason>"
 cosia provider list-supported
 cosia provider setup
 cosia provider setup --provider <provider-id> --name <profile-name> [--use]
-cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile add codex --provider openai-codex --oauth
+cosia provider oauth login codex
 cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>
 cosia provider profile use <name>
 cosia provider profile list
@@ -319,11 +324,12 @@ cosia session show <session-id>
 
 - `read_file` and `search_files` are read-only workspace tools.
 - `write_file` can only write inside the workspace.
-- Existing file overwrite requires explicit approval.
+- Routine workspace-local writes are delegated under active Policy with evidence. Existing file edits are not automatically system-level changes.
 - `codex/POLICY.json` is the Codex law source of truth.
 - `codex/POLICY.md` mirrors the JSON law for humans.
 - Protected Codex law files are changed through `cosia codex amendment propose/apply`, not generic `write_file`.
-- Telegram/REPL conversational approval does not change Codex law; `#적용`, `/apply`, or CLI `--yes` must apply a concrete pending amendment.
+- Final user approval is reserved for Codex self-amendment and system-level boundary changes.
+- Telegram/REPL conversational approval does not change Codex law; `/apply` or CLI `--yes` must apply a concrete pending amendment.
 - Runtime settings live in `config/runtime.defaults.json`, legacy `config/runtime.local.json`, and ignored `config/runtime.private.json`.
 - Secret values live in ignored `config/secrets.private.json` or explicitly configured env vars.
 - `config show`, `config check`, and `config migrate --from-policy` manage runtime configuration.
@@ -331,7 +337,7 @@ cosia session show <session-id>
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
 - Destructive, network, external-send, and unrestricted shell permissions are disabled by policy. `shell_request` only creates a one-shot approval preview.
-- For `codex-cli` OAuth profiles, authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
+- `openai-codex` OAuth profiles use the official OpenAI Codex app-server auth surface. `codex-cli` remains compatibility-only.
 - Provider config is profile-backed; no provider is active until `cosia provider profile use <name>`.
 - `mock` provider success proves regression safety only; validate at least one real provider profile when checking provider behavior.
 - Provider failures are reported with reason codes and short next-action hints.
@@ -402,7 +408,7 @@ The `mvp` checklist is kept as a historical/manual regression aid while the publ
 
 - `mock` is allowed for unit/integration regression only.
 - Real provider behavior should be validated through an explicit provider profile.
-- `codex-cli`, OpenRouter, and OpenAI-compatible providers are selectable profile paths.
+- OpenAI Codex, OpenRouter, and OpenAI-compatible providers are selectable profile paths.
 - Every acceptance step has a command, expected outcome, and failure hint.
 
 ## Agent Lifecycle
@@ -445,17 +451,14 @@ cosia session context compact <session-id> --keep-last 5 --reason "Summary captu
 /skills use <skill-id>
 /skills drop <skill-id>
 /skills clear
-#상태 보여줘
-#리뷰 보여줘
-#리뷰 3번 디스카드해 이유는 중복
-#컨플릭트 메모리 전부 디스카드해 이유는 중복
-#적용
-#취소
-\#해시로 시작하는 일반 대화
+/pending
+/apply
+/cancel
+/tool grow <request>
 /exit
 ```
 
-`/` commands are exact REPL commands. `#` commands are deterministic natural runtime commands: read-only commands execute immediately, while mutating commands create a five-minute `[PREVIEW]` pending action that must be applied with `#적용` or cancelled with `#취소`. Ordinary text without `#` is sent to the configured model provider. Prefix `\#` when a model prompt should literally start with `#`.
+`/` commands are exact REPL commands. Ordinary text is sent to the configured model provider. Hash-prefixed natural command shortcuts were removed so COSIA behaves more like a normal agentic CLI: ask naturally, use slash commands for explicit local actions, and use `/apply` only for concrete pending previews.
 
 Chat history is durable through `CONTEXT_MEMORY.md`; the in-process REPL history is only a display/cache aid. `REF_MEMORY.md` is generated once when chat starts, then refreshed by `/memory refresh` or after memory auto-promotion. `SESSION_SUMMARY.md` is included in prompt assembly and can be updated manually or by explicit `--from-context` summary preview/apply.
 
@@ -486,15 +489,7 @@ The inbox shows temporary numeric indexes and stable id prefixes. Prefer id pref
 
 `cosia review`, `cosia review --memory`, and `cosia review --skill` print the same pending queue as read-only CLI summaries. `cosia review stats` reports pending, discarded, and cleanup-eligible items. `cosia review cleanup` is preview-first and only removes discarded candidates after the configured retention window when re-run with `--yes`; pending candidates are never auto-deleted.
 
-The chat REPL also accepts hash natural commands for the common review flow:
-
-```text
-#리뷰 보여줘
-#컨플릭트 메모리 전부 디스카드해 이유는 중복
-#적용
-```
-
-Hash mutation previews expire after five minutes, so re-run the hash command if `[EXPIRED]` appears.
+Review mutations are preview-first and expire after five minutes. Use `/apply` for the current concrete pending preview or re-run the explicit slash command if `[EXPIRED]` appears.
 
 ## Self-Improvement Governor
 
@@ -522,7 +517,8 @@ Setup:
 
 ```powershell
 cosia init
-cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile add codex --provider openai-codex --oauth
+cosia provider oauth login codex
 cosia provider profile use codex
 
 cosia gateway telegram enable
@@ -570,18 +566,17 @@ Useful Telegram commands:
 /new <goal>
 /review
 /apply
-#상태 보여줘
-#내 정보
-#리뷰 보여줘
+/pending
+/tool grow <request>
 ```
 
-Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply` or `#적용`, and stale previews are rejected if the target or conflict state changed.
+Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply`, and stale previews are rejected if the target or conflict state changed.
 
-The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default. Group chats are read-only by default even when the chat id is allowlisted. Use `/whoami` or `#내 정보` in Telegram to discover chat/user ids, then explicitly set user and mutation user ids before enabling group mutation. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks.
+The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply`; dangerous commands are blocked in the connector by default. Group chats are read-only by default even when the chat id is allowlisted. Use `/whoami` in Telegram to discover chat/user ids, then explicitly set user and mutation user ids before enabling group mutation. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks.
 
 ## Command Trigger Packs
 
-Hash natural commands are backed by the command catalog and Korean trigger metadata. The canonical command metadata stays in source, while local override files can live under `config/`.
+Command trigger packs are legacy/advanced metadata retained for experiments and diagnostics. They are no longer part of the normal chat or Telegram command surface because hash-prefixed natural command execution has been removed.
 
 ```powershell
 cosia command triggers check
@@ -752,7 +747,7 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 `cosia tool grow --request "<request>"` is the normal guided path for turning repeated work into reviewable local tooling. It still orchestrates scan/proposal/draft/candidate internally, but its default output is routine-centric: request, routine id, readiness, status, and next action. It does not create shell approvals, run commands, or register active tools. Use `cosia tool grow show <routine-id> --advanced` when you need source scan/proposal/draft/candidate ids or evidence detail. Testing still requires `cosia tool grow test <routine-id> --yes`, and activation still requires `cosia tool grow activate <routine-id> --agent <agent-id> --yes`.
 
-Inside chat, `/tool grow <request>` and `#도구 성장 <request>` start the same routine. Short follow-up commands such as `#이 도구 테스트해`, `#이 도구 활성화해`, `#이건 내가 원한 기능이 아니야 이유는 ...`, `#다른 도구 후보 만들어줘`, and `#도구 생성 취소` operate only on the current unambiguous routine.
+Inside chat, `/tool grow <request>` starts the same routine. Follow-up work uses explicit slash commands such as `/tool grow test --yes`, `/tool grow activate --agent <agent-id> --yes`, `/tool grow reject --reason "..."`, `/tool grow retry`, and `/tool grow cancel --reason "..."`.
 
 `command_adapter` candidates are fixed executable + fixed args plans with `cwdPolicy=workspace_root`, output caps, timeouts, audit, and redaction forced on. They do not accept model-provided argument interpolation. A candidate can be approved before testing, but activation requires the latest passed candidate test hash to match the current candidate content hash.
 
@@ -765,6 +760,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 ## Roadmap
 
 - v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
+- v0.51.0: Delegation boundary aligned so routine workspace-local work is delegated under Policy while Codex self-amendment and system-level boundary changes remain final-approval gated.
 - v0.49.0: Normal pending approval surface with `cosia pending`, `cosia apply <id> --yes`, and `cosia cancel <id> --reason`.
 - v0.48.0: First-run and recovery UX wording aligned around direct next commands.
 - v0.47.0: Normal product surface compression for README/help/status, with advanced governance moved behind explicit sections.

@@ -242,6 +242,7 @@ export type ToolContext = {
   agentId?: string;
   runId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
+  forceOverwriteApproval?: boolean;
   approveOverwrite?: (filePath: string, request?: OverwriteApprovalRequest) => Promise<boolean>;
   onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
   onCodexAmendmentRequired?: (request: CodexAmendmentApprovalRequest) => Promise<string | void> | string | void;

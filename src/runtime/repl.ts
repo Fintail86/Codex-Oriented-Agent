@@ -5,16 +5,11 @@ import {
   applyPendingCommand,
   cancelPendingCommand,
   createCodexAmendmentPendingCommand,
-  executeReadOnlyCommand,
-  formatAmbiguousCommand,
-  formatNeedsInput,
   formatPendingCommand,
   isPendingExpired,
   previewMutationCommand,
   type PendingCommand
 } from "./runtime_command_executor.js";
-import { interpretRuntimeHashCommand } from "./runtime_command_interpreter.js";
-import { parseRuntimeHashCommand, retrieveRuntimeCommandCandidates } from "./runtime_command_catalog.js";
 import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import { PolicyManager } from "./policy_manager.js";
@@ -84,7 +79,7 @@ export function formatChatHelp(): string {
     "  /review stats                              Show review queue statistics.",
     "  /review cleanup                            Preview discarded candidate cleanup.",
     "  /review next                               Show the oldest pending review item.",
-    "  /shell <command>                           Preview a one-shot shell approval. Use #적용 to run once.",
+    "  /shell <command>                           Preview a one-shot shell approval. Use /apply to run once.",
     "  /shell cancel                              Cancel the current shell/review preview.",
     "  /pending                                   Show the current session-local pending preview.",
     "  /tool grow <request>                        Start a guided reusable-tool routine.",
@@ -98,27 +93,14 @@ export function formatChatHelp(): string {
     "  /tool grow cancel [routine-id] --reason \"...\"",
     "                                             Cancel the routine without deleting evidence.",
     "",
-    "Natural commands:",
-    "  #상태 보여줘                              Run a COSIA status command.",
-    "  #show status                              English hash commands are supported.",
-    "  #리뷰 보여줘                              Show the review inbox.",
-    "  #리뷰 3번 디스카드해 이유는 중복          Preview discarding a review item.",
-    "  #discard all conflicting memories because duplicate",
-    "                                             Preview discarding conflicted memory candidates.",
-    "  #컨플릭트 메모리 전부 디스카드해 이유는 중복",
-    "                                             Preview discarding conflicted memory candidates.",
-    "  #쉘로 <command> 실행 제안해                Preview a one-shot shell approval.",
-    "  #도구 성장 <request>                       Start a guided reusable-tool routine.",
-    "  #이 도구 테스트해                          Test the current tool growth candidate.",
-    "  #이 도구 활성화해                          Activate the current routine for this agent.",
-    "  #이건 내가 원한 기능이 아니야 이유는 ...   Reject the current candidate.",
-    "  #다른 도구 후보 만들어줘                  Retry the current routine.",
-    "  #도구 생성 취소                            Cancel the current routine.",
-    "  #적용                                     Apply the current pending preview.",
-    "  #취소                                     Cancel the current pending preview.",
-    "  #대기중인 작업 보여줘                     Show the pending preview and remaining time.",
-    "  일반 '승인할게' 문장은 적용 명령이 아닙니다. /apply 또는 #적용을 사용하세요.",
-    "  \\#해시로 시작하는 문장                    Send a leading # to the model conversation.",
+    "Explicit approval commands:",
+    "  /apply                                    Apply the current pending preview.",
+    "  /cancel                                   Cancel the current pending preview.",
+    "  /pending                                  Show the pending preview and remaining time.",
+    "  일반 '승인할게' 문장은 적용 명령이 아닙니다. /apply를 사용하세요.",
+    "",
+    "Notes:",
+    "  # command shortcuts were removed. Use slash commands or plain natural language.",
     "  /exit                                      Leave chat."
   ].join("\n");
 }
@@ -172,7 +154,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
 
   writeLine(errorOutput, `[cosia] chat started: ${session.id}`);
   writeLine(errorOutput, "[cosia] Type /help for commands. Type /exit to leave.");
-  writeLine(errorOutput, "[cosia] Use # for natural runtime commands, e.g. #상태 보여줘.");
+  writeLine(errorOutput, "[cosia] Use slash commands for runtime actions, or plain text for model conversation.");
   const lineIterator = rl[Symbol.asyncIterator]();
   try {
     while (true) {
@@ -430,118 +412,8 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         }
         continue;
       }
-      if (prompt.startsWith("\\#")) {
-        prompt = prompt.slice(1);
-      } else if (prompt.startsWith("#")) {
-        const toolGrowthHash = await handleToolGrowthHashCommand({
-          prompt,
-          workspaceRoot: options.workspaceRoot,
-          providerId,
-          executingAgentId,
-          currentRoutineId: currentToolGrowthRoutineId
-        });
-        if (toolGrowthHash.handled) {
-          currentToolGrowthRoutineId = updateCurrentToolGrowthRoutineId(currentToolGrowthRoutineId, toolGrowthHash.routine);
-          writeLine(output, toolGrowthHash.output);
-          continue;
-        }
-        let intent = parseRuntimeHashCommand(prompt);
-        const currentCommandContext = commandContext();
-        if (intent.type === "no_match") {
-          const candidates = retrieveRuntimeCommandCandidates(prompt, 8, options.workspaceRoot);
-          if (candidates.length === 0) {
-            writeLine(output, "[BLOCKED] Natural command not recognized.");
-            writeLine(output, "Try #상태 보여줘, #show status, #리뷰 보여줘, or type /help.");
-            continue;
-          }
-          try {
-            intent = await interpretRuntimeHashCommand({
-              input: prompt,
-              candidates,
-              workspaceRoot: options.workspaceRoot,
-              providerId,
-              policy,
-              sessionId: session.id,
-              providerTimeoutMs: options.providerTimeoutMs
-            });
-          } catch (error) {
-            writeLine(output, `[FAILED] Command interpreter failed: ${(error as Error).message}`);
-            writeLine(output, "Try an exact slash command like /review, or a direct hash command like #상태 보여줘.");
-            continue;
-          }
-        }
-        if (intent.type === "needs_input") {
-          writeLine(output, formatNeedsInput(intent.commandId, intent.missing, intent.hint));
-          continue;
-        }
-        if (intent.type === "ambiguous") {
-          writeLine(output, formatAmbiguousCommand(intent.candidates, intent.hint));
-          continue;
-        }
-        if (intent.type === "no_match") {
-          writeLine(output, "[BLOCKED] Natural command not recognized.");
-          writeLine(output, "Try #상태 보여줘, #show status, #리뷰 보여줘, or type /help.");
-          continue;
-        }
-        if (intent.commandId === "pending.apply") {
-          if (!pendingCommand) {
-            writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
-            continue;
-          }
-          if (isPendingExpired(pendingCommand, now)) {
-            pendingCommand = undefined;
-            writeLine(output, "[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.");
-            continue;
-          }
-          try {
-            writeLine(output, await withSessionLock(options.workspaceRoot, session.id, {
-              owner: "cli:chat"
-            }, async () => applyPendingCommand(pendingCommand!, currentCommandContext)));
-          } catch (error) {
-            writeLine(output, `[FAILED] ${(error as Error).message}`);
-          }
-          pendingCommand = undefined;
-          continue;
-        }
-        if (intent.commandId === "pending.cancel") {
-          if (pendingCommand) {
-            try {
-              writeLine(output, await cancelPendingCommand(pendingCommand, currentCommandContext));
-            } catch (error) {
-              writeLine(output, `[FAILED] ${(error as Error).message}`);
-            }
-          } else {
-            writeLine(output, "[SUCCESS] Pending command cancelled.");
-          }
-          pendingCommand = undefined;
-          continue;
-        }
-        if (intent.commandId === "pending.show") {
-          if (!pendingCommand) {
-            writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
-            continue;
-          }
-          if (isPendingExpired(pendingCommand, now)) {
-            pendingCommand = undefined;
-            writeLine(output, "[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.");
-            continue;
-          }
-          writeLine(output, formatPendingCommand(pendingCommand, now));
-          continue;
-        }
-        const readOnlyOutput = await executeReadOnlyCommand(intent, currentCommandContext);
-        if (readOnlyOutput !== undefined) {
-          writeLine(output, readOnlyOutput);
-          continue;
-        }
-        const preview = await previewMutationCommand(intent, currentCommandContext);
-        if (preview) {
-          pendingCommand = preview.pending;
-          writeLine(output, preview.output);
-          continue;
-        }
-        writeLine(output, "[BLOCKED] This natural command is recognized but not executable yet.");
-        writeLine(output, "Use the equivalent slash or CLI command shown in /help.");
+      if (prompt.startsWith("#")) {
+        writeLine(output, formatHashCommandRemovedNotice());
         continue;
       }
 
@@ -698,64 +570,6 @@ async function handleToolGrowthSlashCommand(input: {
   return { output: "[BLOCKED] Unknown /tool grow command." };
 }
 
-async function handleToolGrowthHashCommand(input: {
-  prompt: string;
-  workspaceRoot: string;
-  providerId: string;
-  executingAgentId: string;
-  currentRoutineId?: string;
-}): Promise<ToolGrowthReplResult> {
-  const body = input.prompt.trim().replace(/^#/, "").trim();
-  const growth = new ToolGrowthManager(input.workspaceRoot);
-  try {
-    const growthRequest = body.match(/^도구\s*성장\s+(.+)$/);
-    if (growthRequest) {
-      const result = await growth.start({
-        request: growthRequest[1].trim(),
-        agentId: input.executingAgentId,
-        providerId: input.providerId
-      });
-      return { handled: true, output: formatToolGrowthStart(result), routine: result.routine };
-    }
-    if (/^이\s*도구\s*테스트해$/.test(body)) {
-      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
-      const result = await growth.test(routineId, { yes: true });
-      return { handled: true, output: formatToolGrowthTest(result), routine: result.routine };
-    }
-    if (/^이\s*도구\s*활성화해$/.test(body)) {
-      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
-      const result = await growth.activate(routineId, {
-        agentId: input.executingAgentId,
-        yes: true
-      });
-      return { handled: true, output: formatToolGrowthActivation(result), routine: result.routine };
-    }
-    const reject = body.match(/^이건\s*내가\s*원한\s*기능이\s*아니야(?:\s*(?:이유는|사유는)\s*(.+))?$/);
-    if (reject) {
-      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
-      const reason = reject[1]?.trim();
-      if (!reason) {
-        return { handled: true, output: "[BLOCKED] Reject reason is required. 예: #이건 내가 원한 기능이 아니야 이유는 원하는 동작이 아님" };
-      }
-      const routine = growth.reject(routineId, reason);
-      return { handled: true, output: formatToolGrowthRejected(routine), routine };
-    }
-    if (/^다른\s*도구\s*후보\s*만들어줘$/.test(body)) {
-      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
-      const result = await growth.retry(routineId, { providerId: input.providerId });
-      return { handled: true, output: formatToolGrowthStart(result), routine: result.routine };
-    }
-    if (/^도구\s*생성\s*취소$/.test(body)) {
-      const routineId = requireCurrentToolGrowthRoutineId(input.currentRoutineId);
-      const routine = growth.cancel(routineId, "user cancelled tool growth routine");
-      return { handled: true, output: formatToolGrowthCancelled(routine), routine };
-    }
-  } catch (error) {
-    return { handled: true, output: `[FAILED] ${(error as Error).message}` };
-  }
-  return { handled: false, output: "" };
-}
-
 function updateCurrentToolGrowthRoutineId(current: string | undefined, routine: ToolGrowthRoutine | undefined): string | undefined {
   if (!routine) {
     return current;
@@ -765,9 +579,24 @@ function updateCurrentToolGrowthRoutineId(current: string | undefined, routine: 
 
 function requireCurrentToolGrowthRoutineId(current: string | undefined): string {
   if (!current) {
-    throw new Error("Tool growth routine id is required. Start one with #도구 성장 <request> or use /tool grow show <routine-id>.");
+    throw new Error("Tool growth routine id is required. Start one with /tool grow <request> or use /tool grow show <routine-id>.");
   }
   return current;
+}
+
+function formatHashCommandRemovedNotice(): string {
+  return [
+    "Hash command shortcuts were removed.",
+    "Use slash commands for explicit runtime actions:",
+    "  /status",
+    "  /review",
+    "  /pending",
+    "  /apply",
+    "  /cancel",
+    "  /tool grow <request>",
+    "",
+    "Or send plain natural language without #."
+  ].join("\n");
 }
 
 function resolveToolGrowthRoutineId(tokens: string[], current: string | undefined): string | undefined {

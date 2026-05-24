@@ -150,7 +150,7 @@ Current state:
 
 Goal:
 - Make explicit provider profiles the only normal provider selection path.
-- Keep `codex-cli` supported only as a user-created OAuth provider profile.
+- Keep `codex-cli` supported only as a compatibility OAuth provider profile; normal setup should use `openai-codex`.
 - Remove hardcoded/default provider assumptions after warning and migration paths are stable.
 
 Removal/refactor steps:

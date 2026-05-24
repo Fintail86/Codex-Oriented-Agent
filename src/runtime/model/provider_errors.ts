@@ -49,9 +49,13 @@ export function previewText(value: string | undefined, maxChars = 800): string {
 export function providerFailureHint(reason: ProviderFailureReason, providerId: string): string {
   switch (reason) {
     case "cli_missing":
-      return "Install the Codex CLI and make sure `codex` is available on PATH.";
+      return providerId === "openai-codex"
+        ? "Install a Codex build with `codex app-server` support, or choose another provider profile."
+        : "Install the Codex CLI and make sure `codex` is available on PATH.";
     case "auth_failed":
-      return providerId === "codex-cli"
+      return providerId === "openai-codex"
+        ? "Run `cosia provider oauth login <profile>` and then `cosia provider profile check <profile>`."
+        : providerId === "codex-cli"
         ? "Run `codex login` and verify with `codex login status`."
         : "Check the provider API key and authentication settings.";
     case "disabled":

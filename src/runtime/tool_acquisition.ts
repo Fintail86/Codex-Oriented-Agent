@@ -212,17 +212,17 @@ const blueprintSuccessThreshold = 2;
 const envAllowlist = new Set(["PATH", "SYSTEMROOT", "WINDIR", "PATHEXT", "TEMP", "TMP", "HOME", "USERPROFILE"]);
 
 const rawDraftSchema = z.object({
-  targetToolId: z.string().optional(),
-  capabilityFamily: z.string().optional(),
-  permission: z.string().optional(),
-  exposure: z.string().optional(),
-  executorKind: z.string().optional(),
-  executorPlan: z.record(z.string(), z.unknown()).optional(),
-  inputSchemaDraft: z.record(z.string(), z.unknown()).optional(),
-  safetyRationale: z.string().optional(),
-  testPlan: z.string().optional(),
-  rollbackPlan: z.string().optional(),
-  groundingReferences: z.array(z.string()).optional()
+  targetToolId: z.unknown().optional(),
+  capabilityFamily: z.unknown().optional(),
+  permission: z.unknown().optional(),
+  exposure: z.unknown().optional(),
+  executorKind: z.unknown().optional(),
+  executorPlan: z.unknown().optional(),
+  inputSchemaDraft: z.unknown().optional(),
+  safetyRationale: z.unknown().optional(),
+  testPlan: z.unknown().optional(),
+  rollbackPlan: z.unknown().optional(),
+  groundingReferences: z.unknown().optional()
 }).passthrough();
 
 export class ToolAcquisitionManager {
@@ -723,10 +723,10 @@ export class ToolAcquisitionManager {
       exposure,
       executorKind,
       executorPlan,
-      inputSchemaDraft: raw.inputSchemaDraft ?? {},
-      safetyRationale: redactText(raw.safetyRationale ?? "Review required before activation."),
-      testPlan: redactText(raw.testPlan ?? "Run candidate test before activation."),
-      rollbackPlan: redactText(raw.rollbackPlan ?? "Deactivate active tool and remove it from agent allowedTools."),
+      inputSchemaDraft: normalizeInputSchemaDraft(raw.inputSchemaDraft, warnings),
+      safetyRationale: normalizeDraftText(raw.safetyRationale, "Review required before activation.", "safetyRationale", warnings),
+      testPlan: normalizeDraftText(raw.testPlan, "Run candidate test before activation.", "testPlan", warnings),
+      rollbackPlan: normalizeDraftText(raw.rollbackPlan, "Deactivate active tool and remove it from agent allowedTools.", "rollbackPlan", warnings),
       groundingReferences,
       status: "pending",
       candidateContentHash: "",
@@ -1341,6 +1341,67 @@ function normalizeTsModulePlan(value: unknown, warnings: string[]): TsModulePlan
     designNote: redactText(text).slice(0, 2000),
     redaction: true
   };
+}
+
+function normalizeInputSchemaDraft(value: unknown, warnings: string[]): Record<string, unknown> {
+  if (value === undefined) {
+    return {};
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  warnings.push("inputSchemaDraft discarded: expected object");
+  return {};
+}
+
+function normalizeDraftText(value: unknown, fallback: string, field: string, warnings: string[]): string {
+  if (value === undefined || value === null) {
+    return redactText(fallback);
+  }
+  if (typeof value === "string") {
+    return redactText(value);
+  }
+  if (Array.isArray(value)) {
+    warnings.push(`${field} normalized from array to text`);
+    return redactText(value.map((item) => stringifyDraftTextPart(item)).join("\n"));
+  }
+  if (typeof value === "object") {
+    warnings.push(`${field} normalized from object to text`);
+    return redactText(stableStringifyDraftValue(value));
+  }
+  warnings.push(`${field} normalized from ${typeof value} to text`);
+  return redactText(String(value));
+}
+
+function stringifyDraftTextPart(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "object") {
+    return stableStringifyDraftValue(value);
+  }
+  return String(value);
+}
+
+function stableStringifyDraftValue(value: unknown): string {
+  return JSON.stringify(sortDraftValue(value), null, 2);
+}
+
+function sortDraftValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortDraftValue);
+  }
+  if (value && typeof value === "object") {
+    const output: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      output[key] = sortDraftValue((value as Record<string, unknown>)[key]);
+    }
+    return output;
+  }
+  return value;
 }
 
 function normalizeGroundingReferences(

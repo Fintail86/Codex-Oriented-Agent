@@ -1,8 +1,8 @@
 import { stat } from "node:fs/promises";
-import { relative } from "node:path";
 import { resolveInside } from "./fs_utils.js";
 import { defaultPolicy, type PolicyConfig } from "./policy_manager.js";
 import { defaultRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
+import { classifyWritePathBoundary } from "./system_boundary.js";
 import { isBundledToolId } from "./tool_catalog.js";
 import type { ToolDefinition } from "./types.js";
 
@@ -10,7 +10,7 @@ export type PolicyDecision = {
   allowed: boolean;
   ruleId: string;
   reason: string;
-  requiresApproval?: "overwrite" | "codex_amendment";
+  requiresApproval?: "overwrite" | "codex_amendment" | "system_boundary";
 };
 
 export type RuntimePolicyState = {
@@ -86,14 +86,34 @@ export class PolicyEngine {
       return boundary;
     }
     const resolved = resolveInside(workspaceRoot, path);
-    const protectedDecision = this.evaluateProtectedCodexPath(workspaceRoot, resolved);
-    if (!protectedDecision.allowed) {
-      return protectedDecision;
+    const writeBoundary = classifyWritePathBoundary(workspaceRoot, path, this.policy);
+    if (writeBoundary.level === "codex_amendment") {
+      return {
+        allowed: false,
+        ruleId: writeBoundary.ruleId,
+        reason: writeBoundary.reason,
+        requiresApproval: "codex_amendment"
+      };
+    }
+    if (writeBoundary.level === "final_user_approval") {
+      return {
+        allowed: false,
+        ruleId: writeBoundary.ruleId,
+        reason: writeBoundary.reason,
+        requiresApproval: "system_boundary"
+      };
+    }
+    if (writeBoundary.level === "denied") {
+      return {
+        allowed: false,
+        ruleId: writeBoundary.ruleId,
+        reason: writeBoundary.reason
+      };
     }
     return {
       allowed: true,
-      ruleId: "tool.write_local.workspace",
-      reason: `Allowed workspace write operation: ${resolved}`
+      ruleId: writeBoundary.ruleId,
+      reason: `${writeBoundary.reason} Target: ${resolved}`
     };
   }
 
@@ -176,33 +196,8 @@ export class PolicyEngine {
     return undefined;
   }
 
-  private evaluateProtectedCodexPath(workspaceRoot: string, resolvedPath: string): PolicyDecision {
-    const normalized = normalizeRelativePath(relative(workspaceRoot, resolvedPath));
-    const protectedPaths = [
-      ...(this.policy.codex?.protectedSourcePaths ?? []),
-      ...(this.policy.codex?.protectedMirrorPaths ?? [])
-    ].map(normalizeRelativePath);
-    if (protectedPaths.includes(normalized)) {
-      return {
-        allowed: false,
-        ruleId: "codex.protected_path",
-        reason: `Generic write_file cannot modify protected Codex path: ${normalized}. Use an approved Codex amendment apply flow.`,
-        requiresApproval: "codex_amendment"
-      };
-    }
-    return {
-      allowed: true,
-      ruleId: "codex.protected_path.allowed",
-      reason: "Path is not a protected Codex path."
-    };
-  }
-
   private asksForActualFiles(prompt: string): boolean {
     const normalized = prompt.toLowerCase();
     return this.policy.fileInspection.triggerPhrases.some((needle) => normalized.includes(needle.toLowerCase()));
   }
-}
-
-function normalizeRelativePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 }

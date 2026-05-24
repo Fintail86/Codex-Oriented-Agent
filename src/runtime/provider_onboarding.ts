@@ -2,7 +2,7 @@ import type { ProviderProfileAddOptions } from "./provider_profiles.js";
 
 export type ProviderAuthMode = "oauth" | "secret" | "env";
 
-export type OAuthSetupKind = "external_cli_delegation" | "cosia_owned_unimplemented";
+export type OAuthSetupKind = "openai_codex_app_server" | "external_cli_delegation" | "cosia_owned_unimplemented";
 
 export type ProviderOnboardingDescriptor = {
   providerId: string;
@@ -34,15 +34,29 @@ export type ProviderOAuthHandler = {
 
 export const supportedProviderDescriptors: ProviderOnboardingDescriptor[] = [
   {
-    providerId: "codex-cli",
-    displayName: "Codex CLI",
+    providerId: "openai-codex",
+    displayName: "OpenAI Codex",
     defaultProfileName: "codex",
+    authModes: ["oauth"],
+    requiresModel: false,
+    requiresBaseUrl: false,
+    oauthSetupKind: "openai_codex_app_server",
+    notes: [
+      "First-class OpenAI Codex OAuth provider path for COSIA.",
+      "Uses the official Codex app-server auth/account surface instead of `codex exec`.",
+      "No OAuth token values are printed by COSIA."
+    ]
+  },
+  {
+    providerId: "codex-cli",
+    displayName: "Codex CLI compatibility",
+    defaultProfileName: "codex-cli",
     authModes: ["oauth"],
     requiresModel: false,
     requiresBaseUrl: false,
     oauthSetupKind: "external_cli_delegation",
     notes: [
-      "Uses an explicit provider profile.",
+      "Compatibility-only provider path.",
       "OAuth status is delegated to the installed Codex CLI compatibility path.",
       "COSIA does not read or store Codex CLI tokens."
     ]
@@ -125,6 +139,9 @@ export function validateProviderProfileAddOptions(
   if (authMode === "oauth" && descriptor.oauthSetupKind === "cosia_owned_unimplemented") {
     throw new Error(`${descriptor.providerId} COSIA-owned OAuth is not implemented yet.`);
   }
+  if (descriptor.providerId === "openai-codex" && (options.baseUrl || options.apiKeyEnv || options.apiKey)) {
+    throw new Error("openai-codex OAuth profiles do not accept base URL, API key, or env auth fields.");
+  }
   if (descriptor.providerId === "codex-cli" && (options.model || options.baseUrl || options.apiKeyEnv || options.apiKey)) {
     throw new Error("codex-cli OAuth profiles do not accept model, base URL, API key, or env auth fields.");
   }
@@ -186,7 +203,8 @@ export function missingProviderProfileHint(): string {
     "  cosia provider setup",
     "",
     "Or use a scriptable setup path:",
-    "  cosia provider profile add codex --provider codex-cli --oauth",
+    "  cosia provider profile add codex --provider openai-codex --oauth",
+    "  cosia provider oauth login codex",
     "  cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>",
     "",
     "Then select it:",
@@ -198,6 +216,32 @@ export function oauthHandlerForProvider(providerId: string): ProviderOAuthHandle
   const descriptor = requireProviderDescriptor(providerId);
   if (!descriptor.authModes.includes("oauth")) {
     return undefined;
+  }
+  if (descriptor.oauthSetupKind === "openai_codex_app_server") {
+    return {
+      providerId: descriptor.providerId,
+      beginOAuthSetup: () => ({
+        ok: true,
+        mode: "openai_codex_app_server",
+        message: "OpenAI Codex OAuth is handled through the official Codex app-server auth flow.",
+        hint: "Run `cosia provider oauth login <profile>`."
+      }),
+      checkOAuthStatus: () => ({
+        ok: true,
+        mode: "openai_codex_app_server",
+        message: "OAuth status is checked by the openai-codex provider implementation."
+      }),
+      refreshOAuthIfSupported: () => ({
+        ok: true,
+        mode: "openai_codex_app_server",
+        message: "Token refresh is delegated to the official Codex app-server managed ChatGPT auth flow."
+      }),
+      revokeOAuthIfSupported: () => ({
+        ok: true,
+        mode: "openai_codex_app_server",
+        message: "OAuth logout is delegated to the official Codex app-server auth flow."
+      })
+    };
   }
   if (descriptor.oauthSetupKind === "external_cli_delegation") {
     return {
@@ -251,7 +295,7 @@ export function oauthHandlerForProvider(providerId: string): ProviderOAuthHandle
 }
 
 function normalizeProviderId(providerId: string): string {
-  return providerId === "codex" ? "codex-cli" : providerId;
+  return providerId === "codex" ? "openai-codex" : providerId;
 }
 
 function formatAuthModes(modes: ProviderAuthMode[]): string {

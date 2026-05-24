@@ -9,6 +9,7 @@ import { providerTypeForId } from "../runtime_config.js";
 import { ProviderError, providerErrorFromUnknown, providerFailureHint } from "./provider_errors.js";
 import { CodexCliProvider } from "./providers/codex_cli_provider.js";
 import { MockProvider } from "./providers/mock_provider.js";
+import { OpenAICodexProvider } from "./providers/openai_codex_provider.js";
 import { OpenAICompatibleProvider, type FetchLike } from "./providers/openai_compatible_provider.js";
 
 export type ProviderCreateOptions = {
@@ -66,6 +67,16 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
       workspaceRoot,
       timeoutMs,
       sandbox: config.sandbox,
+      structuredRetryCount: config.structuredRetryCount,
+      maxPromptChars: config.maxPromptChars
+    });
+  }
+  if (providerType === "openai-codex") {
+    return new OpenAICodexProvider({
+      id: profile?.name ?? providerId,
+      workspaceRoot,
+      model: profile?.model ?? config.model,
+      timeoutMs,
       structuredRetryCount: config.structuredRetryCount,
       maxPromptChars: config.maxPromptChars
     });
@@ -159,5 +170,5 @@ export function resolveProviderSelection(policy: PolicyConfig, requested?: strin
 }
 
 export function normalizeProviderId(id: string): string {
-  return id === "codex" ? "codex-cli" : id;
+  return id === "codex" ? "openai-codex" : id;
 }

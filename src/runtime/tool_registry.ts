@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -65,7 +65,7 @@ export class ToolRegistry {
         const parsed = writeFileArgs.parse(args);
         const resolved = resolveInside(ctx.workspaceRoot, parsed.path);
         await writeText(resolved, parsed.content);
-        return { ok: true, content: `Wrote ${parsed.path}` };
+        return { ok: true, content: `Wrote ${parsed.path} (delegated under active Policy).` };
     });
     this.registerCatalogTool("search_files", async (args, ctx) => {
         const parsed = searchFilesArgs.parse(args);
@@ -158,9 +158,12 @@ export class ToolRegistry {
           });
           return { ok: false, content: output ?? decision.reason };
         }
+        if (name === "write_file" && decision.requiresApproval === "system_boundary") {
+          return { ok: false, content: `${decision.reason}\nFinal user approval is required for system-level boundary changes.` };
+        }
         return { ok: false, content: decision.reason };
       }
-      if (name === "write_file" && await engine.requiresOverwriteApproval(args, ctx.workspaceRoot)) {
+      if (name === "write_file" && await requiresOverwriteApproval(args, ctx, engine)) {
         await ctx.policyAudit?.({
           eventType: "approval_required",
           allowed: false,
@@ -187,6 +190,30 @@ export class ToolRegistry {
     } catch (error) {
       return { ok: false, content: (error as Error).message };
     }
+  }
+}
+
+async function requiresOverwriteApproval(
+  args: unknown,
+  ctx: ToolContext,
+  engine: PolicyEngine
+): Promise<boolean> {
+  if (!ctx.forceOverwriteApproval) {
+    return engine.requiresOverwriteApproval(args, ctx.workspaceRoot);
+  }
+  const parsed = writeFileArgs.safeParse(args);
+  if (!parsed.success) {
+    return false;
+  }
+  const resolved = resolveInside(ctx.workspaceRoot, parsed.data.path);
+  try {
+    const info = await stat(resolved);
+    return info.isFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 

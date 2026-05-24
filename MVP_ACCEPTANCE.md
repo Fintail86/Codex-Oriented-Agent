@@ -1,36 +1,34 @@
 # COSIA MVP Acceptance
 
-This checklist defines when COSIA's MVP is considered usable. Passing `mock` tests is necessary for regression safety, but it is not enough for MVP readiness. MVP acceptance requires the `codex-cli` provider through Codex OAuth.
+This checklist defines when COSIA's MVP is considered usable. Passing `mock` tests is necessary for regression safety, but it is not enough for MVP readiness. MVP acceptance now targets the `openai-codex` provider through OpenAI Codex OAuth.
 
 ## Provider Standard
 
 - `mock`: regression and deterministic integration tests only.
-- `codex-cli`: required MVP acceptance provider.
+- `openai-codex`: required MVP acceptance provider.
+- `codex-cli`: compatibility-only historical provider path.
 - `openrouter` / `openai-compatible`: optional provider acceptance.
 
 ## Chat Command Layers
 
-Purpose: distinguish exact commands, natural runtime commands, and normal model conversation.
+Purpose: distinguish exact slash commands, explicit apply commands, and normal model conversation.
 
 Command:
 
 ```text
 /review
-#상태 보여줘
-#show status
-#리뷰 3번 디스카드해 이유는 중복
-#discard all conflicting memories because duplicate
-#적용
-\#This line is sent to the model with a leading hash.
+/pending
+/apply
+/cancel
+This line is sent to the model as normal conversation.
 ```
 
 Expected Outcome:
 
 - `/` commands execute exact REPL commands.
-- High-confidence `#` commands run through the deterministic runtime command layer without an extra provider call.
-- Broader `#` commands are interpreted by the active provider only against a limited command shortlist.
-- Mutating `#` commands show `[PREVIEW]` and require `#적용`.
-- Normal text without `#` is sent to the configured provider.
+- Hash command shortcuts are removed from the normal surface.
+- Mutating previews require `/apply` or an explicit CLI apply command.
+- Normal text is sent to the configured provider.
 
 ## 1. Environment and Build
 
@@ -64,7 +62,10 @@ Command:
 ```powershell
 cosia policy check --repair
 cosia config check
-cosia provider check codex-cli
+cosia provider profile add codex --provider openai-codex --oauth
+cosia provider oauth login codex
+cosia provider profile use codex
+cosia provider profile check codex
 ```
 
 Expected Outcome:
@@ -72,12 +73,12 @@ Expected Outcome:
 - `POLICY.json: ok`
 - `POLICY.md: ok`
 - `Config: ok`
-- `Provider: codex-cli`
+- `Provider profile: codex`
 - `Status: ok`
 
 Failure Hint:
 
-- If provider auth fails, run `codex login` and retry `codex login status`.
+- If provider auth fails, run `cosia provider oauth login codex` and retry `cosia provider profile check codex`.
 - If config check warns about real-looking secrets, move those values to environment variables.
 
 ## 3. Fresh Workspace Bootstrap

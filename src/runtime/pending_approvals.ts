@@ -53,7 +53,7 @@ export function formatPendingApprovals(summary: PendingApprovalSummary): string 
     "",
     "Session/chat-local previews",
     "  REPL and Telegram previews can also live inside that session or chat.",
-    "  Use /pending or #대기중인 작업 보여줘 there, then /apply or #적용 for the concrete preview.",
+    "  Use /pending there, then /apply for the concrete preview.",
     "",
     "Plain text approval such as \"승인할게\" does not apply changes."
   );

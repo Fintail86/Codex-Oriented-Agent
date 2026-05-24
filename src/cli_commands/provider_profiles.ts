@@ -32,8 +32,8 @@ export function registerProviderProfileCommands(
   providerProfile
     .command("add")
     .argument("<name>")
-    .requiredOption("--provider <provider-id>", "Provider implementation id, e.g. openrouter, openai-compatible, codex-cli.")
-    .option("--oauth", "Use provider-managed OAuth status. For codex-cli this uses an explicit Codex CLI-backed profile.", false)
+    .requiredOption("--provider <provider-id>", "Provider implementation id, e.g. openai-codex, openrouter, openai-compatible.")
+    .option("--oauth", "Use provider-managed OAuth status.", false)
     .option("--api-key", "Prompt for an API key and store it in the private secret store.", false)
     .option("--api-key-env <env-name>", "Read the API key from an environment variable.")
     .option("--model <model-id>", "Model id for OpenAI-compatible providers.")
@@ -51,9 +51,6 @@ export function registerProviderProfileCommands(
         const authModes = [options.oauth, options.apiKey, Boolean(options.apiKeyEnv)].filter(Boolean).length;
         if (authModes !== 1) {
           throw new Error("Choose exactly one auth mode: --oauth, --api-key, or --api-key-env <ENV_NAME>.");
-        }
-        if (options.oauth && options.provider !== "codex-cli") {
-          throw new Error("--oauth is currently supported for --provider codex-cli.");
         }
         validateProviderProfileAddOptions(name, {
           providerId: options.provider,

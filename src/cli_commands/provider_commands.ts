@@ -19,6 +19,7 @@ import {
   formatCapabilityScan
 } from "../runtime/capability.js";
 import { checkProvider, createProvider, listProviders, resolveProviderSelection } from "../runtime/model/provider_registry.js";
+import { loginOpenAICodexOAuth } from "../runtime/model/providers/openai_codex_provider.js";
 import { addProviderProfile, useProviderProfile } from "../runtime/provider_profiles.js";
 import { registerProviderProfileCommands } from "./provider_profiles.js";
 import {
@@ -244,6 +245,41 @@ export function registerProviderCommands(program: Command): void {
         if (result.hint) {
           console.log(`Hint: ${result.hint}`);
         }
+      });
+    });
+
+  const oauthCommand = providerCommand.command("oauth").description("Manage provider OAuth flows.");
+
+  oauthCommand
+    .command("login")
+    .argument("<profile-name>")
+    .description("Run the provider OAuth login flow for an OAuth provider profile.")
+    .action(async (profileName: string) => {
+      await main(async (workspaceRoot) => {
+        const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+        const profile = policy.model.providerProfiles[profileName];
+        if (!profile) {
+          throw new Error(`Provider profile not found: ${profileName}`);
+        }
+        if (profile.providerId !== "openai-codex") {
+          throw new Error([
+            `Provider profile ${profileName} does not use openai-codex OAuth.`,
+            profile.providerId === "codex-cli"
+              ? "codex-cli is a compatibility provider. Use `codex login` for that profile, or create `--provider openai-codex --oauth`."
+              : "Only openai-codex OAuth is owned by COSIA in this flow."
+          ].join("\n"));
+        }
+        if (profile.auth.mode !== "oauth") {
+          throw new Error(`Provider profile ${profileName} is not an OAuth profile.`);
+        }
+        const result = await loginOpenAICodexOAuth(workspaceRoot, {
+          onMessage: (message) => console.log(message)
+        });
+        console.log(result.message);
+        if (result.accountSummary) {
+          console.log(`Account: ${result.accountSummary}`);
+        }
+        console.log("Secret values were not printed.");
       });
     });
 

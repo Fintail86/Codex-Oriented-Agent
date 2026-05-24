@@ -31,6 +31,7 @@ type RunOptions = {
   onMemoryReview?: (summary: MemoryReviewSummary) => void;
   onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
   stopAfterOverwriteApprovalRequired?: boolean;
+  forceOverwriteApproval?: boolean;
   onCodexAmendmentRequired?: (request: CodexAmendmentApprovalRequest) => Promise<string | void> | string | void;
   stopAfterCodexAmendmentRequired?: boolean;
   manualSkillIds?: string[];
@@ -196,6 +197,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       agentId: agent.id,
       runId,
       sourceChannel: options.sourceChannel ?? "cli",
+      forceOverwriteApproval: options.forceOverwriteApproval,
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false,
       onOverwriteApprovalRequired: async (request) => {
         overwriteApprovalRequired = true;

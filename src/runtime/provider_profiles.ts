@@ -134,6 +134,14 @@ export function providerConfigForProfile(
     type: template.type ?? providerTypeForId(profile.providerId),
     enabled: true
   });
+  if (profile.providerId === "openai-codex" || base.type === "openai-codex") {
+    return {
+      ...base,
+      enabled: true,
+      type: "openai-codex",
+      model: profile.model ?? base.model
+    };
+  }
   if (profile.providerId === "codex-cli" || base.type === "codex-cli") {
     return {
       ...base,
@@ -169,7 +177,8 @@ export function formatProviderProfileList(items: ProviderProfileSummary[]): stri
       "  cosia provider setup",
       "",
       "Scriptable setup:",
-      "  cosia provider profile add codex --provider codex-cli --oauth",
+      "  cosia provider profile add codex --provider openai-codex --oauth",
+      "  cosia provider oauth login codex",
       "  cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>"
     ].join("\n");
   }

@@ -27,8 +27,6 @@ import { chunkTelegramMessage } from "../src/runtime/gateway_format.js";
 import { gatewayProcessLockPath, sessionLockPath, withSessionLock } from "../src/runtime/gateway_locks.js";
 import { formatGatewayStatus, gatewayStopRequestPath, restartGateway, startGateway, stopGateway, unlockStaleGateway, writeGatewayStopRequest } from "../src/runtime/gateway_supervisor.js";
 import { pathExists } from "../src/runtime/fs_utils.js";
-import { interpretRuntimeHashCommand, validateRuntimeCommandInterpreterResult } from "../src/runtime/runtime_command_interpreter.js";
-import { parseRuntimeHashCommand, retrieveRuntimeCommandCandidates } from "../src/runtime/runtime_command_catalog.js";
 import { formatChatHelp, runChatRepl } from "../src/runtime/repl.js";
 import { formatReviewInbox, ReviewInboxService } from "../src/runtime/review_inbox.js";
 import { runSession } from "../src/runtime/runner.js";
@@ -38,6 +36,7 @@ import { assessShellRisk, buildShellApprovalRecord, ShellApprovalLedger } from "
 import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
 import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
 import { getStatusReport } from "../src/runtime/status_report.js";
+import { classifyRuntimeBoundaryChange, classifyWritePathBoundary } from "../src/runtime/system_boundary.js";
 import { codexTemplates } from "../src/runtime/templates.js";
 import {
   checkTelegramGateway,
@@ -170,7 +169,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.50.0\"");
+    expect(policyJson).toContain("\"version\": \"0.51.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -243,6 +242,9 @@ describe("runtime setup", () => {
     expect(prompt).toContain("shell_request does not execute commands");
     expect(prompt).toContain("Static prompt blocks such as AGENT STYLE");
     expect(prompt).toContain("prompt-loaded context snapshots");
+    expect(prompt).toContain("current active toolset cannot inspect that runtime surface");
+    expect(prompt).toContain("/tool grow <request>");
+    expect(prompt).toContain("Hash-prefixed commands are not part of the runtime command surface");
 
     const policy = await new PolicyManager(root).loadPolicy();
     policy.disabledPermissions = [...policy.disabledPermissions, "shell_request"];
@@ -556,7 +558,7 @@ describe("agents", () => {
 });
 
 describe("tools and policy", () => {
-  it("denies writes outside the workspace and denies overwrite without approval", async () => {
+  it("denies writes outside the workspace and delegates routine local overwrites", async () => {
     const root = await initializedWorkspace();
     const registry = new ToolRegistry();
     await writeFile(join(root, "existing.txt"), "old", "utf8");
@@ -573,8 +575,57 @@ describe("tools and policy", () => {
       allowedTools: ["write_file"],
       approveOverwrite: async () => false
     });
-    expect(overwrite.ok).toBe(false);
-    expect(overwrite.content).toContain("Overwrite denied");
+    expect(overwrite.ok).toBe(true);
+    expect(overwrite.content).toContain("Wrote existing.txt");
+    expect(await readFile(join(root, "existing.txt"), "utf8")).toBe("new");
+
+    const remoteOverwrite = await registry.execute("write_file", { path: "existing.txt", content: "remote" }, {
+      workspaceRoot: root,
+      allowedTools: ["write_file"],
+      forceOverwriteApproval: true,
+      approveOverwrite: async () => false
+    });
+    expect(remoteOverwrite.ok).toBe(false);
+    expect(remoteOverwrite.content).toContain("Overwrite denied");
+    expect(await readFile(join(root, "existing.txt"), "utf8")).toBe("new");
+  });
+
+  it("classifies system boundary writes separately from delegated behavior files", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+
+    expect(classifyWritePathBoundary(root, "codex/RULES.md", policy)).toMatchObject({
+      level: "codex_amendment",
+      operation: "codex_self_amendment"
+    });
+    expect(classifyWritePathBoundary(root, "config/runtime.private.json", policy)).toMatchObject({
+      level: "final_user_approval",
+      operation: "system_level_boundary_change"
+    });
+    expect(classifyWritePathBoundary(root, "agents/cosia-agent/manifest.json", policy)).toMatchObject({
+      level: "final_user_approval",
+      operation: "system_level_boundary_change"
+    });
+    expect(classifyWritePathBoundary(root, "agents/cosia-agent/STYLE.md", policy)).toMatchObject({
+      level: "delegated",
+      operation: "agent_behavior_update"
+    });
+    expect(classifyRuntimeBoundaryChange("provider_authority")).toMatchObject({
+      level: "final_user_approval",
+      operation: "system_level_boundary_change"
+    });
+    expect(classifyRuntimeBoundaryChange("connector_authority")).toMatchObject({
+      level: "final_user_approval",
+      operation: "system_level_boundary_change"
+    });
+    expect(classifyRuntimeBoundaryChange("permission_boundary")).toMatchObject({
+      level: "final_user_approval",
+      operation: "system_level_boundary_change"
+    });
+    expect(classifyRuntimeBoundaryChange("ordinary_workspace_file")).toMatchObject({
+      level: "delegated",
+      operation: "workspace_local_file_write"
+    });
   });
 
   it("reads and searches workspace files", async () => {
@@ -812,6 +863,7 @@ describe("policy core", () => {
     const policy = await new PolicyManager(root).loadPolicy();
 
     expect(policy.model.activeProviderProfile).toBeUndefined();
+    expect(policy.model.providers["openai-codex"].enabled).toBe(false);
     expect(policy.model.providers["codex-cli"].enabled).toBe(false);
     expect(policy.model.providers.openrouter.enabled).toBe(false);
     await expect(runSession(root, {
@@ -820,7 +872,7 @@ describe("policy core", () => {
     })).rejects.toThrow("No active provider profile");
 
     await addProviderProfile(root, "codex", {
-      providerId: "codex-cli",
+      providerId: "openai-codex",
       oauth: true
     });
     const codexProfileProvider = createProvider("codex", root, {
@@ -850,6 +902,7 @@ describe("policy core", () => {
   it("lists supported provider setup paths and validates provider-specific setup fields", async () => {
     const supported = formatSupportedProviders();
     expect(supported).toContain("Supported provider setup paths");
+    expect(supported).toContain("openai-codex");
     expect(supported).toContain("codex-cli");
     expect(supported).toContain("openrouter");
     expect(supported).toContain("openai-compatible");
@@ -881,19 +934,31 @@ describe("policy core", () => {
       providerId: "openai-compatible",
       apiKeyEnv: "OPENAI_API_KEY"
     });
+    expect(validateProviderProfileAddOptions("codex", {
+      providerId: "openai-codex",
+      oauth: true
+    })).toMatchObject({
+      providerId: "openai-codex",
+      oauth: true
+    });
     expect(missingProviderProfileHint()).toContain("cosia provider setup");
   });
 
-  it("defines an OAuth boundary without storing codex-cli delegated OAuth tokens", async () => {
+  it("defines an OpenAI Codex OAuth boundary without storing token values in profile output", async () => {
     const root = await initializedWorkspace();
-    const handler = oauthHandlerForProvider("codex-cli");
+    const handler = oauthHandlerForProvider("openai-codex");
     expect(handler?.beginOAuthSetup()).toMatchObject({
+      ok: true,
+      mode: "openai_codex_app_server"
+    });
+    const legacyHandler = oauthHandlerForProvider("codex-cli");
+    expect(legacyHandler?.beginOAuthSetup()).toMatchObject({
       ok: true,
       mode: "external_cli_delegation"
     });
 
     await addProviderProfile(root, "codex", {
-      providerId: "codex-cli",
+      providerId: "openai-codex",
       oauth: true
     });
     expect(await loadPrivateSecrets(root)).toEqual({
@@ -1007,6 +1072,32 @@ describe("policy core", () => {
     expect(JSON.stringify(auditEvents)).toContain("codex.protected_path");
   });
 
+  it("blocks generic write_file access to system-level boundary paths", async () => {
+    const root = await initializedWorkspace();
+    const registry = new ToolRegistry();
+
+    const configWrite = await registry.execute("write_file", {
+      path: "config/runtime.private.json",
+      content: "{}"
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["write_file"]
+    });
+    expect(configWrite.ok).toBe(false);
+    expect(configWrite.content).toContain("system-level boundary path");
+    expect(configWrite.content).toContain("Final user approval");
+
+    const styleWrite = await registry.execute("write_file", {
+      path: "agents/cosia-agent/STYLE.md",
+      content: "# STYLE\n\n- test style update\n"
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["write_file"]
+    });
+    expect(styleWrite.ok).toBe(true);
+    expect(styleWrite.content).toContain("delegated under active Policy");
+  });
+
   it("previews and applies protected Codex source changes through amendment ledger", async () => {
     const root = await initializedWorkspace();
     const ledger = new CodexAmendmentLedger(root);
@@ -1058,7 +1149,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.50.0-policy-amended";
+    policy.version = "0.51.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1066,8 +1157,8 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.50.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.50.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.51.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.51.0-policy-amended");
   });
 
   it("summarizes durable pending approvals and requires explicit top-level apply", async () => {
@@ -1486,6 +1577,42 @@ describe("tool acquisition", () => {
 
     const candidate = result.candidate as ToolCandidateRecord;
     expect(candidateContentHash({ ...candidate, status: "approved" })).toBe(candidate.candidateContentHash);
+  });
+
+  it("normalizes structured ToolDraft text fields instead of crashing", async () => {
+    const root = await initializedWorkspace();
+    const proposal = await plannedCapability(root, "프로바이더 설정 검사 도구 만들어줘");
+    const manager = new ToolAcquisitionManager(root);
+
+    const result = await manager.draftFromCapability(proposal.id, {
+      rawDraft: {
+        targetToolId: "local.search_observation.provider_settings",
+        capabilityFamily: "search_observation",
+        permission: "read_only",
+        exposure: "model",
+        executorKind: "command_adapter",
+        executorPlan: {
+          executable: "node",
+          args: ["--version"],
+          cwdPolicy: "workspace_root",
+          timeoutMs: 30000,
+          outputCapBytes: 12000,
+          redaction: true
+        },
+        inputSchemaDraft: [],
+        safetyRationale: { summary: "Read-only inspection candidate." },
+        testPlan: ["Run the fixed adapter once.", { assert: "No secrets are printed." }],
+        rollbackPlan: { step: "Discard candidate if unsuitable." },
+        groundingReferences: []
+      }
+    });
+
+    expect(result.candidate).toBeDefined();
+    expect(result.warnings).toContain("inputSchemaDraft discarded: expected object");
+    expect(result.warnings).toContain("safetyRationale normalized from object to text");
+    expect(result.warnings).toContain("testPlan normalized from array to text");
+    expect(result.warnings).toContain("rollbackPlan normalized from object to text");
+    expect((result.candidate as ToolCandidateRecord).testPlan).toContain("Run the fixed adapter once.");
   });
 
   it("keeps ts_module candidates review-only and blocks execution testing", async () => {
@@ -2870,6 +2997,7 @@ describe("model parsing and run loop", () => {
     expect(unknown).toMatchObject({ ok: false, reason: "unknown_provider" });
 
     const listed = listProviders(policy);
+    expect(listed.some((provider) => provider.id === "openai-codex" && provider.type === "openai-codex")).toBe(true);
     expect(listed.some((provider) => provider.id === "codex-cli" && !provider.isDefault)).toBe(true);
     expect(listed.some((provider) => provider.id === "openrouter" && provider.type === "openai-compatible")).toBe(true);
     expect(listed.some((provider) => provider.id === "mock" && provider.enabled)).toBe(true);
@@ -2905,6 +3033,7 @@ describe("model parsing and run loop", () => {
       }
     });
     const repaired = normalizePolicy(parsed);
+    expect(repaired.model.providers["openai-codex"].type).toBe("openai-codex");
     expect(repaired.model.providers["codex-cli"].type).toBe("codex-cli");
     expect(repaired.model.providers["openai-compatible"].type).toBe("openai-compatible");
     expect(repaired.model.providers.openrouter).toMatchObject({
@@ -3329,7 +3458,8 @@ describe("model parsing and run loop", () => {
       provider: overwriteProvider
     });
     const overwriteAudit = await new PolicyAuditLog(root).list(overwriteSession.id, 10);
-    expect(overwriteAudit.some((event) => event.eventType === "approval_required" && event.ruleId === "write.overwrite_approval_required")).toBe(true);
+    expect(overwriteAudit.some((event) => event.eventType === "tool_decision" && event.allowed && event.ruleId === "delegation.workspace_local_file_write")).toBe(true);
+    expect(overwriteAudit.some((event) => event.eventType === "approval_required" && event.ruleId === "write.overwrite_approval_required")).toBe(false);
     expect(JSON.stringify(overwriteAudit)).not.toContain("sk-testsecret");
     expect(JSON.stringify(overwriteAudit)).toContain("[content:");
   });
@@ -3502,7 +3632,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.50.0");
+    expect(emptyReport.version).toBe("0.51.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -3747,10 +3877,10 @@ describe("status and listing", () => {
     expect((await new AgentManager(root).loadAgent("cosia-agent")).allowedTools).toContain("local.project_check.mock");
   });
 
-  it("handles tool growth hash commands without ordinary runSession startup", async () => {
+  it("does not execute tool growth through hash command shortcuts", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
-    const session = await sessions.createSession("cosia-agent", "Tool growth hash REPL test");
+    const session = await sessions.createSession("cosia-agent", "Tool growth hash removal test");
     const input = new PassThrough();
     const output = captureWritable();
     const errorOutput = captureWritable();
@@ -3766,10 +3896,6 @@ describe("status and listing", () => {
     const feedInput = async () => {
       for (const line of [
         "#도구 성장 테스트 돌려봐",
-        "#이 도구 테스트해",
-        "#이건 내가 원한 기능이 아니야 이유는 다른 기능",
-        "#다른 도구 후보 만들어줘",
-        "#도구 생성 취소",
         "/exit"
       ]) {
         input.write(`${line}\n`);
@@ -3782,10 +3908,9 @@ describe("status and listing", () => {
 
     expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
     const text = output.read();
-    expect(text).toContain("Tool growth routine created");
-    expect(text).toContain("Tool candidate test passed.");
-    expect(text).toContain("Candidate rejected and preserved as evidence.");
-    expect(text).toContain("Tool growth routine cancelled and preserved as evidence.");
+    expect(text).toContain("Hash command shortcuts were removed.");
+    expect(text).toContain("/tool grow <request>");
+    expect(new ToolGrowthManager(root).list()).toEqual([]);
   });
 
   it("handles review inbox commands inside the shared chat REPL", async () => {
@@ -3863,170 +3988,10 @@ describe("status and listing", () => {
     expect(new SkillManager(root).getCandidate(skillCandidate.id).record.status).toBe("discarded");
   });
 
-  it("parses hash natural command arguments deterministically", () => {
-    expect(parseRuntimeHashCommand("#show status")).toMatchObject({
-      type: "matched",
-      commandId: "status.show"
-    });
-    expect(parseRuntimeHashCommand("#show review")).toMatchObject({
-      type: "matched",
-      commandId: "review.list"
-    });
-    expect(parseRuntimeHashCommand("#리뷰 3번 디스카드해 이유는 중복")).toMatchObject({
-      type: "matched",
-      commandId: "review.discard",
-      args: { target: "3", reason: "중복" }
-    });
-    expect(parseRuntimeHashCommand("#리뷰 b5038e0e 디스카드해 이유는 중복")).toMatchObject({
-      type: "matched",
-      commandId: "review.discard",
-      args: { target: "b5038e0e", reason: "중복" }
-    });
-    expect(parseRuntimeHashCommand("#메모리 검색 required provider")).toMatchObject({
-      type: "matched",
-      commandId: "memory.search",
-      args: { query: "required provider" }
-    });
-    expect(parseRuntimeHashCommand("#memory search required provider")).toMatchObject({
-      type: "matched",
-      commandId: "memory.search",
-      args: { query: "required provider" }
-    });
-    expect(parseRuntimeHashCommand("#컨플릭트 메모리 전부 디스카드해")).toMatchObject({
-      type: "needs_input",
-      commandId: "review.discard_conflicts"
-    });
-    expect(parseRuntimeHashCommand("#컨플릭트 메모리 전부 디스카드해 사유는 테스트 중복")).toMatchObject({
-      type: "matched",
-      commandId: "review.discard_conflicts",
-      args: { reason: "테스트 중복" }
-    });
-    expect(parseRuntimeHashCommand("#리뷰 3번 디스카드해 사유는 중복")).toMatchObject({
-      type: "matched",
-      commandId: "review.discard",
-      args: { target: "3", reason: "중복" }
-    });
-    expect(parseRuntimeHashCommand("#discard all conflicting memories because duplicate")).toMatchObject({
-      type: "matched",
-      commandId: "review.discard_conflicts",
-      args: { reason: "duplicate" }
-    });
-    expect(parseRuntimeHashCommand("#메모리 정리")).toMatchObject({
-      type: "ambiguous"
-    });
-  });
-
-  it("retrieves command candidates and validates LLM command interpreter output", async () => {
-    const root = await initializedWorkspace();
-    const policy = await new PolicyManager(root).loadPolicy();
-    const candidates = retrieveRuntimeCommandCandidates("#please discard duplicate conflicting memories because duplicate");
-    expect(candidates.map((candidate) => candidate.commandId)).toContain("review.discard_conflicts");
-
-    let capturedPrompt = "";
-    const interpreted = await interpretRuntimeHashCommand({
-      input: "#please discard duplicate conflicting memories because duplicate",
-      candidates,
-      workspaceRoot: root,
-      providerId: "mock",
-      policy,
-      sessionId: "session-test",
-      completePrompt: async (prompt) => {
-        capturedPrompt = prompt;
-        return JSON.stringify({
-          type: "matched",
-          commandId: "review.discard_conflicts",
-          confidence: "high",
-          args: { reason: "duplicate" }
-        });
-      }
-    });
-
-    expect(interpreted).toMatchObject({
-      type: "matched",
-      commandId: "review.discard_conflicts",
-      args: { reason: "duplicate" }
-    });
-    expect(capturedPrompt).toContain("Return ONLY raw JSON.");
-    expect(capturedPrompt).toContain("Do not wrap in ```json.");
-    expect(capturedPrompt).toContain("review.discard_conflicts");
-    expect(capturedPrompt).not.toContain("doctor.reset");
-
-    expect(validateRuntimeCommandInterpreterResult(JSON.stringify({
-      type: "matched",
-      commandId: "doctor.reset",
-      confidence: "high",
-      args: {}
-    }), candidates)).toMatchObject({
-      type: "ambiguous"
-    });
-  });
-
-  it("uses user command trigger overrides before built-in Korean triggers", async () => {
-    const root = await initializedWorkspace();
-    await mkdir(join(root, "config"), { recursive: true });
-    await writeFile(join(root, "config", "command_triggers.ko.json"), JSON.stringify({
-      "status.show": ["상태 커스텀"],
-      "review.list": ["상태"]
-    }), "utf8");
-
-    expect(retrieveRuntimeCommandCandidates("#상태 커스텀", 8, root)[0].commandId).toBe("status.show");
-    expect(retrieveRuntimeCommandCandidates("#상태", 8, root)[0].commandId).toBe("review.list");
-    expect(retrieveRuntimeCommandCandidates("게이트웨이 살아 있어?", 8, root)[0].commandId).toBe("gateway.status");
-  });
-
-  it("retries malformed command interpreter JSON once", async () => {
-    const root = await initializedWorkspace();
-    const policy = await new PolicyManager(root).loadPolicy();
-    const candidates = retrieveRuntimeCommandCandidates("#please show current workspace status");
-    let attempts = 0;
-    let retryPrompt = "";
-    const interpreted = await interpretRuntimeHashCommand({
-      input: "#please show current workspace status",
-      candidates,
-      workspaceRoot: root,
-      providerId: "mock",
-      policy,
-      sessionId: "session-test",
-      completePrompt: async (prompt) => {
-        attempts += 1;
-        retryPrompt = prompt;
-        return attempts === 1
-          ? "not-json"
-          : JSON.stringify({
-              type: "matched",
-              commandId: "status.show",
-              confidence: "high",
-              args: {}
-            });
-      }
-    });
-
-    expect(attempts).toBe(2);
-    expect(retryPrompt).toContain("You returned invalid JSON.");
-    expect(retryPrompt).toContain("not-json");
-    expect(interpreted).toMatchObject({
-      type: "matched",
-      commandId: "status.show"
-    });
-  });
-
-  it("handles hash natural commands with pending preview, cancellation, expiration, and escape", async () => {
+  it("keeps pending approval explicit through slash commands after hash shortcuts are removed", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
-    const session = await sessions.createSession("cosia-agent", "Hash command REPL test");
-    const memory = new MemoryManager(root);
-    memory.addMemory({
-      tier: "core",
-      kind: "note",
-      content: "Hash command conflict content."
-    });
-    const [candidate] = await memory.appendCandidates([{
-      tier: "core",
-      kind: "note",
-      content: "hash command conflict content",
-      importance: 3,
-      confidence: 0.8
-    }], session, "run-hash", "cosia-agent");
+    const session = await sessions.createSession("cosia-agent", "Slash pending REPL test");
     const input = new PassThrough();
     const output = captureWritable();
     const errorOutput = captureWritable();
@@ -4062,27 +4027,25 @@ describe("status and listing", () => {
     };
     const feedInput = async () => {
       for (const line of [
-        "#상태 보여줘",
-        "#show status",
         "#리뷰 보여줘",
-        "#memory search required provider",
-        "#컨플릭트 메모리 전부 디스카드해 이유는 중복",
-        "#대기중인 작업 보여줘",
-        "#취소",
-        "#컨플릭트 메모리 전부 디스카드해 이유는 중복"
+        "/status",
+        "/review",
+        "/shell echo ready",
+        "/pending",
+        "/cancel",
+        "/shell echo ready"
       ]) {
         input.write(`${line}\n`);
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
-      await waitForOutput("Pending command cancelled.");
-      await waitForOutputCount("Run #적용 to proceed", 2);
+      await waitForOutput("Shell approval cancelled");
+      await waitForOutputCount("Run /apply to execute once", 2);
       fakeNow += 5 * 60 * 1000 + 1;
-      input.write("#적용\n");
+      input.write("/apply\n");
       await waitForOutput("[EXPIRED]");
       for (const line of [
-        "#컨플릭트 메모리 전부 디스카드해 이유는 중복",
-        "#적용",
-        "\\#상태 보여줘",
+        "/shell echo ready",
+        "/apply",
         "/exit"
       ]) {
         input.write(`${line}\n`);
@@ -4093,17 +4056,16 @@ describe("status and listing", () => {
     await feedInput();
     const result = await resultPromise;
 
-    expect(result).toMatchObject({ turns: 1, endedBy: "exit" });
+    expect(result).toMatchObject({ turns: 0, endedBy: "exit" });
     const text = output.read();
-    expect(text).toContain("COSIA");
     expect(text).toContain("Review Inbox");
+    expect(text).toContain("Hash command shortcuts were removed.");
     expect(text).toContain("[PREVIEW]");
-    expect(text).toContain("Pending command: review.discard_conflicts");
+    expect(text).toContain("Pending command: shell.apply");
     expect(text).toContain("[EXPIRED]");
-    expect(text).toContain("[SUCCESS] Discarded 1 memory candidates.");
-    expect(text).toContain("Mock response");
-    expect((await new MemoryManager(root).getCandidate(candidate.id)).record?.status).toBe("discarded");
-    expect(formatChatHelp()).toContain("Natural commands");
+    expect(text).toContain("[SUCCESS] Shell command executed once.");
+    expect(formatChatHelp()).not.toContain("Natural commands");
+    expect(formatChatHelp()).toContain("# command shortcuts were removed.");
   });
 
   it("prints MVP acceptance checklist and documents expected outcomes", async () => {
@@ -4111,7 +4073,7 @@ describe("status and listing", () => {
     expect(checklist).toContain("COSIA MVP Acceptance Checklist");
     expect(checklist).toContain("[ ] 1. Environment and build");
     expect(checklist).toContain("mock: regression only");
-    expect(checklist).toContain("codex-cli: historical Codex OAuth acceptance path");
+    expect(checklist).toContain("openai-codex: first-class OpenAI Codex OAuth provider profile");
     expect(checklist).toContain("[ ] 8. Review inbox");
     expect(checklist).toContain("Command:");
     expect(checklist).toContain("Expected:");
@@ -4225,7 +4187,7 @@ describe("status and listing", () => {
     expect(updated.connectors.telegram.mutationUserIds).toEqual([]);
   });
 
-  it("processes Telegram updates with allowlist checks, state, chunks, and hash commands", async () => {
+  it("processes Telegram updates with allowlist checks, state, chunks, and slash commands", async () => {
     const root = await initializedWorkspace();
     const policyManager = new PolicyManager(root);
     const policy = await policyManager.loadPolicy();
@@ -4268,7 +4230,7 @@ describe("status and listing", () => {
       update_id: 2,
       message: {
         chat: { id: 123 },
-        text: "#상태 보여줘"
+        text: "/status"
       }
     }, {
       providerId: "mock",
@@ -4282,7 +4244,7 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: 123 },
-        text: "/help\n/sessions\n#상태 보여줘"
+        text: "/help\n/sessions\n/status"
       }
     }, {
       providerId: "mock",
@@ -4356,7 +4318,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.50.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.51.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
       ...state,
@@ -4403,7 +4365,7 @@ describe("status and listing", () => {
       message: {
         chat: { id: -100, type: "group" },
         from: { id: 42, username: "fox" },
-        text: "#적용"
+        text: "/apply"
       }
     }, {
       providerId: "mock",
@@ -4454,7 +4416,7 @@ describe("status and listing", () => {
       message: {
         chat: { id: -100, type: "group" },
         from: { id: 42, username: "fox" },
-        text: "#적용"
+        text: "/apply"
       }
     }, {
       providerId: "mock",
@@ -4475,7 +4437,7 @@ describe("status and listing", () => {
       update_id: 7,
       message: {
         chat: { id: -100, type: "group" },
-        text: "#적용"
+        text: "/apply"
       }
     }, {
       providerId: "mock",
@@ -4498,7 +4460,7 @@ describe("status and listing", () => {
       message: {
         chat: { id: -100, type: "group" },
         from: { id: 42, username: "fox" },
-        text: "#적용"
+        text: "/apply"
       }
     }, {
       providerId: "mock",
@@ -4555,7 +4517,7 @@ describe("status and listing", () => {
     expect(sent.at(-1)?.text).toContain("/new <goal>");
   });
 
-  it("guides plain gateway status questions to explicit gateway commands", async () => {
+  it("routes plain gateway status questions through the model and rejects hash shortcuts", async () => {
     const root = await initializedWorkspace();
     const policyManager = new PolicyManager(root);
     const policy = await policyManager.loadPolicy();
@@ -4592,40 +4554,37 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("명령으로 확인");
-    expect(sent.at(-1)?.text).toContain("#게이트웨이 상태 보여줘");
-    expect(sent.at(-1)?.text).not.toContain("No active session");
+    expect(sent.at(-1)?.text).toContain("No active session");
+    expect(sent.at(-1)?.text).toContain("/new <goal>");
     expect(state.chats["123"]?.activeSessionId).toBeUndefined();
 
     await processTelegramUpdate(root, gatewayPolicy, sender, state, {
       update_id: 2,
       message: {
         chat: { id: 123 },
-        text: "리뷰 보여줘"
+        text: "#리뷰 보여줘"
       }
     }, {
       providerId: "mock",
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("런타임 명령");
-    expect(sent.at(-1)?.text).toContain("#리뷰 보여줘");
+    expect(sent.at(-1)?.text).toContain("Hash command shortcuts were removed.");
+    expect(sent.at(-1)?.text).toContain("/review");
 
     await processTelegramUpdate(root, gatewayPolicy, sender, state, {
       update_id: 3,
       message: {
         chat: { id: 123 },
-        text: "#게이트웨이 상태 보여줘"
+        text: "/status"
       }
     }, {
       providerId: "mock",
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA Gateway Status");
-    expect(sent.at(-1)?.text).toContain("Gateway:");
-    expect(sent.at(-1)?.text).toContain("Connectors");
-    expect(sent.at(-1)?.text).not.toContain("Workspace");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.51.0");
+    expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
   it("turns Telegram write_file overwrite denials into explicit pending apply previews", async () => {
@@ -4676,7 +4635,7 @@ describe("status and listing", () => {
     });
 
     expect(sent.at(-1)?.text).toContain("[PREVIEW] File overwrite requires approval.");
-    expect(sent.at(-1)?.text).toContain("#적용");
+    expect(sent.at(-1)?.text).toContain("/apply");
     expect(state.chats["123"]?.pendingCommand?.commandId).toBe("write_file.overwrite");
     expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
 
@@ -4691,14 +4650,14 @@ describe("status and listing", () => {
       owner: "test"
     });
     expect(sent.at(-1)?.text).toContain("대화 문장만으로는 파일 변경을 적용하지 않습니다");
-    expect(sent.at(-1)?.text).toContain("#적용");
+    expect(sent.at(-1)?.text).toContain("/apply");
     expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
 
     state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
       update_id: 3,
       message: {
         chat: { id: 123 },
-        text: "#적용"
+        text: "/apply"
       }
     }, {
       providerId: "mock",
@@ -4757,7 +4716,7 @@ describe("status and listing", () => {
     });
 
     expect(sent.at(-1)?.text).toContain("[PREVIEW] Codex amendment requires approval.");
-    expect(sent.at(-1)?.text).toContain("#적용");
+    expect(sent.at(-1)?.text).toContain("/apply");
     expect(state.chats["123"]?.pendingCommand?.commandId).toBe("codex.amendment.apply");
     expect(await readFile(rulesPath, "utf8")).toBe(originalRules);
 
@@ -4778,7 +4737,7 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: 123 },
-        text: "#적용"
+        text: "/apply"
       }
     }, {
       providerId: "mock",
@@ -4882,6 +4841,9 @@ describe("status and listing", () => {
       if (String(url).endsWith("/sendMessage")) {
         return jsonResponse({ ok: true, result: { message_id: 1 } });
       }
+      if (String(url).endsWith("/sendChatAction")) {
+        return jsonResponse({ ok: true, result: true });
+      }
       return jsonResponse({ ok: false, description: "unknown" }, 404);
     };
     try {
@@ -4900,6 +4862,11 @@ describe("status and listing", () => {
 
     const getUpdatesRequest = requests.find((request) => request.url.endsWith("/getUpdates"));
     expect(getUpdatesRequest?.body.offset).toBe(10);
+    const chatActionRequest = requests.find((request) => request.url.endsWith("/sendChatAction"));
+    expect(chatActionRequest?.body).toMatchObject({
+      chat_id: "123",
+      action: "typing"
+    });
     const state = await loadTelegramGatewayState(root);
     expect(state.nextOffset).toBe(12);
     expect(state.chats["123"]).toBeDefined();

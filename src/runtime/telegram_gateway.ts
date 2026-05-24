@@ -131,8 +131,11 @@ class TelegramApiError extends Error {
 
 export type TelegramMessageSender = {
   sendMessage(chatId: string, text: string, options?: { replyMarkup?: unknown }): Promise<void>;
+  sendChatAction?(chatId: string, action?: "typing"): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
 };
+
+const TELEGRAM_TYPING_REFRESH_MS = 4000;
 
 class TelegramApiClient {
   private readonly fetchImpl: FetchLike;
@@ -158,6 +161,13 @@ class TelegramApiClient {
       chat_id: chatId,
       text,
       ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {})
+    });
+  }
+
+  async sendChatAction(chatId: string, action: "typing" = "typing"): Promise<void> {
+    await this.call("sendChatAction", {
+      chat_id: chatId,
+      action
     });
   }
 
@@ -423,24 +433,73 @@ export async function processTelegramUpdate(
     if (client.answerCallbackQuery) {
       await client.answerCallbackQuery(callback.id);
     }
-    const input = telegramCallbackInput(callback.data ?? "");
+    return withTelegramTyping(client, chatId, async () => {
+      const input = telegramCallbackInput(callback.data ?? "");
+      let chatState = state.chats[chatId] ?? {
+        providerId: options.providerId
+      };
+      const result = await handleGatewayMessage({
+        workspaceRoot,
+        input,
+        state: chatState,
+        policy,
+        providerId: chatState.providerId ?? options.providerId,
+        owner: options.owner,
+        chatId,
+        source,
+        now: options.now
+      });
+      chatState = result.state;
+      for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
+        await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+      }
+      return {
+        ...state,
+        chats: {
+          ...state.chats,
+          [chatId]: chatState
+        },
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+
+  const message = update.message;
+  if (!message?.text) {
+    return state;
+  }
+  const messageText = message.text;
+  const chatId = String(message.chat.id);
+  if (!policy.connectors.telegram.allowedChatIds.includes(chatId)) {
+    const source = telegramSourceFromMessage(message);
+    if (isGatewayWhoamiInput(messageText)) {
+      await client.sendMessage(chatId, formatGatewayWhoami(source));
+      return state;
+    }
+    await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
+    return state;
+  }
+  const source = telegramSourceFromMessage(message);
+  return withTelegramTyping(client, chatId, async () => {
     let chatState = state.chats[chatId] ?? {
       providerId: options.providerId
     };
-    const result = await handleGatewayMessage({
-      workspaceRoot,
-      input,
-      state: chatState,
-      policy,
-      providerId: chatState.providerId ?? options.providerId,
-      owner: options.owner,
-      chatId,
-      source,
-      now: options.now
-    });
-    chatState = result.state;
-    for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-      await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+    for (const input of splitTelegramInputs(messageText)) {
+      const result = await handleGatewayMessage({
+        workspaceRoot,
+        input,
+        state: chatState,
+        policy,
+        providerId: chatState.providerId ?? options.providerId,
+        owner: options.owner,
+        chatId,
+        source,
+        now: options.now
+      });
+      chatState = result.state;
+      for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
+        await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+      }
     }
     return {
       ...state,
@@ -450,51 +509,7 @@ export async function processTelegramUpdate(
       },
       updatedAt: new Date().toISOString()
     };
-  }
-
-  const message = update.message;
-  if (!message?.text) {
-    return state;
-  }
-  const chatId = String(message.chat.id);
-  if (!policy.connectors.telegram.allowedChatIds.includes(chatId)) {
-    const source = telegramSourceFromMessage(message);
-    if (isGatewayWhoamiInput(message.text)) {
-      await client.sendMessage(chatId, formatGatewayWhoami(source));
-      return state;
-    }
-    await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
-    return state;
-  }
-  const source = telegramSourceFromMessage(message);
-  let chatState = state.chats[chatId] ?? {
-    providerId: options.providerId
-  };
-  for (const input of splitTelegramInputs(message.text)) {
-    const result = await handleGatewayMessage({
-      workspaceRoot,
-      input,
-      state: chatState,
-      policy,
-      providerId: chatState.providerId ?? options.providerId,
-      owner: options.owner,
-      chatId,
-      source,
-      now: options.now
-    });
-    chatState = result.state;
-    for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-      await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
-    }
-  }
-  return {
-    ...state,
-    chats: {
-      ...state.chats,
-      [chatId]: chatState
-    },
-    updatedAt: new Date().toISOString()
-  };
+  });
 }
 
 export async function loadTelegramGatewayState(workspaceRoot: string): Promise<TelegramGatewayState> {
@@ -811,6 +826,38 @@ function telegramSourceFromCallback(callback: NonNullable<TelegramUpdate["callba
   };
 }
 
+async function withTelegramTyping<T>(
+  client: TelegramMessageSender,
+  chatId: string,
+  task: () => Promise<T>
+): Promise<T> {
+  const stopTyping = startTelegramTyping(client, chatId);
+  try {
+    return await task();
+  } finally {
+    stopTyping();
+  }
+}
+
+function startTelegramTyping(client: TelegramMessageSender, chatId: string): () => void {
+  if (!client.sendChatAction) {
+    return () => {};
+  }
+  let stopped = false;
+  const sendTyping = () => {
+    if (stopped) return;
+    void client.sendChatAction?.(chatId, "typing").catch(() => {
+      // Typing indicators are best-effort and should never block the actual response.
+    });
+  };
+  sendTyping();
+  const timer = setInterval(sendTyping, TELEGRAM_TYPING_REFRESH_MS);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
 function telegramCallbackInput(data: string): string {
   const [scope, action, value] = data.split(":");
   if (scope !== "review") {
@@ -835,7 +882,7 @@ function telegramCallbackInput(data: string): string {
 }
 
 function telegramReplyOptions(input: string, output: string): { replyMarkup?: unknown } {
-  if (!input.startsWith("/review") && !input.startsWith("#리뷰")) {
+  if (!input.startsWith("/review")) {
     return {};
   }
   const firstItem = output.match(/^\s*(?:1\.|\s*1\s+)\s+(memory|skill)\s+([a-zA-Z0-9]{8})/m);

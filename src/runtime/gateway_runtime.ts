@@ -4,17 +4,12 @@ import {
   applyPendingCommand,
   cancelPendingCommand,
   createWriteFileOverwritePendingCommand,
-  executeReadOnlyCommand,
-  formatAmbiguousCommand,
-  formatNeedsInput,
   formatPendingCommand,
   isPendingExpired,
   previewMutationCommand,
   type CommandCatalogContext,
   type PendingCommand
 } from "./runtime_command_executor.js";
-import { interpretRuntimeHashCommand } from "./runtime_command_interpreter.js";
-import { runtimeCommandDefinitionById, parseRuntimeHashCommand, retrieveRuntimeCommandCandidates, type RuntimeCommandDefinition } from "./runtime_command_catalog.js";
 import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import type { PolicyConfig } from "./policy_manager.js";
@@ -23,6 +18,7 @@ import { formatReviewInbox, formatReviewNext, formatReviewStats, ReviewInboxServ
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
+import { formatToolGrowthStart, ToolGrowthManager } from "./tool_growth.js";
 import type { SessionMetadata } from "./types.js";
 
 export type GatewaySourceContext = {
@@ -83,10 +79,6 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   if (input.startsWith("#")) {
     return handleHashCommand({ ...options, input, state, now });
   }
-  const commandHint = plainRuntimeCommandHint(input, options.workspaceRoot);
-  if (commandHint) {
-    return done(commandHint, state);
-  }
   if (!state.activeSessionId) {
     return done("No active session. Use /sessions, /use <session-id>, or /new <goal>.", state);
   }
@@ -105,6 +97,7 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     prompt: input,
     providerId: state.providerId,
     sourceChannel: "gateway",
+    forceOverwriteApproval: options.source?.connector === "telegram",
     stopAfterOverwriteApprovalRequired: true,
     stopAfterCodexAmendmentRequired: true,
     onOverwriteApprovalRequired: async (request) => {
@@ -149,15 +142,12 @@ export function formatGatewayHelp(): string {
     "  /new <goal>           Create a session with the default agent.",
     "  /review               Show memory/skill review inbox.",
     "  /review memory|skill  Filter review inbox.",
+    "  /tool grow <request>  Start a guided reusable-tool routine.",
     "  /cancel               Cancel pending mutation preview.",
     "  /apply                Apply pending mutation preview.",
     "",
-    "Natural runtime commands:",
-    "  #상태 보여줘",
-    "  #리뷰 보여줘",
-    "  #컨플릭트 메모리 전부 디스카드해 이유는 중복",
-    "  #적용",
-    "  #취소",
+    "Notes:",
+    "  # command shortcuts were removed. Use slash commands or plain natural language.",
     "",
     "Plain text is sent to the active COSIA session."
   ].join("\n");
@@ -219,24 +209,12 @@ function classifyGatewayInputSafety(input: string, workspaceRoot: string): Gatew
     if (input === "/apply" || input === "/cancel" || input.startsWith("/review cleanup") || input.startsWith("/review promote ") || input.startsWith("/review discard ")) {
       return "mutation";
     }
-    if (input.startsWith("/new ") || input.startsWith("/use ")) {
+    if (input.startsWith("/new ") || input.startsWith("/use ") || input.startsWith("/tool grow ")) {
       return "state_change";
     }
     return "unknown";
   }
   if (input.startsWith("#")) {
-    const parsed = parseRuntimeHashCommand(input);
-    if (parsed.type === "matched") {
-      if (parsed.commandId.startsWith("pending.")) {
-        return "mutation";
-      }
-      const definition = runtimeCommandDefinitionById(parsed.commandId);
-      return definition?.safety === "read_only" ? "read_only" : "mutation";
-    }
-    const candidates = retrieveRuntimeCommandCandidates(input, 8, workspaceRoot);
-    if (candidates.length && candidates.every((candidate) => candidate.safety === "read_only")) {
-      return "read_only";
-    }
     return "unknown";
   }
   return "session_run";
@@ -247,6 +225,7 @@ function isReadOnlySlashCommand(input: string): boolean {
     || input === "/whoami"
     || input === "/status"
     || input === "/sessions"
+    || input === "/pending"
     || input === "/review"
     || input === "/review memory"
     || input === "/review skill"
@@ -375,8 +354,30 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
     const output = await cancelGatewayPending(options);
     return done(output, touch({ ...state, pendingCommand: undefined }));
   }
+  if (input === "/pending") {
+    const pending = state.pendingCommand;
+    if (!pending) return done("[BLOCKED] 적용할 대기 작업이 없습니다.", state);
+    if (isPendingExpired(pending, options.now)) {
+      return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...state, pendingCommand: undefined }));
+    }
+    return done(formatPendingCommand(pending, options.now), state);
+  }
   if (input === "/apply") {
     return applyGatewayPending(options);
+  }
+  if (input.startsWith("/tool grow ")) {
+    const request = input.slice("/tool grow ".length).trim();
+    if (!request) return done("Usage: /tool grow <request>", state);
+    const agentId = state.activeSessionId
+      ? (await new SessionManager(options.workspaceRoot).loadSession(state.activeSessionId)).assignedAgentId ?? options.policy.agents.defaultAgentId
+      : options.policy.agents.defaultAgentId;
+    if (!agentId) return done("No default agent. Run `cosia agent bootstrap` locally first.", state);
+    const result = await new ToolGrowthManager(options.workspaceRoot).start({
+      request,
+      agentId,
+      providerId: state.providerId ?? options.providerId
+    });
+    return done(formatToolGrowthStart(result), state);
   }
   return done(`Unknown Telegram gateway command: ${input}\n\n${formatGatewayHelp()}`, state);
 }
@@ -386,77 +387,12 @@ async function handleHashCommand(options: GatewayMessageOptions & {
   state: GatewayChatState;
   now: () => number;
 }): Promise<GatewayMessageResult> {
-  if (isGatewayWhoamiInput(options.input)) {
-    return done(formatGatewayWhoami(options.source ?? { chatId: options.chatId, chatType: "private" }), options.state);
-  }
-  let intent = parseRuntimeHashCommand(options.input);
-  if (intent.type === "no_match") {
-    const candidates = retrieveRuntimeCommandCandidates(options.input, 8, options.workspaceRoot);
-    if (!candidates.length) {
-      return done("[BLOCKED] Natural command not recognized. Try #상태 보여줘, #리뷰 보여줘, or /help.", options.state);
-    }
-    intent = await interpretRuntimeHashCommand({
-      input: options.input,
-      candidates,
-      workspaceRoot: options.workspaceRoot,
-      providerId: options.state.providerId ?? options.providerId,
-      policy: options.policy,
-      sessionId: options.state.activeSessionId ?? "gateway"
-    });
-  }
-  if (intent.type === "needs_input") {
-    return done(formatNeedsInput(intent.commandId, intent.missing, intent.hint), options.state);
-  }
-  if (intent.type === "ambiguous") {
-    return done(formatAmbiguousCommand(intent.candidates, intent.hint), options.state);
-  }
-  if (intent.type === "no_match") {
-    return done("[BLOCKED] Natural command not recognized. Try #상태 보여줘, #리뷰 보여줘, or /help.", options.state);
-  }
-  if (intent.commandId === "pending.cancel") {
-    if (!options.state.pendingCommand) {
-      return done("[SUCCESS] Pending command cancelled.", touch({ ...options.state, pendingCommand: undefined }));
-    }
-    const output = await cancelGatewayPending(options);
-    return done(output, touch({ ...options.state, pendingCommand: undefined }));
-  }
-  if (intent.commandId === "pending.show") {
-    const pending = options.state.pendingCommand;
-    if (!pending) return done("[BLOCKED] 적용할 대기 작업이 없습니다.", options.state);
-    if (isPendingExpired(pending, options.now)) {
-      return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...options.state, pendingCommand: undefined }));
-    }
-    return done(formatPendingCommand(pending, options.now), options.state);
-  }
-  if (intent.commandId === "pending.apply") {
-    return applyGatewayPending(options);
-  }
-
-  const sessionFree = await executeSessionFreeReadOnly(intent, options);
-  if (sessionFree !== undefined) {
-    return done(sessionFree, options.state);
-  }
-  const ctx = await buildCatalogContext(options);
-  const readOnly = await executeReadOnlyCommand(intent, ctx);
-  if (readOnly !== undefined) {
-    return done(readOnly, options.state);
-  }
-  const preview = await previewMutationCommand(intent, ctx);
-  if (preview?.pending) {
-    return done(preview.output, touch({ ...options.state, pendingCommand: preview.pending }));
-  }
-  if (preview?.output) {
-    return done(preview.output, options.state);
-  }
-  return done("[BLOCKED] This natural command is recognized but is not available through the gateway yet.", options.state);
+  return done(formatHashCommandRemovedNotice(), options.state);
 }
 
 export function isGatewayWhoamiInput(input: string): boolean {
   const normalized = input.trim().toLowerCase();
-  return normalized === "/whoami"
-    || normalized === "#내 정보"
-    || normalized === "#내정보"
-    || normalized === "#whoami";
+  return normalized === "/whoami";
 }
 
 export function formatGatewayWhoami(source: GatewaySourceContext): string {
@@ -476,48 +412,6 @@ export function formatGatewayWhoami(source: GatewaySourceContext): string {
     source.userId ? `  cosia gateway telegram set mutation-user-id ${source.userId}` : "  cosia gateway telegram set mutation-user-id <user-id>",
     "  cosia gateway telegram set group-mode allowed-users"
   ].filter(Boolean).join("\n");
-}
-
-async function executeSessionFreeReadOnly(intent: Extract<ReturnType<typeof parseRuntimeHashCommand>, { type: "matched" }>, options: GatewayMessageOptions & {
-  state: GatewayChatState;
-}): Promise<string | undefined> {
-  switch (intent.commandId) {
-    case "gateway.status": {
-      const { formatGatewayStatus } = await import("./gateway_supervisor.js");
-      return formatGatewayStatus(options.workspaceRoot, { json: false });
-    }
-    case "status.show":
-      return formatStatusReport(await getStatusReport(options.workspaceRoot, options.state.providerId ?? options.providerId));
-    case "session.list":
-      return formatGatewaySessions(await new SessionManager(options.workspaceRoot).listSessions(), options.state.activeSessionId);
-    case "review.list":
-      return formatReviewInbox(await new ReviewInboxService(options.workspaceRoot).list(intent.args.filter === "memory" || intent.args.filter === "skill" ? intent.args.filter : "all"));
-    case "review.next": {
-      const inbox = await new ReviewInboxService(options.workspaceRoot).list("all");
-      return formatReviewNext(inbox.items[0]);
-    }
-    case "review.conflicted_memory": {
-      const inbox = await new ReviewInboxService(options.workspaceRoot).list("memory");
-      return formatReviewInbox({
-        ...inbox,
-        items: inbox.items.filter((item) => item.conflictCount > 0)
-      }, "Conflicted Memory Review");
-    }
-    case "review.stats": {
-      const inbox = new ReviewInboxService(options.workspaceRoot);
-      return formatReviewStats(await inbox.stats({
-        discardedRetentionDays: options.policy.review.discardedRetentionDays,
-        pendingWarningDays: options.policy.review.pendingWarningDays
-      }));
-    }
-    case "memory.search":
-      return new MemoryManager(options.workspaceRoot)
-        .search(String(intent.args.query ?? ""), 8)
-        .map((result) => `${result.record.id.slice(0, 8)} [${result.record.tier}/${result.record.kind}] score:${result.score.toFixed(2)} ${result.record.content}`)
-        .join("\n") || "No matches.";
-    default:
-      return undefined;
-  }
 }
 
 async function applyGatewayPending(options: GatewayMessageOptions & {
@@ -664,56 +558,6 @@ function looksLikePlainApproval(input: string): boolean {
     || /(승인|적용|동의|진행)/.test(input);
 }
 
-function plainRuntimeCommandHint(input: string, workspaceRoot: string): string | undefined {
-  const exact = parseRuntimeHashCommand(`#${input}`);
-  if (exact.type === "matched" && !exact.commandId.startsWith("pending.")) {
-    const definition = runtimeCommandDefinitionById(exact.commandId);
-    return definition ? formatPlainRuntimeCommandHint(definition) : undefined;
-  }
-  if (exact.type === "needs_input") {
-    return [
-      "이 요청은 COSIA 런타임 명령으로 처리해야 합니다.",
-      "일반 대화로 추측하거나 자동 실행하지 않습니다.",
-      "",
-      exact.hint
-    ].join("\n");
-  }
-  if (exact.type === "ambiguous") {
-    return [
-      "이 요청은 여러 COSIA 런타임 명령으로 해석될 수 있습니다.",
-      "일반 대화로 추측하거나 자동 실행하지 않습니다.",
-      "",
-      exact.hint
-    ].join("\n");
-  }
-  if (!mentionsRuntimeTarget(input)) {
-    return undefined;
-  }
-  const candidates = retrieveRuntimeCommandCandidates(input, 2, workspaceRoot);
-  if (candidates.length !== 1) {
-    return undefined;
-  }
-  return formatPlainRuntimeCommandHint(candidates[0]);
-}
-
-function formatPlainRuntimeCommandHint(definition: RuntimeCommandDefinition): string {
-  const slashAlternative = definition.commandId === "status.show" ? "  /status" : undefined;
-  return [
-    "이 요청은 COSIA 런타임 명령으로 확인하는 편이 정확합니다.",
-    "일반 대화로 추측하거나 자동 실행하지 않습니다.",
-    "",
-    "Telegram에서 명시 실행:",
-    `  ${definition.examples[0]}`,
-    slashAlternative,
-    "",
-    "명령 접두어 # 또는 /를 붙여 다시 보내줘."
-  ].filter(Boolean).join("\n");
-}
-
-function mentionsRuntimeTarget(input: string): boolean {
-  return /(cosia|코시아|게이트웨이|gateway|세션|session|리뷰|review|메모리|memory|컨텍스트|context|프로바이더|provider|정책|policy|스킬|skill|도구|tool)/i.test(input);
-}
-
 function formatPlainApprovalNeedsApply(pending: PendingCommand): string {
   return [
     "승인 대기 작업이 있습니다.",
@@ -721,11 +565,25 @@ function formatPlainApprovalNeedsApply(pending: PendingCommand): string {
     "",
     "대화 문장만으로는 파일 변경을 적용하지 않습니다.",
     "실제로 적용하려면 다음 중 하나를 보내주세요:",
-    "  #적용",
     "  /apply",
     "",
     "취소하려면:",
-    "  #취소",
     "  /cancel"
+  ].join("\n");
+}
+
+function formatHashCommandRemovedNotice(): string {
+  return [
+    "Hash command shortcuts were removed.",
+    "Use slash commands for explicit runtime actions:",
+    "  /status",
+    "  /review",
+    "  /sessions",
+    "  /pending",
+    "  /apply",
+    "  /cancel",
+    "  /tool grow <request>",
+    "",
+    "Or send plain natural language without #."
   ].join("\n");
 }

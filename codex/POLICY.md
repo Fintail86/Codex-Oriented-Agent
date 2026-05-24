@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 ## Version
 
-- Policy version: `0.39.0`
+- Policy version: `0.51.0`
 
 ## Agents
 
@@ -26,7 +26,17 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 ## Writes
 
-- Existing file overwrite requires approval: `true`
+- Workspace-local writes: `delegated_with_evidence`
+- Agent behavior writes: `delegated_with_evidence`
+- Codex law writes: `codex_amendment_required`
+- System boundary writes: `final_user_approval_required`
+- Outside-workspace writes: `denied`
+- Legacy overwrite approval switch: `false`
+
+## Approval Boundary
+
+- Final user approval required for: `codex_self_amendment`, `system_level_boundary_change`
+- Delegated under active Policy: `workspace_local_file_write`, `agent_behavior_update`, `session_context_maintenance`, `low_risk_memory_promotion`, `tool_growth_candidate_work`, `bounded_command_adapter_execution`
 
 ## Require Tools
 
@@ -52,10 +62,10 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 - Candidate scopes: `global`, `user`, `codex`, `agent`, `project`, `session`, `task`, `tool`
 - Promotion conflict policy: `block_until_resolved`
 - Archive policy: `explicit_cli_only`
-- Promotion paths: session->agent `manual_or_low_risk`, session->core `manual_only`, agent->core `manual_only`, core->skill `manual_only`, core->codex `deferred`
-- Auto promotion mode: `conservative`
+- Promotion paths: session->agent `manual_or_low_risk`, session->core `manual_or_low_risk`, agent->core `manual_or_low_risk`, core->skill `manual_or_low_risk`, core->codex `deferred`
+- Auto promotion mode: `balanced`
 - Auto promotion risk levels: `low`
-- Auto promotion tiers: `session`
+- Auto promotion tiers: `session`, `agent`
 - Auto promotion requires no conflict: `true`
 
 ## Self Improvement

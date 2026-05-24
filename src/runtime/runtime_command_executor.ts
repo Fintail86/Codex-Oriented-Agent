@@ -167,7 +167,7 @@ export async function previewMutationCommand(intent: Extract<RuntimeCommandResul
       const output = [
         formatShellApprovalPreview(approval),
         "",
-        approval.blocked ? "This command cannot be applied." : "Run #적용 to execute once or #취소 to cancel."
+        approval.blocked ? "This command cannot be applied." : "Run /apply to execute once or /cancel to cancel."
       ].join("\n");
       return { output, pending: approval.blocked ? undefined : createPendingCommand("shell.apply", { approvalId: approval.id }, "dangerous", output, ctx.now, ctx, []) };
     }
@@ -181,7 +181,7 @@ export async function previewMutationCommand(intent: Extract<RuntimeCommandResul
         `Risk: ${item.risk}`,
         `Reason: ${reason}`,
         "",
-        "Run #적용 to proceed or #취소 to cancel."
+        "Run /apply to proceed or /cancel to cancel."
       ].join("\n");
       return { output, pending: createPendingCommand("review.discard", intent.args, "mutation", output, ctx.now, ctx, [item]) };
     }
@@ -192,7 +192,7 @@ export async function previewMutationCommand(intent: Extract<RuntimeCommandResul
         `[PREVIEW] ${preview.matched} conflicting memory candidates will be discarded.`,
         formatReviewBatchDiscard(preview),
         "",
-        "Run #적용 to proceed or #취소 to cancel."
+        "Run /apply to proceed or /cancel to cancel."
       ].join("\n");
       return { output, pending: createPendingCommand("review.discard_conflicts", intent.args, "mutation", output, ctx.now, ctx, preview.items) };
     }
@@ -212,7 +212,7 @@ export async function previewMutationCommand(intent: Extract<RuntimeCommandResul
         "[PREVIEW] Skill candidate promotion preview.",
         result.output,
         "",
-        "Run #적용 to proceed or #취소 to cancel."
+        "Run /apply to proceed or /cancel to cancel."
       ].join("\n");
       return { output, pending: createPendingCommand("review.promote_skill", intent.args, "mutation", output, ctx.now, ctx, [item]) };
     }
@@ -225,7 +225,7 @@ export async function previewMutationCommand(intent: Extract<RuntimeCommandResul
         "[PREVIEW] Discarded review candidates eligible for cleanup.",
         formatReviewCleanup(result),
         "",
-        "Run #적용 to proceed or #취소 to cancel."
+        "Run /apply to proceed or /cancel to cancel."
       ].join("\n");
       return { output, pending: createPendingCommand("review.cleanup", intent.args, "mutation", output, ctx.now, ctx, []) };
     }
@@ -298,8 +298,8 @@ export async function createWriteFileOverwritePendingCommand(input: {
     `New content chars: ${input.content.length}`,
     `New content preview: ${contentPreview}`,
     "",
-    "Run #적용 or /apply to overwrite once.",
-    "Run #취소 or /cancel to cancel.",
+    "Run /apply to overwrite once.",
+    "Run /cancel to cancel.",
     "",
     "The file has not been changed yet."
   ].join("\n");
@@ -330,8 +330,8 @@ export async function createCodexAmendmentPendingCommand(input: {
   const output = [
     formatCodexAmendmentPreview(amendment),
     "",
-    "Run #적용 or /apply to apply this Codex amendment once.",
-    "Run #취소 or /cancel to cancel."
+    "Run /apply to apply this Codex amendment once.",
+    "Run /cancel to cancel."
   ].join("\n");
   return createPendingCommand("codex.amendment.apply", {
     amendmentId: amendment.id,

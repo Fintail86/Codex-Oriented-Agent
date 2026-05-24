@@ -25,6 +25,48 @@ const policyToolSchema = z.object({
 
 const autoPromotionModeSchema = z.enum(["manual", "conservative", "balanced", "strict"]);
 const memoryPromotionPathPolicySchema = z.enum(["manual_or_low_risk", "manual_only", "deferred"]);
+const finalUserApprovalRequirementSchema = z.enum([
+  "codex_self_amendment",
+  "system_level_boundary_change"
+]);
+const delegatedOperationSchema = z.enum([
+  "workspace_local_file_write",
+  "agent_behavior_update",
+  "session_context_maintenance",
+  "low_risk_memory_promotion",
+  "tool_growth_candidate_work",
+  "bounded_command_adapter_execution"
+]);
+const writePolicySchema = z.object({
+  workspaceLocalDefault: z.literal("delegated_with_evidence"),
+  agentBehavior: z.literal("delegated_with_evidence"),
+  codexLaw: z.literal("codex_amendment_required"),
+  systemBoundary: z.literal("final_user_approval_required"),
+  outsideWorkspace: z.literal("denied")
+}).default({
+  workspaceLocalDefault: "delegated_with_evidence",
+  agentBehavior: "delegated_with_evidence",
+  codexLaw: "codex_amendment_required",
+  systemBoundary: "final_user_approval_required",
+  outsideWorkspace: "denied"
+});
+const approvalPolicySchema = z.object({
+  finalUserApprovalRequiredFor: z.array(finalUserApprovalRequirementSchema),
+  delegatedUnderPolicy: z.array(delegatedOperationSchema)
+}).default({
+  finalUserApprovalRequiredFor: [
+    "codex_self_amendment",
+    "system_level_boundary_change"
+  ],
+  delegatedUnderPolicy: [
+    "workspace_local_file_write",
+    "agent_behavior_update",
+    "session_context_maintenance",
+    "low_risk_memory_promotion",
+    "tool_growth_candidate_work",
+    "bounded_command_adapter_execution"
+  ]
+});
 const selfImprovementSchema = z.object({
   skillAutoPromotion: z.object({
     enabled: z.boolean(),
@@ -64,6 +106,8 @@ export const policyConfigSchema = z.object({
   overwrite: z.object({
     existingFileRequiresApproval: z.boolean()
   }),
+  writes: writePolicySchema,
+  approval: approvalPolicySchema,
   requireTools: z.object({
     observationTools: z.array(toolNameSchema),
     writeFileSatisfies: z.boolean()
@@ -123,27 +167,27 @@ export const policyConfigSchema = z.object({
       coreToCodexAmendment: memoryPromotionPathPolicySchema
     }).default({
       sessionToAgent: "manual_or_low_risk",
-      sessionToCore: "manual_only",
-      agentToCore: "manual_only",
-      coreToSkillCandidate: "manual_only",
+      sessionToCore: "manual_or_low_risk",
+      agentToCore: "manual_or_low_risk",
+      coreToSkillCandidate: "manual_or_low_risk",
       coreToCodexAmendment: "deferred"
     }),
     autoPromotion: z.object({
       mode: autoPromotionModeSchema,
       allowRiskLevels: z.array(riskLevelSchema),
       requireNoConflict: z.boolean(),
-      allowTiers: z.array(memoryTierSchema).default(["session"]),
-      denyTiers: z.array(memoryTierSchema).default(["core", "agent"]),
+      allowTiers: z.array(memoryTierSchema).default(["session", "agent"]),
+      denyTiers: z.array(memoryTierSchema).default(["core"]),
       allowScopes: z.array(memoryScopeSchema),
       denyScopes: z.array(memoryScopeSchema),
       denyKinds: z.array(z.string().min(1))
     }).default({
-      mode: "conservative",
+      mode: "balanced",
       allowRiskLevels: ["low"],
       requireNoConflict: true,
-      allowTiers: ["session"],
-      denyTiers: ["core", "agent"],
-      allowScopes: ["project", "session", "task", "tool"],
+      allowTiers: ["session", "agent"],
+      denyTiers: ["core"],
+      allowScopes: ["agent", "project", "session", "task", "tool"],
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
     })
@@ -169,7 +213,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.50.0",
+  version: "0.51.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -197,7 +241,28 @@ export const defaultPolicy: PolicyConfig = {
   },
   disabledPermissions: ["destructive", "network", "external_send", "shell"],
   overwrite: {
-    existingFileRequiresApproval: true
+    existingFileRequiresApproval: false
+  },
+  writes: {
+    workspaceLocalDefault: "delegated_with_evidence",
+    agentBehavior: "delegated_with_evidence",
+    codexLaw: "codex_amendment_required",
+    systemBoundary: "final_user_approval_required",
+    outsideWorkspace: "denied"
+  },
+  approval: {
+    finalUserApprovalRequiredFor: [
+      "codex_self_amendment",
+      "system_level_boundary_change"
+    ],
+    delegatedUnderPolicy: [
+      "workspace_local_file_write",
+      "agent_behavior_update",
+      "session_context_maintenance",
+      "low_risk_memory_promotion",
+      "tool_growth_candidate_work",
+      "bounded_command_adapter_execution"
+    ]
   },
   requireTools: {
     observationTools: ["read_file", "search_files"],
@@ -247,18 +312,18 @@ export const defaultPolicy: PolicyConfig = {
     archivePolicy: "explicit_cli_only",
     promotionPaths: {
       sessionToAgent: "manual_or_low_risk",
-      sessionToCore: "manual_only",
-      agentToCore: "manual_only",
-      coreToSkillCandidate: "manual_only",
+      sessionToCore: "manual_or_low_risk",
+      agentToCore: "manual_or_low_risk",
+      coreToSkillCandidate: "manual_or_low_risk",
       coreToCodexAmendment: "deferred"
     },
     autoPromotion: {
-      mode: "conservative",
+      mode: "balanced",
       allowRiskLevels: ["low"],
       requireNoConflict: true,
-      allowTiers: ["session"],
-      denyTiers: ["core", "agent"],
-      allowScopes: ["project", "session", "task", "tool"],
+      allowTiers: ["session", "agent"],
+      denyTiers: ["core"],
+      allowScopes: ["agent", "project", "session", "task", "tool"],
       denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
     }
@@ -460,6 +525,9 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
   if (!providers["codex-cli"]) {
     providers["codex-cli"] = defaultPolicy.model.providers["codex-cli"];
   }
+  if (!providers["openai-codex"]) {
+    providers["openai-codex"] = defaultPolicy.model.providers["openai-codex"];
+  }
   if (!providers["openai-compatible"]) {
     providers["openai-compatible"] = defaultPolicy.model.providers["openai-compatible"];
   }
@@ -495,6 +563,14 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
         ...defaultPolicy.selfImprovement.skillAutoPromotion,
         ...policy.selfImprovement?.skillAutoPromotion
       }
+    },
+    writes: {
+      ...defaultPolicy.writes,
+      ...policy.writes
+    },
+    approval: {
+      ...defaultPolicy.approval,
+      ...policy.approval
     }
   });
 }
@@ -506,6 +582,8 @@ export function policyLawJson(policy: PolicyConfig): Record<string, unknown> {
     tools: policy.tools,
     disabledPermissions: policy.disabledPermissions,
     overwrite: policy.overwrite,
+    writes: policy.writes,
+    approval: policy.approval,
     requireTools: policy.requireTools,
     fileInspection: policy.fileInspection,
     codex: policy.codex,
@@ -541,7 +619,17 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 
 ## Writes
 
-- Existing file overwrite requires approval: \`${policy.overwrite.existingFileRequiresApproval}\`
+- Workspace-local writes: \`${policy.writes.workspaceLocalDefault}\`
+- Agent behavior writes: \`${policy.writes.agentBehavior}\`
+- Codex law writes: \`${policy.writes.codexLaw}\`
+- System boundary writes: \`${policy.writes.systemBoundary}\`
+- Outside-workspace writes: \`${policy.writes.outsideWorkspace}\`
+- Legacy overwrite approval switch: \`${policy.overwrite.existingFileRequiresApproval}\`
+
+## Approval Boundary
+
+- Final user approval required for: ${policy.approval.finalUserApprovalRequiredFor.map((item) => `\`${item}\``).join(", ")}
+- Delegated under active Policy: ${policy.approval.delegatedUnderPolicy.map((item) => `\`${item}\``).join(", ")}
 
 ## Require Tools
 
@@ -598,7 +686,8 @@ export function formatPolicySummary(policy: PolicyConfig): string {
     `Policy ${policy.version}`,
     `Core tools: ${toolSummary}`,
     `Disabled permissions: ${policy.disabledPermissions.join(", ")}`,
-    `Overwrite approval: ${policy.overwrite.existingFileRequiresApproval ? "required" : "not required"}`,
+    `Workspace writes: ${policy.writes.workspaceLocalDefault}`,
+    `Final approval: ${policy.approval.finalUserApprovalRequiredFor.join(", ")}`,
     `Long-term memory: ${policy.memory.longTermWrite}`,
     `Memory conflict policy: ${policy.memory.promotionConflictPolicy}`,
     `Memory auto promotion: ${policy.memory.autoPromotion.mode}`,

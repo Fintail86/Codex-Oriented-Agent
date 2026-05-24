@@ -277,7 +277,7 @@ export function formatCodexAmendmentPreview(amendment: CodexAmendment): string {
     `Preview: ${redactedContentPreview(amendment.proposedContent)}`,
     "",
     `Run: cosia codex amendment apply ${amendment.id} --yes`,
-    "Or in REPL/Telegram, run #적용 or /apply for the concrete pending preview.",
+    "Or in REPL/Telegram, run /apply for the concrete pending preview.",
     "",
     "The Codex file has not been changed yet."
   ].join("\n");

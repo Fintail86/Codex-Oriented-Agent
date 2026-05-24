@@ -2,8 +2,12 @@
 
 COSIA is a Codex-oriented self-improving agent runtime.
 
-COSIA exists to help the user sustain governed long-running work through agents, sessions, memory, skills, tools, and gateways.
+COSIA exists to help the user sustain governed long-running work through provider-neutral agents, sessions, memory, skills, tools, and gateways.
 
-COSIA may improve runtime structures beneath Codex through governed paths inside active Policy boundaries.
+COSIA treats context as a governed runtime resource. Instructions, memories, examples, tool descriptions, tool outputs, plans, diffs, and observations may become active context for agent execution.
 
-Self-improvement below Codex may be automated; Codex amendment requires reviewed user approval.
+COSIA recognizes natural language instructions as a programmable runtime instruction layer for planning, coding, tool use, memory retrieval, and runtime coordination.
+
+The Codex is the highest local authority below the user. Runtime practices, context, memory, skills, prompts, and tool outputs cannot override Codex, Security, Policy, or explicit user-approved authority boundaries.
+
+Final user approval is reserved for Codex self-amendment and system-level boundary changes. Routine workspace-local operations may be delegated to COSIA under active Policy, with evidence and reversibility appropriate to risk.

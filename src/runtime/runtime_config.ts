@@ -12,7 +12,7 @@ import {
 } from "./tool_catalog.js";
 
 const promptOverflowPolicySchema = z.literal("truncate_low_priority");
-const providerTypeSchema = z.enum(["codex-cli", "openai-compatible"]);
+const providerTypeSchema = z.enum(["openai-codex", "codex-cli", "openai-compatible"]);
 const providerResponseFormatSchema = z.enum(["json_object"]).nullable();
 const providerAuthSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("oauth") }),
@@ -178,6 +178,20 @@ export const defaultRuntimeConfig: RuntimeConfig = {
         responseFormat: null,
         extraHeaders: {}
       },
+      "openai-codex": {
+        type: "openai-codex",
+        enabled: false,
+        sandbox: "read-only",
+        baseUrl: null,
+        model: null,
+        apiKeyEnv: "OPENAI_API_KEY",
+        endpointPath: "/chat/completions",
+        timeoutMs: 120000,
+        structuredRetryCount: 1,
+        maxPromptChars: 60000,
+        responseFormat: null,
+        extraHeaders: {}
+      },
       "openai-compatible": {
         type: "openai-compatible",
         enabled: false,
@@ -237,7 +251,10 @@ export const defaultRuntimeConfig: RuntimeConfig = {
 };
 
 export function providerTypeForId(id: string): ProviderType {
-  return id === "codex-cli" || id === "codex" ? "codex-cli" : "openai-compatible";
+  if (id === "openai-codex" || id === "codex") {
+    return "openai-codex";
+  }
+  return id === "codex-cli" ? "codex-cli" : "openai-compatible";
 }
 
 export function defaultProviderConfigForId(id: string): ProviderConfig {
@@ -248,7 +265,7 @@ export function defaultProviderConfigForId(id: string): ProviderConfig {
   return providerConfigSchema.parse({
     type: providerTypeForId(id),
     enabled: false,
-    sandbox: providerTypeForId(id) === "codex-cli" ? "read-only" : undefined
+    sandbox: providerTypeForId(id) === "codex-cli" || providerTypeForId(id) === "openai-codex" ? "read-only" : undefined
   });
 }
 
@@ -365,6 +382,9 @@ export function normalizeRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
   if (!providers["codex-cli"]) {
     providers["codex-cli"] = defaultRuntimeConfig.model.providers["codex-cli"];
   }
+  if (!providers["openai-codex"]) {
+    providers["openai-codex"] = defaultRuntimeConfig.model.providers["openai-codex"];
+  }
   if (!providers["openai-compatible"]) {
     providers["openai-compatible"] = defaultRuntimeConfig.model.providers["openai-compatible"];
   }
@@ -443,7 +463,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   const hasLegacyRuntime = Object.keys(legacy).length > 0;
   const legacyToolLocal = localConfigFromLegacyPolicyTools(raw);
   const lawPolicy = stripRuntimeConfig(raw);
-  lawPolicy.version = "0.50.0";
+  lawPolicy.version = "0.51.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
   const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
@@ -501,6 +521,7 @@ export async function formatConfigShow(workspaceRoot: string, legacyPolicyRaw?: 
     ["promptBudget.contextTailChars", String(result.config.promptBudget.contextTailChars)],
     ["model.activeProviderProfile", result.config.model.activeProviderProfile ?? "none"],
     ["model.providerProfiles", String(Object.keys(result.config.model.providerProfiles).length)],
+    ["model.providers.openai-codex.enabled", String(result.config.model.providers["openai-codex"]?.enabled ?? false)],
     ["model.providers.codex-cli.enabled", String(result.config.model.providers["codex-cli"]?.enabled ?? false)],
     ["model.providers.openrouter.enabled", String(result.config.model.providers.openrouter?.enabled ?? false)],
     ["model.providers.openrouter.model", result.config.model.providers.openrouter?.model ?? "null"],

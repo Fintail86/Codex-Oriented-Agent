@@ -33,7 +33,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show COSIA gateway process and connector status.",
     argsSchema: {},
-    examples: ["#게이트웨이 상태 보여줘", "#show gateway status"],
+    examples: ["/status", "cosia gateway status"],
     triggers: {
       ko: ["게이트웨이 상태", "게이트웨이 살아", "게이트웨이 켜져", "게이트웨이 실행 중", "게이트웨이 동작 중"],
       en: ["gateway status", "show gateway status", "check gateway status", "gateway running", "gateway alive"]
@@ -44,7 +44,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show COSIA workspace status and recommended next actions.",
     argsSchema: {},
-    examples: ["#상태 보여줘", "#show status"],
+    examples: ["/status", "cosia status"],
     triggers: {
       ko: ["상태", "현황", "진단", "상태 보여줘", "상태 확인"],
       en: ["status", "show status", "check status", "workspace status", "health", "diagnose"]
@@ -55,7 +55,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show pending memory and skill review items.",
     argsSchema: { optional: ["filter"] },
-    examples: ["#리뷰 보여줘", "#show review"],
+    examples: ["/review", "cosia review"],
     triggers: {
       ko: ["리뷰", "후보", "리뷰 보여줘", "리뷰 목록", "검토"],
       en: ["review", "show review", "review inbox", "pending review", "review list"]
@@ -66,7 +66,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show the next pending review item.",
     argsSchema: {},
-    examples: ["#다음 리뷰 보여줘", "#show next review"],
+    examples: ["/review next", "cosia review next"],
     triggers: {
       ko: ["다음 리뷰", "다음 후보"],
       en: ["next review", "show next review", "next pending review"]
@@ -77,7 +77,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show pending memory candidates that currently have conflicts.",
     argsSchema: {},
-    examples: ["#컨플릭트 메모리 보여줘", "#show conflicting memories"],
+    examples: ["/review conflicts <id-prefix>"],
     triggers: {
       ko: ["컨플릭트 메모리", "충돌 메모리", "충돌 후보"],
       en: ["conflicting memories", "conflict memory", "memory conflicts", "show conflicts"]
@@ -88,7 +88,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show review queue statistics and cleanup recommendations.",
     argsSchema: {},
-    examples: ["#리뷰 통계 보여줘", "#show review stats"],
+    examples: ["/review stats", "cosia review stats"],
     triggers: {
       ko: ["리뷰 통계", "후보 통계", "리뷰 상태"],
       en: ["review stats", "review statistics", "review queue stats"]
@@ -99,7 +99,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "mutation",
     description: "Preview discarding one review item by index or id prefix.",
     argsSchema: { required: ["target", "reason"] },
-    examples: ["#리뷰 3번 디스카드해 이유는 중복", "#discard review 3 because duplicate"],
+    examples: ["/review discard <id-prefix> --reason \"duplicate\""],
     triggers: {
       ko: ["리뷰 디스카드", "후보 디스카드", "디스카드"],
       en: ["discard review", "discard candidate", "discard item", "discard"]
@@ -110,7 +110,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "mutation",
     description: "Preview discarding all pending memory candidates with conflicts.",
     argsSchema: { required: ["reason"] },
-    examples: ["#컨플릭트 메모리 전부 디스카드해 이유는 중복", "#discard all conflicting memories because duplicate"],
+    examples: ["/review discard-conflicts --reason \"duplicate\""],
     triggers: {
       ko: ["컨플릭트 메모리 디스카드", "충돌 메모리 디스카드", "중복 메모리 정리"],
       en: ["discard conflicting memories", "discard all conflicting memories", "discard duplicate memories", "duplicate conflicting memories", "cleanup conflicting memories"]
@@ -121,7 +121,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "mutation",
     description: "Preview promoting a skill candidate by index or id prefix.",
     argsSchema: { required: ["target"] },
-    examples: ["#스킬 후보 2번 승격해", "#promote skill candidate 2"],
+    examples: ["/review promote <id-prefix>"],
     triggers: {
       ko: ["스킬 후보 승격", "스킬 승격"],
       en: ["promote skill candidate", "promote skill"]
@@ -132,7 +132,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "mutation",
     description: "Preview cleanup of discarded review candidates after retention.",
     argsSchema: {},
-    examples: ["#리뷰 정리해", "#cleanup review queue"],
+    examples: ["/review cleanup"],
     triggers: {
       ko: ["리뷰 정리", "후보 정리", "디스카드 정리"],
       en: ["cleanup review", "review cleanup", "cleanup review queue"]
@@ -143,7 +143,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Search active long-term memories.",
     argsSchema: { required: ["query"] },
-    examples: ["#메모리 검색 required provider", "#memory search required provider"],
+    examples: ["cosia memory search \"required provider\""],
     triggers: {
       ko: ["메모리 검색", "기억 검색", "메모리 찾아줘"],
       en: ["memory search", "search memory", "search memories", "find memory"]
@@ -154,7 +154,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "List sessions.",
     argsSchema: {},
-    examples: ["#세션 목록 보여줘", "#show sessions"],
+    examples: ["/sessions", "cosia session list"],
     triggers: {
       ko: ["세션 목록", "세션 보여줘"],
       en: ["sessions", "show sessions", "session list", "list sessions"]
@@ -165,7 +165,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show the current session summary.",
     argsSchema: {},
-    examples: ["#세션 요약 보여줘", "#show session summary"],
+    examples: ["/summary show"],
     triggers: {
       ko: ["세션 요약", "요약 보여줘"],
       en: ["session summary", "show summary", "show session summary"]
@@ -176,7 +176,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Show context health for the current session.",
     argsSchema: {},
-    examples: ["#컨텍스트 상태 보여줘", "#show context status"],
+    examples: ["/context status"],
     triggers: {
       ko: ["컨텍스트 상태", "문맥 상태"],
       en: ["context status", "context health", "show context"]
@@ -187,7 +187,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Check the active provider and list configured providers.",
     argsSchema: {},
-    examples: ["#provider 확인해", "#check provider"],
+    examples: ["cosia provider profile check"],
     triggers: {
       ko: ["프로바이더", "provider 확인", "모델 확인"],
       en: ["provider", "check provider", "provider status", "model provider"]
@@ -198,7 +198,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Run a policy-gated catalog tool.",
     argsSchema: { required: ["toolId"], optional: ["toolArgs"] },
-    examples: ["#tool read_file path README.md"],
+    examples: ["cosia tool active show <tool-id>"],
     triggers: {
       ko: ["도구 실행"],
       en: ["tool run"]
@@ -209,7 +209,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "preview_mutation",
     description: "Create a user-reviewable one-shot shell approval preview.",
     argsSchema: { required: ["command"], optional: ["reason"] },
-    examples: ["#쉘로 echo ready 실행 제안해", "#suggest shell echo ready"],
+    examples: ["/shell echo ready", "cosia shell preview --command \"echo ready\""],
     triggers: {
       ko: ["쉘 실행 제안", "쉘로 실행", "터미널 실행 제안"],
       en: ["shell preview", "suggest shell", "propose shell"]
@@ -220,7 +220,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "Check policy JSON and Markdown mirror health.",
     argsSchema: {},
-    examples: ["#policy 검사해", "#check policy"],
+    examples: ["cosia policy check"],
     triggers: {
       ko: ["정책 검사", "policy 검사", "정책 확인"],
       en: ["policy", "check policy", "policy check"]
@@ -231,7 +231,7 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
     safety: "read_only",
     description: "List global skills and current agent skill selection state.",
     argsSchema: {},
-    examples: ["#스킬 목록 보여줘", "#show skills"],
+    examples: ["/skills list", "cosia skill list"],
     triggers: {
       ko: ["스킬 목록", "스킬 보여줘"],
       en: ["skills", "show skills", "skill list", "list skills"]
@@ -261,7 +261,7 @@ export function parseRuntimeHashCommand(input: string): RuntimeCommandResult {
     const target = reviewDiscard[1]?.trim();
     const reason = reviewDiscard[2]?.trim();
     if (!reason) {
-      return needsInput("review.discard", ["reason"], "Try: #리뷰 3번 디스카드해 이유는 중복");
+      return needsInput("review.discard", ["reason"], "Try: /review discard <id-prefix> --reason \"duplicate\"");
     }
     return matched("review.discard", { target, reason });
   }
@@ -270,7 +270,7 @@ export function parseRuntimeHashCommand(input: string): RuntimeCommandResult {
   if (discardConflicts) {
     const reason = discardConflicts[1]?.trim();
     if (!reason) {
-      return needsInput("review.discard_conflicts", ["reason"], "Try: #컨플릭트 메모리 전부 디스카드해 이유는 중복");
+      return needsInput("review.discard_conflicts", ["reason"], "Try: /review discard-conflicts --reason \"duplicate\"");
     }
     return matched("review.discard_conflicts", { reason });
   }
@@ -308,7 +308,7 @@ export function parseRuntimeHashCommand(input: string): RuntimeCommandResult {
   if (englishDiscardConflicts) {
     const reason = englishDiscardConflicts[1]?.trim();
     if (!reason) {
-      return needsInput("review.discard_conflicts", ["reason"], "Try: #discard all conflicting memories because duplicate");
+      return needsInput("review.discard_conflicts", ["reason"], "Try: /review discard-conflicts --reason \"duplicate\"");
     }
     return matched("review.discard_conflicts", { reason });
   }
@@ -379,7 +379,7 @@ export function parseRuntimeHashCommand(input: string): RuntimeCommandResult {
     return {
       type: "ambiguous",
       candidates: ["review.list", "review.discard_conflicts", "memory.search"],
-      hint: "Try #리뷰 보여줘 or #컨플릭트 메모리 전부 디스카드해 이유는 <reason>."
+      hint: "Try /review or /review discard-conflicts --reason \"<reason>\"."
     };
   }
 

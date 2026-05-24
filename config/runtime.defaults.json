@@ -28,6 +28,20 @@
         "responseFormat": null,
         "extraHeaders": {}
       },
+      "openai-codex": {
+        "type": "openai-codex",
+        "enabled": false,
+        "sandbox": "read-only",
+        "baseUrl": null,
+        "model": null,
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "endpointPath": "/chat/completions",
+        "timeoutMs": 120000,
+        "structuredRetryCount": 1,
+        "maxPromptChars": 60000,
+        "responseFormat": null,
+        "extraHeaders": {}
+      },
       "openai-compatible": {
         "type": "openai-compatible",
         "enabled": false,
