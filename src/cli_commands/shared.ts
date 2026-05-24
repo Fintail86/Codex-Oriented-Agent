@@ -89,6 +89,7 @@ export type ToolCliOptions = {
   reason?: string;
   yes: boolean;
   all: boolean;
+  advanced: boolean;
 };
 
 export function normalizeCliToolId(value: string): ToolName {
@@ -146,8 +147,12 @@ export function formatToolCatalog(activeTools: ActiveToolRecord[] = []): string 
   lines.push("Run:");
   lines.push("  cosia tool run <tool-id> --args \"{...}\"");
   lines.push("  cosia shell preview --command \"<command>\" --reason \"<reason>\"");
-  lines.push("  cosia tool draft --from-capability <capability-id>");
   lines.push("  cosia tool grow --request \"<request>\" --provider mock");
+  lines.push("  cosia tool grow test <routine-id> --yes");
+  lines.push("  cosia tool grow activate <routine-id> --agent <agent-id> --yes");
+  lines.push("");
+  lines.push("Advanced governance:");
+  lines.push("  cosia tool draft --from-capability <capability-id>");
   lines.push("  cosia tool candidate review");
   lines.push("  cosia tool activate <candidate-id> --agent <agent-id> --yes");
   lines.push("  cosia tool blueprint list");

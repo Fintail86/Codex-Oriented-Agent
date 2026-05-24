@@ -138,6 +138,7 @@ export function registerToolCommands(program: Command): void {
     .option("--reason <reason>", "Reason for discard/reject/deactivate.")
     .option("--yes", "Apply an activation. Required for tool activate.", false)
     .option("--all", "Show all records, including inactive/discarded/rejected.", false)
+    .option("--advanced", "Show advanced tool growth and governance details.", false)
     .description("List, draft, review, activate, or run policy-gated tools.")
     .action(async (actionOrToolId: string | undefined, toolId: string | undefined, extraId: string | undefined, options: ToolCliOptions) => {
       await main(async (workspaceRoot) => {
@@ -166,23 +167,23 @@ export function registerToolCommands(program: Command): void {
               request: options.request,
               agentId: options.agent,
               providerId: options.provider
-            })));
+            }), { advanced: options.advanced }));
             return;
           }
           if (action === "review") {
-            console.log(formatToolGrowthReview(growth.list({ all: options.all })));
+            console.log(formatToolGrowthReview(growth.list({ all: options.all }), { advanced: options.advanced }));
             return;
           }
           if (action === "show") {
             if (!extraId) throw new Error("Usage: cosia tool grow show <routine-id>");
             const routine = growth.get(extraId);
             const candidate = routine.selectedCandidateId ? acquisition.getCandidate(routine.selectedCandidateId) : undefined;
-            console.log(formatToolGrowthRoutine(routine, candidate));
+            console.log(formatToolGrowthRoutine(routine, candidate, { advanced: options.advanced }));
             return;
           }
           if (action === "test") {
             if (!extraId) throw new Error("Usage: cosia tool grow test <routine-id> --yes");
-            console.log(formatToolGrowthTest(await growth.test(extraId, { yes: options.yes })));
+            console.log(formatToolGrowthTest(await growth.test(extraId, { yes: options.yes }), { advanced: options.advanced }));
             return;
           }
           if (action === "activate") {
@@ -200,7 +201,7 @@ export function registerToolCommands(program: Command): void {
           }
           if (action === "retry") {
             if (!extraId) throw new Error("Usage: cosia tool grow retry <routine-id> [--provider <provider>]");
-            console.log(formatToolGrowthStart(await growth.retry(extraId, { providerId: options.provider })));
+            console.log(formatToolGrowthStart(await growth.retry(extraId, { providerId: options.provider }), { advanced: options.advanced }));
             return;
           }
           if (action === "cancel") {

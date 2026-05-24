@@ -58,6 +58,10 @@ export type ToolGrowthActivationResult = {
   candidateApproved: boolean;
 };
 
+export type ToolGrowthFormatOptions = {
+  advanced?: boolean;
+};
+
 type StartOptions = {
   request: string;
   agentId?: string;
@@ -345,71 +349,104 @@ export class ToolGrowthManager {
   }
 }
 
-export function formatToolGrowthStart(result: ToolGrowthStartResult): string {
+export function formatToolGrowthStart(result: ToolGrowthStartResult, options: ToolGrowthFormatOptions = {}): string {
+  const candidateReady = Boolean(result.draftResult.candidate);
   const lines = [
     `Tool growth routine created: ${result.routine.id}`,
-    result.routine.sourceCapabilityId ? `Capability proposal: ${result.routine.sourceCapabilityId}` : undefined,
-    `Draft created: ${result.draftResult.draft.id}`,
-    result.draftResult.candidate ? `Candidate created: ${result.draftResult.candidate.id}` : "Candidate not created.",
+    `Request: ${result.routine.sourceRequest}`,
+    candidateReady ? "Reusable tool candidate: ready for review and test." : "Reusable tool candidate: not created.",
     `Status: ${result.routine.status}`
-  ].filter((line): line is string => line !== undefined);
-  if (!result.draftResult.candidate) {
+  ];
+  if (!candidateReady) {
     lines.push(`Reason: ${result.draftResult.reason ?? "normalizer rejected the draft"}`);
   }
+  if (options.advanced) {
+    lines.push(
+      "",
+      "Advanced details:",
+      result.routine.sourceScanId ? `  Source scan: ${result.routine.sourceScanId}` : "  Source scan: -",
+      result.routine.sourceCapabilityId ? `  Capability proposal: ${result.routine.sourceCapabilityId}` : "  Capability proposal: -",
+      `  Draft: ${result.draftResult.draft.id}`,
+      `  Candidate: ${result.draftResult.candidate?.id ?? "-"}`,
+      `  Normalization warnings: ${result.draftResult.warnings.length}`
+    );
+  }
   lines.push("");
-  if (result.draftResult.candidate) {
-    lines.push("Review this candidate:");
-    lines.push(`  cosia tool candidate show ${result.draftResult.candidate.id}`);
-    lines.push("");
-    lines.push("Test it:");
+  if (candidateReady) {
+    lines.push("Next:");
     lines.push(`  cosia tool grow test ${result.routine.id} --yes`);
+    lines.push(`  cosia tool grow show ${result.routine.id}`);
   } else {
-    lines.push("Retry:");
+    lines.push("Next:");
     lines.push(`  cosia tool grow retry ${result.routine.id}`);
+    lines.push(`  cosia tool grow cancel ${result.routine.id} --reason "<reason>"`);
   }
   return lines.join("\n");
 }
 
-export function formatToolGrowthReview(routines: ToolGrowthRoutine[]): string {
+export function formatToolGrowthReview(routines: ToolGrowthRoutine[], options: ToolGrowthFormatOptions = {}): string {
   if (!routines.length) {
     return "No tool growth routines.";
   }
-  return routines.map((routine) => [
-    `${routine.id}\t${routine.status}\tattempts:${routine.attemptCount}`,
-    `Request: ${routine.sourceRequest}`,
-    `Candidate: ${routine.selectedCandidateId ?? "-"}`
-  ].join("\n")).join("\n\n");
+  return routines.map((routine) => {
+    const lines = [
+      `${routine.id}\t${routine.status}\tattempts:${routine.attemptCount}`,
+      `Request: ${routine.sourceRequest}`,
+      `Next: ${nextToolGrowthAction(routine)}`
+    ];
+    if (options.advanced) {
+      lines.push(
+        `Selected candidate: ${routine.selectedCandidateId ?? "-"}`,
+        `Source capability: ${routine.sourceCapabilityId ?? "-"}`,
+        `Evidence keys: ${Object.keys(routine.evidence).sort().join(", ") || "-"}`
+      );
+    }
+    return lines.join("\n");
+  }).join("\n\n");
 }
 
-export function formatToolGrowthRoutine(routine: ToolGrowthRoutine, candidate?: ToolCandidateRecord): string {
+export function formatToolGrowthRoutine(
+  routine: ToolGrowthRoutine,
+  candidate?: ToolCandidateRecord,
+  options: ToolGrowthFormatOptions = {}
+): string {
   const lines = [
     `Tool growth routine: ${routine.id}`,
-    `Status: ${routine.status}`,
     `Request: ${routine.sourceRequest}`,
+    `Status: ${routine.status}`,
     `Attempts: ${routine.attemptCount}`,
-    routine.sourceScanId ? `Source scan: ${routine.sourceScanId}` : undefined,
-    routine.sourceCapabilityId ? `Capability proposal: ${routine.sourceCapabilityId}` : undefined,
-    routine.providerId ? `Provider: ${routine.providerId}` : undefined,
-    routine.targetAgentId ? `Target agent: ${routine.targetAgentId}` : undefined,
-    `Drafts: ${routine.draftIds.join(", ") || "-"}`,
-    `Candidates: ${routine.candidateIds.join(", ") || "-"}`,
-    `Selected candidate: ${routine.selectedCandidateId ?? "-"}`,
-    routine.reason ? `Reason: ${routine.reason}` : undefined
+    `Reusable tool candidate: ${routine.selectedCandidateId ? "present" : "not available"}`,
+    routine.reason ? `Reason: ${routine.reason}` : undefined,
+    "",
+    "Next:",
+    `  ${nextToolGrowthAction(routine)}`
   ].filter((line): line is string => line !== undefined);
-  if (candidate) {
-    lines.push("", formatToolCandidate(candidate));
+  if (options.advanced) {
+    lines.push(...[
+      "",
+      "Advanced details:",
+      routine.sourceScanId ? `Source scan: ${routine.sourceScanId}` : "Source scan: -",
+      routine.sourceCapabilityId ? `Capability proposal: ${routine.sourceCapabilityId}` : "Capability proposal: -",
+      routine.providerId ? `Provider: ${routine.providerId}` : undefined,
+      routine.targetAgentId ? `Target agent: ${routine.targetAgentId}` : undefined,
+      `Drafts: ${routine.draftIds.join(", ") || "-"}`,
+      `Candidates: ${routine.candidateIds.join(", ") || "-"}`,
+      `Selected candidate: ${routine.selectedCandidateId ?? "-"}`,
+      `Evidence keys: ${Object.keys(routine.evidence).sort().join(", ") || "-"}`
+    ].filter((line): line is string => line !== undefined));
+    if (candidate) {
+      lines.push("", formatToolCandidate(candidate));
+    }
   }
   return lines.join("\n");
 }
 
-export function formatToolGrowthTest(result: ToolGrowthTestResult): string {
+export function formatToolGrowthTest(result: ToolGrowthTestResult, options: ToolGrowthFormatOptions = {}): string {
   const passed = result.testRun.status === "passed";
-  return [
+  const lines = [
     passed ? "Tool candidate test passed." : "Tool candidate test failed.",
     `Routine: ${result.routine.id}`,
-    `Candidate: ${result.testRun.candidateId}`,
-    "",
-    formatToolCandidateTestRun(result.testRun),
+    `Status: ${result.routine.status}`,
     "",
     passed
       ? [
@@ -421,7 +458,11 @@ export function formatToolGrowthTest(result: ToolGrowthTestResult): string {
           `  cosia tool grow retry ${result.routine.id}`,
           `  cosia tool grow cancel ${result.routine.id} --reason "<reason>"`
         ].join("\n")
-  ].join("\n");
+  ];
+  if (options.advanced) {
+    lines.push("", "Advanced details:", formatToolCandidateTestRun(result.testRun));
+  }
+  return lines.join("\n");
 }
 
 export function formatToolGrowthActivation(result: ToolGrowthActivationResult): string {
@@ -453,6 +494,28 @@ export function formatToolGrowthCancelled(routine: ToolGrowthRoutine): string {
     `Routine: ${routine.id}`,
     `Reason: ${routine.reason ?? "cancelled"}`
   ].join("\n");
+}
+
+function nextToolGrowthAction(routine: ToolGrowthRoutine): string {
+  if (routine.status === "candidate_ready") {
+    return `cosia tool grow test ${routine.id} --yes`;
+  }
+  if (routine.status === "test_failed") {
+    return `cosia tool grow retry ${routine.id}`;
+  }
+  if (routine.status === "test_passed" || routine.status === "awaiting_activation") {
+    return `cosia tool grow activate ${routine.id} --agent <agent-id> --yes`;
+  }
+  if (routine.status === "rejected") {
+    return `cosia tool grow retry ${routine.id}`;
+  }
+  if (routine.status === "cancelled") {
+    return "closed; no further action";
+  }
+  if (routine.status === "activated") {
+    return "active tool registration already applied";
+  }
+  return "inspect routine";
 }
 
 function withGrowthDb<T>(workspaceRoot: string, fn: (db: DatabaseSync) => T): T {

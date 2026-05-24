@@ -71,7 +71,12 @@ import {
   listEffectiveActiveModelToolIds,
   type ToolCandidateRecord
 } from "../src/runtime/tool_acquisition.js";
-import { ToolGrowthManager, formatToolGrowthReview } from "../src/runtime/tool_growth.js";
+import {
+  ToolGrowthManager,
+  formatToolGrowthReview,
+  formatToolGrowthRoutine,
+  formatToolGrowthStart
+} from "../src/runtime/tool_growth.js";
 import type { ModelProvider } from "../src/runtime/types.js";
 import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspace.js";
 
@@ -164,7 +169,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.45.0\"");
+    expect(policyJson).toContain("\"version\": \"0.46.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1052,7 +1057,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.45.0-policy-amended";
+    policy.version = "0.46.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1060,8 +1065,8 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.45.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.45.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.46.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.46.0-policy-amended");
   });
 
   it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
@@ -1590,6 +1595,37 @@ describe("tool acquisition", () => {
     expect(new ShellApprovalLedger(root).list()).toHaveLength(0);
     expect(acquisition.listActiveTools()).toHaveLength(0);
 
+    const normalStart = formatToolGrowthStart(started);
+    expect(normalStart).toContain(`Tool growth routine created: ${started.routine.id}`);
+    expect(normalStart).toContain("Reusable tool candidate: ready for review and test.");
+    expect(normalStart).toContain(`cosia tool grow test ${started.routine.id} --yes`);
+    expect(normalStart).not.toContain("Capability proposal:");
+    expect(normalStart).not.toContain(`Draft created: ${started.draftResult.draft.id}`);
+    expect(normalStart).not.toContain(`Candidate created: ${started.draftResult.candidate?.id}`);
+
+    const advancedStart = formatToolGrowthStart(started, { advanced: true });
+    expect(advancedStart).toContain("Advanced details:");
+    expect(advancedStart).toContain(`Capability proposal: ${started.routine.sourceCapabilityId}`);
+    expect(advancedStart).toContain(`Draft: ${started.draftResult.draft.id}`);
+    expect(advancedStart).toContain(`Candidate: ${started.draftResult.candidate?.id}`);
+
+    const normalRoutine = formatToolGrowthRoutine(
+      started.routine,
+      acquisition.getCandidate(started.routine.selectedCandidateId!)
+    );
+    expect(normalRoutine).toContain(`Tool growth routine: ${started.routine.id}`);
+    expect(normalRoutine).not.toContain("Source scan:");
+    expect(normalRoutine).not.toContain(`Selected candidate: ${started.routine.selectedCandidateId}`);
+
+    const advancedRoutine = formatToolGrowthRoutine(
+      started.routine,
+      acquisition.getCandidate(started.routine.selectedCandidateId!),
+      { advanced: true }
+    );
+    expect(advancedRoutine).toContain("Advanced details:");
+    expect(advancedRoutine).toContain(`Source scan: ${started.routine.sourceScanId}`);
+    expect(advancedRoutine).toContain(`Selected candidate: ${started.routine.selectedCandidateId}`);
+
     await expect(growth.test(started.routine.id)).rejects.toThrow("--yes");
     const tested = await growth.test(started.routine.id, { yes: true });
     expect(tested.testRun.status).toBe("passed");
@@ -1621,6 +1657,8 @@ describe("tool acquisition", () => {
     expect(failed.draftResult.candidate).toBeUndefined();
     expect(growth.list()).toHaveLength(0);
     expect(formatToolGrowthReview(growth.list({ all: true }))).toContain(failed.routine.id);
+    expect(formatToolGrowthReview(growth.list({ all: true }))).not.toContain("Selected candidate:");
+    expect(formatToolGrowthReview(growth.list({ all: true }), { advanced: true })).toContain("Evidence keys:");
 
     const retried = await growth.retry(failed.routine.id, {
       rawDraft: {
@@ -3432,7 +3470,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.45.0");
+    expect(emptyReport.version).toBe("0.46.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4284,7 +4322,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.45.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.46.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
       ...state,

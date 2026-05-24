@@ -443,7 +443,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   const hasLegacyRuntime = Object.keys(legacy).length > 0;
   const legacyToolLocal = localConfigFromLegacyPolicyTools(raw);
   const lawPolicy = stripRuntimeConfig(raw);
-  lawPolicy.version = "0.45.0";
+  lawPolicy.version = "0.46.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
   const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));

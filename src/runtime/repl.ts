@@ -86,14 +86,14 @@ export function formatChatHelp(): string {
     "  /review next                               Show the oldest pending review item.",
     "  /shell <command>                           Preview a one-shot shell approval. Use #적용 to run once.",
     "  /shell cancel                              Cancel the current shell/review preview.",
-    "  /tool grow <request>                        Create a tool growth routine candidate.",
-    "  /tool grow show [routine-id]                Show the current or selected tool growth routine.",
+    "  /tool grow <request>                        Start a guided reusable-tool routine.",
+    "  /tool grow show [routine-id] [--advanced]   Show the current or selected routine.",
     "  /tool grow test [routine-id] --yes          Run the selected candidate test.",
     "  /tool grow activate [routine-id] --agent <agent-id> --yes",
     "                                             Approve candidate design and activate explicitly.",
     "  /tool grow reject [routine-id] --reason \"...\"",
     "                                             Reject the current candidate while preserving evidence.",
-    "  /tool grow retry [routine-id]               Append a new draft/candidate attempt.",
+    "  /tool grow retry [routine-id]               Try another candidate in the same routine.",
     "  /tool grow cancel [routine-id] --reason \"...\"",
     "                                             Cancel the routine without deleting evidence.",
     "",
@@ -107,7 +107,7 @@ export function formatChatHelp(): string {
     "  #컨플릭트 메모리 전부 디스카드해 이유는 중복",
     "                                             Preview discarding conflicted memory candidates.",
     "  #쉘로 <command> 실행 제안해                Preview a one-shot shell approval.",
-    "  #도구 성장 <request>                       Create a tool growth routine.",
+    "  #도구 성장 <request>                       Start a guided reusable-tool routine.",
     "  #이 도구 테스트해                          Test the current tool growth candidate.",
     "  #이 도구 활성화해                          Activate the current routine for this agent.",
     "  #이건 내가 원한 기능이 아니야 이유는 ...   Reject the current candidate.",
@@ -594,7 +594,7 @@ async function handleToolGrowthSlashCommand(input: {
       output: [
         "Usage:",
         "  /tool grow <request>",
-        "  /tool grow show [routine-id]",
+        "  /tool grow show [routine-id] [--advanced]",
         "  /tool grow test [routine-id] --yes",
         "  /tool grow activate [routine-id] --agent <agent-id> --yes",
         "  /tool grow reject [routine-id] --reason \"<reason>\"",
@@ -618,7 +618,7 @@ async function handleToolGrowthSlashCommand(input: {
   const args = tokens.slice(1);
   const flags = parseFlagArgs(args);
   if (action === "review") {
-    return { output: formatToolGrowthReview(growth.list({ all: flags.all === "true" })) };
+    return { output: formatToolGrowthReview(growth.list({ all: flags.all === "true" }), { advanced: flags.advanced === "true" }) };
   }
   const routineId = resolveToolGrowthRoutineId(args, input.currentRoutineId);
   if (!routineId) {
@@ -627,11 +627,11 @@ async function handleToolGrowthSlashCommand(input: {
   if (action === "show") {
     const routine = growth.get(routineId);
     const candidate = routine.selectedCandidateId ? acquisition.getCandidate(routine.selectedCandidateId) : undefined;
-    return { output: formatToolGrowthRoutine(routine, candidate), routine };
+    return { output: formatToolGrowthRoutine(routine, candidate, { advanced: flags.advanced === "true" }), routine };
   }
   if (action === "test") {
     const result = await growth.test(routineId, { yes: flags.yes === "true" });
-    return { output: formatToolGrowthTest(result), routine: result.routine };
+    return { output: formatToolGrowthTest(result, { advanced: flags.advanced === "true" }), routine: result.routine };
   }
   if (action === "activate") {
     const result = await growth.activate(routineId, {

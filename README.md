@@ -1,4 +1,4 @@
-# COSIA v0.45.0
+# COSIA v0.46.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.45.0 hardens Telegram connector safety with group read-only defaults, user-level mutation authorization, and `/whoami` identity discovery. v0.44.0 clarified COSIA's continuity layers with session debug inspection and clearer session/context wording.
+v0.46.0 makes Tool Growth routine-centric for normal use, keeping draft/candidate/proposal internals behind advanced inspection. v0.45.0 hardened Telegram connector safety with group read-only defaults, user-level mutation authorization, and `/whoami` identity discovery.
 
 ## Requirements
 
@@ -115,18 +115,16 @@ Use `mock` only for deterministic runtime regression checks:
 cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
 
-Advanced capability and tool-growth flows are available when you want COSIA to turn repeated work into reviewable local tooling:
+When repeated work should become governed local tooling, use the guided Tool Growth path first:
 
 ```powershell
-cosia capability scan --request "변경 상태 확인"
-cosia capability plan --request "변경 상태 확인"
-cosia shell preview --from-capability <proposal-id> --command "<exact command>"
-cosia tool draft --from-capability <proposal-id> --provider mock
 cosia tool grow --request "테스트 돌려봐" --provider mock
 cosia tool grow test <routine-id> --yes
 cosia tool grow activate <routine-id> --agent <agent-id> --yes
 cosia tool active list
 ```
+
+Advanced capability, shell, draft, candidate, and blueprint commands remain available for governance and debugging, but normal use should not require manually managing every internal state.
 
 ## UX Foundation
 
@@ -703,14 +701,24 @@ cosia shell preview --from-capability <proposal-id> --command "<exact command>"
 cosia shell run --from-capability <proposal-id> --command "<exact command>" --yes
 cosia shell preview --command "echo ready" --reason "one-shot local shell check"
 cosia shell apply <approval-id>
+cosia tool grow --request "테스트 돌려봐" --provider mock
+cosia tool grow show <routine-id> --advanced
+cosia tool grow test <routine-id> --yes
+cosia tool grow activate <routine-id> --agent <agent-id> --yes
+cosia tool active list
+cosia tool deactivate <tool-id> --reason "<reason>"
+```
+
+Advanced governance commands expose the underlying acquisition objects when you need to inspect or debug them:
+
+```powershell
 cosia tool draft --from-capability <proposal-id> --provider mock
 cosia tool candidate review
 cosia tool candidate show <candidate-id>
 cosia tool candidate test <candidate-id>
 cosia tool candidate approve <candidate-id>
 cosia tool activate <candidate-id> --agent <agent-id> --yes
-cosia tool active list
-cosia tool deactivate <tool-id> --reason "<reason>"
+cosia tool blueprint list
 ```
 
 `cosia tool list` shows active catalog tools. The initial model-facing surface is intentionally small: `read_file`, `write_file`, `search_files`, and `shell_request`.
@@ -725,9 +733,9 @@ Git, NPM, Python, Bun, and similar concrete tools are not default active tools o
 
 `shell_request` does not execute commands. It creates a one-shot shell approval preview for local CLI/REPL review. An approval stores the exact command and cwd hash, expires, and can be executed only once. Gateway/Telegram shell execution is blocked by default.
 
-`cosia tool draft --from-capability <proposal-id>` asks the configured model for an untrusted ToolDraft package. The runtime stores the draft first, then normalizes it into a ToolCandidate only if all required allowlist gates pass. Candidate text and evidence may reference capabilities and shell approvals, but draft generation cannot create shell approvals, active tools, policy changes, config edits, or agent `allowedTools` changes.
+`cosia tool draft --from-capability <proposal-id>` is an advanced governance command. It asks the configured model for an untrusted ToolDraft package. The runtime stores the draft first, then normalizes it into a ToolCandidate only if all required allowlist gates pass. Candidate text and evidence may reference capabilities and shell approvals, but draft generation cannot create shell approvals, active tools, policy changes, config edits, or agent `allowedTools` changes.
 
-`cosia tool grow --request "<request>"` orchestrates the zero-base capability flow without adding new authority. It runs a fresh capability scan, creates a capability proposal, asks for an untrusted ToolDraft, normalizes a ToolCandidate, and records a Tool Growth Routine. It does not create shell approvals, run commands, or register active tools. Testing still requires `cosia tool grow test <routine-id> --yes`, and activation still requires `cosia tool grow activate <routine-id> --agent <agent-id> --yes`.
+`cosia tool grow --request "<request>"` is the normal guided path for turning repeated work into reviewable local tooling. It still orchestrates scan/proposal/draft/candidate internally, but its default output is routine-centric: request, routine id, readiness, status, and next action. It does not create shell approvals, run commands, or register active tools. Use `cosia tool grow show <routine-id> --advanced` when you need source scan/proposal/draft/candidate ids or evidence detail. Testing still requires `cosia tool grow test <routine-id> --yes`, and activation still requires `cosia tool grow activate <routine-id> --agent <agent-id> --yes`.
 
 Inside chat, `/tool grow <request>` and `#도구 성장 <request>` start the same routine. Short follow-up commands such as `#이 도구 테스트해`, `#이 도구 활성화해`, `#이건 내가 원한 기능이 아니야 이유는 ...`, `#다른 도구 후보 만들어줘`, and `#도구 생성 취소` operate only on the current unambiguous routine.
 
@@ -741,6 +749,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.46.0: Tool Growth surface slimming with routine-centric normal output and advanced internals inspection.
 - v0.45.0: Telegram connector group safety, user-level mutation authorization, and `/whoami` discovery.
 - v0.44.0: Memory/session/debug UX labels and last-turn debug inspection.
 - v0.43.0: Codex law amendment preview/apply flow for protected `codex/*` files.
