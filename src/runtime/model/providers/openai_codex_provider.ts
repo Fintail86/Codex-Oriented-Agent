@@ -592,10 +592,17 @@ async function sendWithPowerShellNativeTransport(args: {
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
-      if (code !== 0 && !stdout.includes(POWERSHELL_HTTP_STATUS_MARKER)) {
+      if (!stdout.includes(POWERSHELL_HTTP_STATUS_MARKER)) {
+        reject(new ProviderError("network_error", `Native OpenAI Codex transport did not return an HTTP status marker.`, {
+          hint: providerFailureHint("network_error", args.providerId),
+          preview: previewText(stderr || stdout)
+        }));
+        return;
+      }
+      if (code !== 0) {
         reject(new ProviderError("network_error", `Native OpenAI Codex transport exited with code ${code}.`, {
           hint: providerFailureHint("network_error", args.providerId),
-          preview: previewText(stderr)
+          preview: previewText(stderr || stdout)
         }));
         return;
       }
@@ -611,43 +618,47 @@ function powershellRequestScript(args: {
   body: string;
   timeoutMs: number;
 }): string {
-  const headers = Buffer.from(JSON.stringify(args.headers), "utf8").toString("base64");
+  const headerPairs = Object.entries(args.headers)
+    .map(([name, value]) => `@('${base64Utf8(name)}','${base64Utf8(value)}')`)
+    .join(", ");
+  const headerPairsLiteral = headerPairs ? `@(${headerPairs})` : "@()";
   const body = Buffer.from(args.body, "utf8").toString("base64");
   const url = Buffer.from(args.url, "utf8").toString("base64");
   const timeoutSec = Math.max(1, Math.ceil(args.timeoutMs / 1000));
-  return `$ErrorActionPreference = 'Stop'
-$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${url}'))
-$headersJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${headers}'))
-$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${body}'))
-$headers = @{}
-($headersJson | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $headers[$_.Name] = [string]$_.Value }
-$status = 0
-$content = ''
-try {
-  $response = Invoke-WebRequest -Uri $url -Method Post -Headers $headers -Body $body -UseBasicParsing -TimeoutSec ${timeoutSec}
-  $status = [int]$response.StatusCode
-  $content = [string]$response.Content
-} catch {
-  $response = $_.Exception.Response
-  if ($null -ne $response) {
-    try { $status = [int]$response.StatusCode } catch { $status = 0 }
-    try {
-      $stream = $response.GetResponseStream()
-      if ($null -ne $stream) {
-        $reader = New-Object System.IO.StreamReader($stream)
-        $content = $reader.ReadToEnd()
-        $reader.Dispose()
-      }
-    } catch {
-      $content = $_.Exception.Message
-    }
-  } else {
-    $content = $_.Exception.Message
-  }
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "Add-Type -AssemblyName System.Net.Http",
+    `$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${url}'))`,
+    `$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${body}'))`,
+    `$headerPairs = ${headerPairsLiteral}`,
+    "$status = 0",
+    "$content = ''",
+    "$client = $null",
+    "$request = $null",
+    [
+      "try {",
+      "$client = [System.Net.Http.HttpClient]::new()",
+      `$client.Timeout = [TimeSpan]::FromSeconds(${timeoutSec})`,
+      "$request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, $url)",
+      "$request.Content = [System.Net.Http.StringContent]::new($body, [Text.Encoding]::UTF8, 'application/json')",
+      "foreach ($pair in $headerPairs) { $name = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$pair[0])); $value = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$pair[1])); if ($name -ine 'content-type') { [void]$request.Headers.TryAddWithoutValidation($name, $value) } }",
+      "$response = $client.SendAsync($request).GetAwaiter().GetResult()",
+      "$status = [int]$response.StatusCode",
+      "$content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()",
+      "} catch {",
+      "$content = $_.Exception.Message",
+      "} finally {",
+      "if ($null -ne $request) { $request.Dispose() }",
+      "if ($null -ne $client) { $client.Dispose() }",
+      "}"
+    ].join("; "),
+    "[Console]::Out.WriteLine($content)",
+    `[Console]::Out.WriteLine('${POWERSHELL_HTTP_STATUS_MARKER}' + $status)`
+  ].join("; ");
 }
-[Console]::Out.WriteLine($content)
-[Console]::Out.WriteLine('${POWERSHELL_HTTP_STATUS_MARKER}' + $status)
-`;
+
+function base64Utf8(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64");
 }
 
 function parsePowerShellTransportResponse(stdout: string): Response {
@@ -658,8 +669,9 @@ function parsePowerShellTransportResponse(stdout: string): Response {
   const body = stdout.slice(0, index).trimEnd();
   const statusText = stdout.slice(index + POWERSHELL_HTTP_STATUS_MARKER.length).trim();
   const status = Number.parseInt(statusText, 10);
+  const normalizedStatus = Number.isFinite(status) && status >= 200 && status <= 599 ? status : 599;
   return new Response(body, {
-    status: Number.isFinite(status) && status >= 200 && status <= 599 ? status : 599,
+    status: normalizedStatus,
     headers: {
       "content-type": body.trimStart().startsWith("{") ? "application/json" : "text/plain"
     }
