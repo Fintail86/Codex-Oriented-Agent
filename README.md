@@ -1,4 +1,4 @@
-# COSIA v0.40.0
+# COSIA v0.41.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.40.0 aligns the public surface with that identity. It keeps the existing runtime behavior intact while making the normal setup path lighter and moving capability/tool-growth internals into advanced sections.
+v0.41.0 keeps the public behavior stable while splitting the large CLI entrypoint into focused command modules. v0.40.0 aligned the public surface with this identity and moved capability/tool-growth internals into advanced sections.
 
 ## Requirements
 
@@ -707,6 +707,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.41.0: CLI surface module split with behavior-preserving command registration.
 - v0.40.0: Identity surface refactor for the user-amendable Codex runtime direction.
 - v0.38.0: Tool Growth Routine orchestration from request to candidate, explicit test, and explicit activation.
 - v0.37.0: Learned local blueprint records from successful active command_adapter tools.
