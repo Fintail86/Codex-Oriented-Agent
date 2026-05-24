@@ -2,6 +2,7 @@ import { AgentManager } from "./agent_manager.js";
 import { MemoryManager } from "./memory_manager.js";
 import { checkProvider, resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager } from "./policy_manager.js";
+import { missingProviderProfileHint } from "./provider_profiles.js";
 import { SessionManager, type ContextHealth } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import type { SessionMetadata } from "./types.js";
@@ -83,7 +84,7 @@ export async function getStatusReport(workspaceRoot: string, providerId = "defau
         ok: false,
         message: (error as Error).message,
         reason: "missing_config",
-        hint: "Run `cosia provider profile add ...` and `cosia provider profile use <name>`."
+        hint: missingProviderProfileHint()
       };
     }
   } else {
@@ -159,14 +160,14 @@ export async function getStatusReport(workspaceRoot: string, providerId = "defau
       severity: "warning",
       title: "Pending memory review",
       detail: "Memory candidates are waiting for review.",
-      action: "Run `cosia start`, then use `/review`."
+      action: "In chat, use `/review`, or run `cosia review --memory`."
     } : undefined,
     pendingSkillCandidatesCount > 0 ? {
       id: "skills.pending",
       severity: "warning",
       title: "Pending skill review",
       detail: "Skill candidates are waiting for review.",
-      action: "Run `cosia start`, then use `/review`."
+      action: "In chat, use `/review`, or run `cosia review --skill`."
     } : undefined,
     gatewayLockStale ? {
       id: "gateway.stale_lock",
@@ -180,7 +181,7 @@ export async function getStatusReport(workspaceRoot: string, providerId = "defau
       severity: "warning",
       title: "Stale running shell approval",
       detail: `${staleShellApprovals.length} shell approval(s) are stuck in running state.`,
-      action: "Run `cosia shell status` and create a new approval if retry is needed."
+      action: "Run `cosia pending` or `cosia shell status`, then create a new approval if retry is needed."
     } : undefined,
     policy?.connectors.telegram.enabled && !resolveTelegramToken(workspaceRoot, policy.connectors.telegram).token ? {
       id: "gateway.telegram.missing_token",
@@ -194,14 +195,14 @@ export async function getStatusReport(workspaceRoot: string, providerId = "defau
       severity: "warning",
       title: "Telegram allowlist is empty",
       detail: "Telegram connector is enabled but no allowed chat ids are configured.",
-      action: "Add your chat id to connectors.telegram.allowedChatIds."
+      action: "Send `/whoami` to the bot, then run `cosia gateway telegram set chat-id <chat-id>`."
     } : undefined,
     activeSessions.length === 0 ? {
       id: "sessions.none_active",
       severity: "info",
       title: "No active sessions",
       detail: "Create or choose a session before running work.",
-      action: "Run `cosia start` or `cosia session create --goal \"<goal>\"`."
+      action: "Run `cosia start --new-session --goal \"<goal>\"` or `cosia session create --goal \"<goal>\"`."
     } : undefined
   ].filter((issue): issue is StatusIssue => Boolean(issue)));
   const pendingCandidatesCount = await memory.countPendingCandidates();
@@ -303,7 +304,7 @@ export function sortIssues(issues: StatusIssue[]): StatusIssue[] {
 export function formatStatusReport(report: StatusReport, options: { compact?: boolean } = {}): string {
   if (options.compact) {
     return [
-      `COSIA ${report.version} | ${report.providerId}:${report.providerOk ? "ok" : "failed"} | agents:${report.agentsCount} sessions:${report.activeSessionsCount}/${report.sessionsCount} longTermMemories:${report.memoriesCount}`,
+      `COSIA ${report.version} | ${report.providerId}:${report.providerOk ? "ok" : "failed"} | agents:${report.agentsCount} continuity:sessions:${report.activeSessionsCount}/${report.sessionsCount} memories:${report.memoriesCount}`,
       `Issues: ${report.issues.length ? report.issues.map((issue) => `${issue.severity}:${issue.id}`).join(", ") : "none"}`,
       report.recommendedActions[0] ? `Next: ${report.recommendedActions[0]}` : "Next: cosia start"
     ].join("\n");
@@ -323,7 +324,7 @@ export function formatStatusReport(report: StatusReport, options: { compact?: bo
     `  Sessions: ${report.activeSessionsCount} active / ${report.sessionsCount} total`,
     `  Long-term memories: ${report.memoriesCount}`,
     "",
-    "Review Queues",
+    "Memory And Skill Review Queues",
     `  Memory candidates: ${report.pendingCandidatesCount}`,
     `  Skill candidates: ${report.pendingSkillCandidatesCount}`,
     "",

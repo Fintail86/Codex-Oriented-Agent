@@ -10,6 +10,7 @@ import { registerPolicyCommands } from "./cli_commands/policy_commands.js";
 import { registerProviderCommands } from "./cli_commands/provider_commands.js";
 import {
   registerMvpReviewImproveCommandCommands,
+  registerPendingApprovalCommands,
   registerStartRunChatCommands,
   registerStatusDoctorCommands
 } from "./cli_commands/runtime_entry_commands.js";
@@ -20,10 +21,32 @@ const program = new Command();
 
 program
   .name("cosia")
-  .description("COSIA: lightweight agentic runtime guided by a user-amendable Codex")
-  .version(COSIA_VERSION);
+  .description("COSIA: lightweight provider-neutral agentic runtime guided by a user-amendable Codex")
+  .version(COSIA_VERSION)
+  .addHelpText("after", `
+
+Normal flow:
+  cosia init
+  cosia provider setup
+  cosia provider profile use <name>
+  cosia start
+  cosia chat --session <session-id>
+  cosia run --session <session-id> --prompt "<request>"
+  cosia status | cosia doctor
+  cosia pending | cosia apply <id> --yes
+
+Connectors:
+  cosia gateway telegram enable
+  cosia gateway telegram set chat-id <id>
+  cosia gateway telegram set token
+  cosia gateway start
+
+Advanced governance:
+  capability, tool candidate, tool active, tool blueprint, improve, command, mvp
+`);
 
 registerStatusDoctorCommands(program);
+registerPendingApprovalCommands(program);
 registerProviderCommands(program);
 registerConfigCommands(program);
 registerGatewayCommands(program);

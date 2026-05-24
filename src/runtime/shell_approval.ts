@@ -118,7 +118,7 @@ export class ShellApprovalLedger {
     });
   }
 
-  cancel(id: string): ShellApproval {
+  cancel(id: string, reason = "Cancelled by user."): ShellApproval {
     return this.withDb((db) => {
       const current = selectShellApproval(db, id);
       if (!current) {
@@ -127,7 +127,7 @@ export class ShellApprovalLedger {
       if (current.status !== "pending") {
         throw new Error(`Shell approval is not pending: ${id}`);
       }
-      const next = { ...current, status: "cancelled" as const };
+      const next = { ...current, status: "cancelled" as const, failureReason: reason.trim() || "Cancelled by user." };
       updateShellApproval(db, next);
       return next;
     });

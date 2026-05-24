@@ -132,7 +132,7 @@ export function registerCapabilityShellCommands(program: Command): void {
     .option("--json", "Print stable JSON output.", false)
     .option("--reason <reason>", "Reason for discard.")
     .option("--all", "Show all capability proposals.", false)
-    .description("Scan generic workspace facts and review zero-base capability proposals.")
+    .description("Advanced: scan facts and review zero-base capability proposals.")
     .action(async (action: string, id: string | undefined, options: { request?: string; latest: boolean; scanId?: string; json: boolean; reason?: string; all: boolean }) => {
       await main(async (workspaceRoot) => {
         const planner = new CapabilityPlanner(workspaceRoot);
@@ -184,7 +184,7 @@ export function registerCapabilityShellCommands(program: Command): void {
     .option("--from-capability <id>", "Create a one-shot shell approval from a capability proposal.")
     .option("--yes", "Apply a newly created preview immediately.", false)
     .option("--confirm <phrase>", "Approval-id-bound confirmation phrase for high-risk commands.")
-    .description("Create, apply, cancel, or inspect one-shot user-approved shell command previews.")
+    .description("Advanced: create or inspect one-shot shell approvals. Use `cosia pending` for the normal queue.")
     .action(async (action: string, approvalId: string | undefined, options: {
       command?: string;
       cwd: string;

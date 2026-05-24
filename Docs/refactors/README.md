@@ -29,6 +29,7 @@ The next refactor sequence prioritizes:
 | v0.44 | [Memory Session Debug UX](v0.44-memory-session-debug-ux.md) | Clarify session context, summaries, long-term memory, and debug records. |
 | v0.45 | [Connector Gateway Safety](v0.45-connector-gateway-safety.md) | Telegram/future connector safety, group chat authorization, and gateway recovery. |
 | v0.46 | [Tool Growth Surface Slimming](v0.46-tool-growth-surface-slimming.md) | Keep tool-growth internals but expose them through a lighter guided UX. |
+| v0.47-v0.50 | Product Flow Compression | Compress the normal product surface around setup, chat/run, status, continuity, connector setup, and explicit pending approvals. Advanced governance remains available but is not the first-run path. |
 
 ## Normal / Advanced / Debug UX
 
@@ -39,7 +40,7 @@ Normal UX should focus on daily use:
 - `start`, `chat`, `run`
 - session list/use/new
 - memory inspect/review
-- approval/cancel for pending mutations
+- `pending`, `apply`, and `cancel` for durable pending approvals
 - gateway connector enable/set/check/start
 - status/doctor/config check
 
@@ -74,4 +75,3 @@ Debug UX should be explicit:
 - Do not reintroduce hardcoded provider defaults.
 - Do not commit private runtime state.
 - Do not collapse memory, debug logs, and session context into one concept.
-

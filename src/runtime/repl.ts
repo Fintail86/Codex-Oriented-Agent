@@ -86,6 +86,7 @@ export function formatChatHelp(): string {
     "  /review next                               Show the oldest pending review item.",
     "  /shell <command>                           Preview a one-shot shell approval. Use #적용 to run once.",
     "  /shell cancel                              Cancel the current shell/review preview.",
+    "  /pending                                   Show the current session-local pending preview.",
     "  /tool grow <request>                        Start a guided reusable-tool routine.",
     "  /tool grow show [routine-id] [--advanced]   Show the current or selected routine.",
     "  /tool grow test [routine-id] --yes          Run the selected candidate test.",
@@ -116,6 +117,7 @@ export function formatChatHelp(): string {
     "  #적용                                     Apply the current pending preview.",
     "  #취소                                     Cancel the current pending preview.",
     "  #대기중인 작업 보여줘                     Show the pending preview and remaining time.",
+    "  일반 '승인할게' 문장은 적용 명령이 아닙니다. /apply 또는 #적용을 사용하세요.",
     "  \\#해시로 시작하는 문장                    Send a leading # to the model conversation.",
     "  /exit                                      Leave chat."
   ].join("\n");
@@ -150,6 +152,21 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
   const manualSkills = new Set(options.manualSkillIds ?? []);
   let pendingCommand: PendingCommand | undefined;
   let currentToolGrowthRoutineId: string | undefined;
+  const commandContext = () => ({
+    workspaceRoot: options.workspaceRoot,
+    session,
+    agent,
+    providerId,
+    policy,
+    sessions,
+    memory,
+    skills,
+    reviewInbox,
+    now,
+    previewScope: {
+      sessionId: session.id
+    }
+  });
   const rl = createInterface({ input, output });
   let endedBy: ChatReplResult["endedBy"] = "eof";
 
@@ -302,22 +319,56 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         writeLine(errorOutput, "[cosia] cleared manual skills");
         continue;
       }
+      if (prompt === "/pending") {
+        if (!pendingCommand) {
+          writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
+          continue;
+        }
+        if (isPendingExpired(pendingCommand, now)) {
+          pendingCommand = undefined;
+          writeLine(output, "[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.");
+          continue;
+        }
+        writeLine(output, formatPendingCommand(pendingCommand, now));
+        continue;
+      }
+      if (prompt === "/apply") {
+        if (!pendingCommand) {
+          writeLine(output, "[BLOCKED] 적용할 대기 작업이 없습니다.");
+          continue;
+        }
+        if (isPendingExpired(pendingCommand, now)) {
+          pendingCommand = undefined;
+          writeLine(output, "[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.");
+          continue;
+        }
+        try {
+          writeLine(output, await withSessionLock(options.workspaceRoot, session.id, {
+            owner: "cli:chat"
+          }, async () => applyPendingCommand(pendingCommand!, commandContext())));
+        } catch (error) {
+          writeLine(output, `[FAILED] ${(error as Error).message}`);
+        }
+        pendingCommand = undefined;
+        continue;
+      }
+      if (prompt === "/cancel") {
+        if (pendingCommand) {
+          try {
+            writeLine(output, await cancelPendingCommand(pendingCommand, commandContext()));
+          } catch (error) {
+            writeLine(output, `[FAILED] ${(error as Error).message}`);
+          }
+        } else {
+          writeLine(output, "[SUCCESS] Pending command cancelled.");
+        }
+        pendingCommand = undefined;
+        continue;
+      }
       if (prompt === "/shell cancel") {
         if (pendingCommand) {
           try {
-            writeLine(output, await cancelPendingCommand(pendingCommand, {
-              workspaceRoot: options.workspaceRoot,
-              session,
-              agent,
-              providerId,
-              policy,
-              sessions,
-              memory,
-              skills,
-              reviewInbox,
-              now,
-              previewScope: { sessionId: session.id }
-            }));
+            writeLine(output, await cancelPendingCommand(pendingCommand, commandContext()));
           } catch (error) {
             writeLine(output, `[FAILED] ${(error as Error).message}`);
           }
@@ -395,21 +446,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           continue;
         }
         let intent = parseRuntimeHashCommand(prompt);
-        const commandContext = {
-          workspaceRoot: options.workspaceRoot,
-          session,
-          agent,
-          providerId,
-          policy,
-          sessions,
-          memory,
-          skills,
-          reviewInbox,
-          now,
-          previewScope: {
-            sessionId: session.id
-          }
-        };
+        const currentCommandContext = commandContext();
         if (intent.type === "no_match") {
           const candidates = retrieveRuntimeCommandCandidates(prompt, 8, options.workspaceRoot);
           if (candidates.length === 0) {
@@ -459,7 +496,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           try {
             writeLine(output, await withSessionLock(options.workspaceRoot, session.id, {
               owner: "cli:chat"
-            }, async () => applyPendingCommand(pendingCommand!, commandContext)));
+            }, async () => applyPendingCommand(pendingCommand!, currentCommandContext)));
           } catch (error) {
             writeLine(output, `[FAILED] ${(error as Error).message}`);
           }
@@ -469,7 +506,7 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
         if (intent.commandId === "pending.cancel") {
           if (pendingCommand) {
             try {
-              writeLine(output, await cancelPendingCommand(pendingCommand, commandContext));
+              writeLine(output, await cancelPendingCommand(pendingCommand, currentCommandContext));
             } catch (error) {
               writeLine(output, `[FAILED] ${(error as Error).message}`);
             }
@@ -492,12 +529,12 @@ export async function runChatRepl(options: ChatReplOptions): Promise<ChatReplRes
           writeLine(output, formatPendingCommand(pendingCommand, now));
           continue;
         }
-        const readOnlyOutput = await executeReadOnlyCommand(intent, commandContext);
+        const readOnlyOutput = await executeReadOnlyCommand(intent, currentCommandContext);
         if (readOnlyOutput !== undefined) {
           writeLine(output, readOnlyOutput);
           continue;
         }
-        const preview = await previewMutationCommand(intent, commandContext);
+        const preview = await previewMutationCommand(intent, currentCommandContext);
         if (preview) {
           pendingCommand = preview.pending;
           writeLine(output, preview.output);

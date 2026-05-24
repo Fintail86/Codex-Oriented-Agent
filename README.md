@@ -1,4 +1,4 @@
-# COSIA v0.46.0
+# COSIA v0.50.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.46.0 makes Tool Growth routine-centric for normal use, keeping draft/candidate/proposal internals behind advanced inspection. v0.45.0 hardened Telegram connector safety with group read-only defaults, user-level mutation authorization, and `/whoami` identity discovery.
+v0.50.0 compresses the normal product flow around setup, chat/run, status, continuity, connector setup, and explicit approvals. Tool growth, capability internals, active tool registration, and blueprint work remain available as advanced governance surfaces, but normal use should not require manually walking the internal state machine.
 
 ## Requirements
 
@@ -62,7 +62,7 @@ The legacy `agent-runtime` alias is also kept for compatibility.
 
 ## Quick Start
 
-Normal setup starts with a workspace, an explicit provider profile, and a session:
+Normal setup starts with a workspace, an explicit provider profile, and the `start` entrypoint:
 
 ```powershell
 cosia init
@@ -71,13 +71,12 @@ cosia provider list-supported
 cosia provider setup --provider codex-cli --name codex --oauth --use
 cosia provider profile check codex
 
-cosia agent create architect-agent --template architect
-cosia session create --agent architect-agent --goal "Design the COSIA runtime"
-cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
+cosia start
+cosia start --no-chat
 cosia chat --session <session-id>
+cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
 cosia status
 cosia doctor
-cosia start --no-chat
 ```
 
 The scriptable profile commands remain available:
@@ -109,13 +108,23 @@ cosia gateway telegram check
 cosia gateway start
 ```
 
+Use the normal pending approval surface when COSIA previews a file change, shell action, or Codex law amendment:
+
+```powershell
+cosia pending
+cosia apply <approval-id> --yes
+cosia cancel <approval-id> --reason "<reason>"
+```
+
+In REPL or Telegram, session-local previews still use `/pending` or `#대기중인 작업 보여줘`, followed by `/apply` or `#적용`. Plain text such as "승인할게" is never treated as an apply command.
+
 Use `mock` only for deterministic runtime regression checks:
 
 ```powershell
 cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
 
-When repeated work should become governed local tooling, use the guided Tool Growth path first:
+When repeated work should become governed local tooling, use the guided Tool Growth path. This is advanced governance, not required for first-run chat:
 
 ```powershell
 cosia tool grow --request "테스트 돌려봐" --provider mock
@@ -234,6 +243,12 @@ cosia run --session <session-id> --prompt "<prompt>" --agent <agent-id>
 cosia run --session <session-id> --prompt "<prompt>" --skill <skill-id>
 cosia chat --session <session-id> --agent <agent-id>
 cosia chat --session <session-id> --skill <skill-id>
+cosia pending
+cosia apply <approval-id> --yes
+cosia cancel <approval-id> --reason "<reason>"
+cosia provider list-supported
+cosia provider setup
+cosia provider setup --provider <provider-id> --name <profile-name> [--use]
 cosia provider profile add codex --provider codex-cli --oauth
 cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>
 cosia provider profile use <name>
@@ -749,6 +764,10 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
+- v0.49.0: Normal pending approval surface with `cosia pending`, `cosia apply <id> --yes`, and `cosia cancel <id> --reason`.
+- v0.48.0: First-run and recovery UX wording aligned around direct next commands.
+- v0.47.0: Normal product surface compression for README/help/status, with advanced governance moved behind explicit sections.
 - v0.46.0: Tool Growth surface slimming with routine-centric normal output and advanced internals inspection.
 - v0.45.0: Telegram connector group safety, user-level mutation authorization, and `/whoami` discovery.
 - v0.44.0: Memory/session/debug UX labels and last-turn debug inspection.

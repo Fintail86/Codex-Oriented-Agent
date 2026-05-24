@@ -17,6 +17,7 @@ import { ProviderError } from "../src/runtime/model/provider_errors.js";
 import { checkProvider, createProvider, listProviders } from "../src/runtime/model/provider_registry.js";
 import { OpenAICompatibleProvider, type FetchLike } from "../src/runtime/model/providers/openai_compatible_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
+import { applyPendingApproval, cancelPendingApproval, formatPendingApprovals, getPendingApprovalSummary } from "../src/runtime/pending_approvals.js";
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath, runtimePrivatePath, secretsPrivatePath } from "../src/runtime/runtime_config.js";
 import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
@@ -169,7 +170,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.46.0\"");
+    expect(policyJson).toContain("\"version\": \"0.50.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1057,7 +1058,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.46.0-policy-amended";
+    policy.version = "0.50.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1065,8 +1066,39 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.46.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.46.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.50.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.50.0-policy-amended");
+  });
+
+  it("summarizes durable pending approvals and requires explicit top-level apply", async () => {
+    const root = await initializedWorkspace();
+    const shell = new ShellApprovalLedger(root).create({
+      command: "node --version",
+      reason: "Need a one-shot project check.",
+      expectedEffect: "May print the Node.js version.",
+      sourceChannel: "cli"
+    });
+    const amendment = await new CodexAmendmentLedger(root).propose({
+      targetPath: "codex/USER.md",
+      proposedContent: "# USER\n\n- pending approval test\n",
+      reason: "Test unified pending approval surface.",
+      sourceChannel: "cli"
+    });
+
+    const summary = formatPendingApprovals(getPendingApprovalSummary(root));
+    expect(summary).toContain(shell.id);
+    expect(summary).toContain(amendment.id);
+    expect(summary).toContain("cosia apply");
+    expect(summary).toContain("Plain text approval");
+
+    const preview = await applyPendingApproval(root, amendment.id);
+    expect(preview.ok).toBe(false);
+    expect(preview.content).toContain("Re-run with");
+    expect(new CodexAmendmentLedger(root).get(amendment.id)?.status).toBe("pending");
+
+    const cancelled = cancelPendingApproval(root, shell.id, "not needed");
+    expect(cancelled.content).toContain("Shell approval cancelled.");
+    expect(new ShellApprovalLedger(root).get(shell.id)?.status).toBe("cancelled");
   });
 
   it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
@@ -3470,7 +3502,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.46.0");
+    expect(emptyReport.version).toBe("0.50.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -3665,6 +3697,8 @@ describe("status and listing", () => {
     expect(formatChatHelp()).toContain("/context status");
     expect(formatChatHelp()).toContain("/review discard-conflicts");
     expect(formatChatHelp()).toContain("/tool grow <request>");
+    expect(formatChatHelp()).toContain("/pending");
+    expect(formatChatHelp()).toContain("승인할게");
     expect(output.read()).toContain("COSIA chat commands");
     expect(output.read()).toContain(`Session: ${session.id}`);
     expect(output.read()).toContain("# SESSION SUMMARY");
@@ -4322,7 +4356,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.46.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.50.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
       ...state,

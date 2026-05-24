@@ -23,6 +23,12 @@ import { registerProviderProfileCommands } from "./provider_profiles.js";
 import { formatProviderFailure, ProviderError } from "../runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "../runtime/policy_manager.js";
+import {
+  applyPendingApproval,
+  cancelPendingApproval,
+  formatPendingApprovals,
+  getPendingApprovalSummary
+} from "../runtime/pending_approvals.js";
 import { applyRuntimeConfigMigration, buildRuntimeConfigMigration, formatConfigCheck, formatConfigShow, repairRuntimeConfig } from "../runtime/runtime_config.js";
 import { runChatRepl } from "../runtime/repl.js";
 import { formatReviewCleanup, formatReviewInbox, formatReviewStats, ReviewInboxService } from "../runtime/review_inbox.js";
@@ -176,8 +182,49 @@ export function registerStatusDoctorCommands(program: Command): void {
     });
 }
 
+export function registerPendingApprovalCommands(program: Command): void {
+  program
+    .command("pending")
+    .description("Show durable pending approvals and in-chat apply guidance.")
+    .action(async () => {
+      await main(async (workspaceRoot) => {
+        console.log(formatPendingApprovals(getPendingApprovalSummary(workspaceRoot)));
+      });
+    });
+
+  program
+    .command("apply")
+    .argument("<id>")
+    .option("--yes", "Apply the pending approval. Without this, only preview.", false)
+    .option("--confirm <phrase>", "Confirmation phrase for high-risk shell approvals.")
+    .description("Apply a durable pending approval by id.")
+    .action(async (id: string, options: { yes: boolean; confirm?: string }) => {
+      await main(async (workspaceRoot) => {
+        const result = await applyPendingApproval(workspaceRoot, id, {
+          yes: options.yes,
+          confirm: options.confirm
+        });
+        console.log(result.content);
+        if (!result.ok && options.yes) {
+          process.exitCode = 1;
+        }
+      });
+    });
+
+  program
+    .command("cancel")
+    .argument("<id>")
+    .requiredOption("--reason <reason>", "Reason to preserve with the cancelled approval.")
+    .description("Cancel a durable pending approval by id without deleting evidence.")
+    .action(async (id: string, options: { reason: string }) => {
+      await main(async (workspaceRoot) => {
+        console.log(cancelPendingApproval(workspaceRoot, id, options.reason).content);
+      });
+    });
+}
+
 export function registerMvpReviewImproveCommandCommands(program: Command): void {
-  const mvp = program.command("mvp").description("MVP acceptance helpers.");
+  const mvp = program.command("mvp").description("Historical/manual acceptance helpers.");
 
   mvp
     .command("checklist")
@@ -228,7 +275,7 @@ export function registerMvpReviewImproveCommandCommands(program: Command): void 
       });
     });
 
-  const improveCommand = program.command("improve").description("Inspect and apply governed self-improvement candidates.");
+  const improveCommand = program.command("improve").description("Advanced: inspect and apply governed self-improvement candidates.");
 
   improveCommand
     .command("status")
@@ -305,7 +352,7 @@ export function registerMvpReviewImproveCommandCommands(program: Command): void 
       });
     });
 
-  const commandCommand = program.command("command").description("Inspect runtime command metadata.");
+  const commandCommand = program.command("command").description("Debug: inspect runtime command metadata.");
   const triggerCommand = commandCommand.command("triggers").description("Manage hash command trigger packs.");
 
   triggerCommand
@@ -423,7 +470,10 @@ export function registerStartRunChatCommands(program: Command): void {
           if (report.providerHint) {
             console.log(`Hint: ${report.providerHint}`);
           }
-          console.log(`Next: cosia provider check ${report.providerId}`);
+          console.log("Next:");
+          console.log("  cosia provider setup");
+          console.log("  cosia provider profile use <name>");
+          console.log("  cosia provider profile check <name>");
           return;
         }
         console.log(`[cosia] entering chat. Equivalent command: ${chatCommand}`);

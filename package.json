@@ -1,7 +1,7 @@
 {
   "name": "cosia",
-  "version": "0.46.0",
-  "description": "COSIA: lightweight agentic runtime guided by a user-amendable Codex.",
+  "version": "0.50.0",
+  "description": "COSIA: lightweight provider-neutral agentic runtime guided by a user-amendable Codex.",
   "type": "module",
   "bin": {
     "cosia": "./dist/src/bin.js",

@@ -139,7 +139,7 @@ export function registerToolCommands(program: Command): void {
     .option("--yes", "Apply an activation. Required for tool activate.", false)
     .option("--all", "Show all records, including inactive/discarded/rejected.", false)
     .option("--advanced", "Show advanced tool growth and governance details.", false)
-    .description("List, draft, review, activate, or run policy-gated tools.")
+    .description("Advanced governance for tool growth, candidates, active tools, and blueprints.")
     .action(async (actionOrToolId: string | undefined, toolId: string | undefined, extraId: string | undefined, options: ToolCliOptions) => {
       await main(async (workspaceRoot) => {
         const acquisition = new ToolAcquisitionManager(workspaceRoot);
