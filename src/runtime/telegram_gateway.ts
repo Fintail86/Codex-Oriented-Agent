@@ -14,7 +14,7 @@ import {
   telegramGatewayDir
 } from "./gateway_locks.js";
 import { chunkTelegramMessage } from "./gateway_format.js";
-import { handleGatewayMessage, type GatewayChatState } from "./gateway_runtime.js";
+import { formatGatewayWhoami, handleGatewayMessage, isGatewayWhoamiInput, type GatewayChatState, type GatewaySourceContext } from "./gateway_runtime.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
@@ -31,6 +31,10 @@ export type TelegramGatewayCheck = {
   message: string;
   hint?: string;
   tokenStatus?: TelegramTokenResolution["status"];
+  allowedChatIds?: number;
+  allowedUserIds?: number;
+  mutationUserIds?: number;
+  groupMode?: PolicyConfig["connectors"]["telegram"]["groupMode"];
 };
 
 export type TelegramGatewayState = {
@@ -84,17 +88,29 @@ export type TelegramUpdate = {
     text?: string;
     chat: {
       id: number | string;
+      type?: string;
+      title?: string;
     };
+    from?: TelegramUser;
   };
   callback_query?: {
     id: string;
     data?: string;
+    from?: TelegramUser;
     message?: {
       chat: {
         id: number | string;
+        type?: string;
+        title?: string;
       };
     };
   };
+};
+
+export type TelegramUser = {
+  id: number | string;
+  username?: string;
+  first_name?: string;
 };
 
 type TelegramApiResponse<T> = {
@@ -186,7 +202,11 @@ export async function checkTelegramGateway(
       status: "failed",
       reason: "disabled",
       message: "Telegram connector is disabled.",
-      hint: "Run `cosia gateway telegram enable`."
+      hint: "Run `cosia gateway telegram enable`.",
+      allowedChatIds: config.allowedChatIds.length,
+      allowedUserIds: config.allowedUserIds.length,
+      mutationUserIds: config.mutationUserIds.length,
+      groupMode: config.groupMode
     };
   }
   if (!config.allowedChatIds.length) {
@@ -195,7 +215,11 @@ export async function checkTelegramGateway(
       status: "failed",
       reason: "missing_allowed_chat_ids",
       message: "Telegram connector has no allowed chat ids.",
-      hint: "Run `cosia gateway telegram set chat-id <chat-id>`."
+      hint: "Run `cosia gateway telegram set chat-id <chat-id>`.",
+      allowedChatIds: config.allowedChatIds.length,
+      allowedUserIds: config.allowedUserIds.length,
+      mutationUserIds: config.mutationUserIds.length,
+      groupMode: config.groupMode
     };
   }
   const tokenResolution = resolveTelegramToken(workspaceRoot, config);
@@ -206,7 +230,11 @@ export async function checkTelegramGateway(
       reason: "missing_token",
       message: "Telegram bot token is not configured.",
       hint: "Run `cosia gateway telegram set token` or `cosia gateway telegram set token-env <ENV_NAME>`.",
-      tokenStatus: tokenResolution.status
+      tokenStatus: tokenResolution.status,
+      allowedChatIds: config.allowedChatIds.length,
+      allowedUserIds: config.allowedUserIds.length,
+      mutationUserIds: config.mutationUserIds.length,
+      groupMode: config.groupMode
     };
   }
   try {
@@ -215,7 +243,11 @@ export async function checkTelegramGateway(
       ok: true,
       status: "ok",
       message: "Telegram connector is configured and getMe succeeded.",
-      tokenStatus: tokenResolution.status
+      tokenStatus: tokenResolution.status,
+      allowedChatIds: config.allowedChatIds.length,
+      allowedUserIds: config.allowedUserIds.length,
+      mutationUserIds: config.mutationUserIds.length,
+      groupMode: config.groupMode
     };
   } catch (error) {
     const classified = classifyTelegramCheckError(error);
@@ -224,7 +256,11 @@ export async function checkTelegramGateway(
       status: "failed",
       reason: classified.reason,
       message: (error as Error).message,
-      hint: classified.hint
+      hint: classified.hint,
+      allowedChatIds: config.allowedChatIds.length,
+      allowedUserIds: config.allowedUserIds.length,
+      mutationUserIds: config.mutationUserIds.length,
+      groupMode: config.groupMode
     };
   }
 }
@@ -374,6 +410,7 @@ export async function processTelegramUpdate(
   const callback = update.callback_query;
   if (callback) {
     const chatId = String(callback.message?.chat.id ?? "");
+    const source = telegramSourceFromCallback(callback);
     if (!chatId || !policy.connectors.telegram.allowedChatIds.includes(chatId)) {
       if (chatId) {
         await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
@@ -398,6 +435,7 @@ export async function processTelegramUpdate(
       providerId: chatState.providerId ?? options.providerId,
       owner: options.owner,
       chatId,
+      source,
       now: options.now
     });
     chatState = result.state;
@@ -420,9 +458,15 @@ export async function processTelegramUpdate(
   }
   const chatId = String(message.chat.id);
   if (!policy.connectors.telegram.allowedChatIds.includes(chatId)) {
+    const source = telegramSourceFromMessage(message);
+    if (isGatewayWhoamiInput(message.text)) {
+      await client.sendMessage(chatId, formatGatewayWhoami(source));
+      return state;
+    }
     await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
     return state;
   }
+  const source = telegramSourceFromMessage(message);
   let chatState = state.chats[chatId] ?? {
     providerId: options.providerId
   };
@@ -435,6 +479,7 @@ export async function processTelegramUpdate(
       providerId: chatState.providerId ?? options.providerId,
       owner: options.owner,
       chatId,
+      source,
       now: options.now
     });
     chatState = result.state;
@@ -589,6 +634,9 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
       legacyProcessLock: Boolean(legacyLock),
       legacyLockStale,
       allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
+      allowedUserIds: policy.connectors.telegram.allowedUserIds.length,
+      mutationUserIds: policy.connectors.telegram.mutationUserIds.length,
+      groupMode: policy.connectors.telegram.groupMode,
       activeChats: Object.keys(state.chats).length,
       nextOffset: state.nextOffset,
       failureCount: state.failureCount,
@@ -607,6 +655,9 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Lock stale: ${lockStale}`,
     lock?.heartbeatAt ? `  Heartbeat: ${lock.heartbeatAt}` : undefined,
     `  Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length}`,
+    `  Allowed user ids: ${policy.connectors.telegram.allowedUserIds.length}`,
+    `  Mutation user ids: ${policy.connectors.telegram.mutationUserIds.length}`,
+    `  Group mode: ${policy.connectors.telegram.groupMode}`,
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
     `  Failure count: ${state.failureCount}`,
@@ -669,6 +720,10 @@ export function formatTelegramCheck(result: TelegramGatewayCheck): string {
     `Status: ${result.status}`,
     `Message: ${result.message}`,
     result.tokenStatus ? `Token: ${result.tokenStatus}` : undefined,
+    result.allowedChatIds !== undefined ? `Allowed chat ids: ${result.allowedChatIds}` : undefined,
+    result.allowedUserIds !== undefined ? `Allowed user ids: ${result.allowedUserIds}` : undefined,
+    result.mutationUserIds !== undefined ? `Mutation user ids: ${result.mutationUserIds}` : undefined,
+    result.groupMode ? `Group mode: ${result.groupMode}` : undefined,
     result.reason ? `Reason: ${result.reason}` : undefined,
     result.hint ? `Hint: ${result.hint}` : undefined
   ].filter(Boolean).join("\n");
@@ -732,6 +787,28 @@ function telegramUpdateChatId(update: TelegramUpdate): string | undefined {
     : update.callback_query?.message?.chat.id !== undefined
       ? String(update.callback_query.message.chat.id)
       : undefined;
+}
+
+function telegramSourceFromMessage(message: NonNullable<TelegramUpdate["message"]>): GatewaySourceContext {
+  return {
+    connector: "telegram",
+    chatId: String(message.chat.id),
+    chatType: message.chat.type ?? "private",
+    userId: message.from?.id !== undefined ? String(message.from.id) : undefined,
+    username: message.from?.username,
+    firstName: message.from?.first_name
+  };
+}
+
+function telegramSourceFromCallback(callback: NonNullable<TelegramUpdate["callback_query"]>): GatewaySourceContext {
+  return {
+    connector: "telegram",
+    chatId: callback.message?.chat.id !== undefined ? String(callback.message.chat.id) : undefined,
+    chatType: callback.message?.chat.type ?? "private",
+    userId: callback.from?.id !== undefined ? String(callback.from.id) : undefined,
+    username: callback.from?.username,
+    firstName: callback.from?.first_name
+  };
 }
 
 function telegramCallbackInput(data: string): string {

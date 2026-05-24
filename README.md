@@ -1,4 +1,4 @@
-# COSIA v0.44.0
+# COSIA v0.45.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.44.0 clarifies COSIA's continuity layers with session debug inspection and clearer session/context wording. v0.43.0 added a dedicated Codex law amendment flow for protected `codex/*` files.
+v0.45.0 hardens Telegram connector safety with group read-only defaults, user-level mutation authorization, and `/whoami` identity discovery. v0.44.0 clarified COSIA's continuity layers with session debug inspection and clearer session/context wording.
 
 ## Requirements
 
@@ -101,6 +101,9 @@ Gateway connectors are optional external surfaces. They do not own provider sele
 ```powershell
 cosia gateway telegram enable
 cosia gateway telegram set chat-id <chat-id>
+cosia gateway telegram set user-id <user-id>
+cosia gateway telegram set mutation-user-id <user-id>
+cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
 cosia gateway telegram check
 cosia gateway start
@@ -511,6 +514,9 @@ cosia provider profile use codex
 
 cosia gateway telegram enable
 cosia gateway telegram set chat-id <chat-id>
+cosia gateway telegram set user-id <user-id>
+cosia gateway telegram set mutation-user-id <user-id>
+cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
 cosia policy check --repair
 cosia gateway telegram check
@@ -533,6 +539,9 @@ Connector settings are managed through the CLI:
 ```powershell
 cosia gateway telegram enable
 cosia gateway telegram set chat-id <chat-id>
+cosia gateway telegram set user-id <user-id>
+cosia gateway telegram set mutation-user-id <user-id>
+cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
 cosia gateway telegram list
 cosia gateway telegram check
@@ -542,18 +551,20 @@ Useful Telegram commands:
 
 ```text
 /status
+/whoami
 /sessions
 /use <session-id>
 /new <goal>
 /review
 /apply
 #상태 보여줘
+#내 정보
 #리뷰 보여줘
 ```
 
 Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply` or `#적용`, and stale previews are rejected if the target or conflict state changed.
 
-The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks.
+The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply` or `#적용`; dangerous commands are blocked in the connector by default. Group chats are read-only by default even when the chat id is allowlisted. Use `/whoami` or `#내 정보` in Telegram to discover chat/user ids, then explicitly set user and mutation user ids before enabling group mutation. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks.
 
 ## Command Trigger Packs
 
@@ -730,6 +741,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.45.0: Telegram connector group safety, user-level mutation authorization, and `/whoami` discovery.
 - v0.44.0: Memory/session/debug UX labels and last-turn debug inspection.
 - v0.43.0: Codex law amendment preview/apply flow for protected `codex/*` files.
 - v0.42.0: Provider onboarding setup registry and OAuth boundary.

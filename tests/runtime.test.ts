@@ -52,7 +52,16 @@ import {
 import { loadPrivateSecrets, savePrivateSecrets } from "../src/runtime/private_config.js";
 import { formatSupportedProviders, oauthHandlerForProvider, validateProviderProfileAddOptions } from "../src/runtime/provider_onboarding.js";
 import { addProviderProfile, listProviderProfileSummaries, missingProviderProfileHint, useProviderProfile } from "../src/runtime/provider_profiles.js";
-import { addTelegramChatId, enableTelegramConnector, setTelegramToken } from "../src/runtime/telegram_connector_config.js";
+import {
+  addTelegramChatId,
+  addTelegramMutationUserId,
+  addTelegramUserId,
+  enableTelegramConnector,
+  removeTelegramMutationUserId,
+  removeTelegramUserId,
+  setTelegramGroupMode,
+  setTelegramToken
+} from "../src/runtime/telegram_connector_config.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import {
   ToolAcquisitionManager,
@@ -155,7 +164,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.44.0\"");
+    expect(policyJson).toContain("\"version\": \"0.45.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1043,7 +1052,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.44.0-policy-amended";
+    policy.version = "0.45.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1051,8 +1060,8 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.44.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.44.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.45.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.45.0-policy-amended");
   });
 
   it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
@@ -3423,7 +3432,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.44.0");
+    expect(emptyReport.version).toBe("0.45.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4048,7 +4057,10 @@ describe("status and listing", () => {
     expect(policy.connectors.telegram).toMatchObject({
       enabled: false,
       tokenEnv: "TELEGRAM_BOT_TOKEN",
-      allowedChatIds: []
+      allowedChatIds: [],
+      allowedUserIds: [],
+      mutationUserIds: [],
+      groupMode: "read_only"
     });
 
     expect(await checkTelegramGateway(root)).toMatchObject({
@@ -4106,11 +4118,17 @@ describe("status and listing", () => {
     const root = await initializedWorkspace();
     await enableTelegramConnector(root, true);
     await addTelegramChatId(root, "123");
+    await addTelegramUserId(root, "42");
+    await addTelegramMutationUserId(root, "42");
+    await setTelegramGroupMode(root, "allowed_users");
     await setTelegramToken(root, "1234567890:AAsecrettelegramtokenvalue");
 
     const policy = await new PolicyManager(root).loadPolicy();
     expect(policy.connectors.telegram.enabled).toBe(true);
     expect(policy.connectors.telegram.allowedChatIds).toEqual(["123"]);
+    expect(policy.connectors.telegram.allowedUserIds).toEqual(["42"]);
+    expect(policy.connectors.telegram.mutationUserIds).toEqual(["42"]);
+    expect(policy.connectors.telegram.groupMode).toBe("allowed_users");
     expect(JSON.stringify(policy.connectors.telegram)).not.toContain("secrettelegram");
     expect(await readFile(runtimePrivatePath(root), "utf8")).not.toContain("secrettelegram");
     expect(await readFile(secretsPrivatePath(root), "utf8")).toContain("secrettelegram");
@@ -4120,9 +4138,19 @@ describe("status and listing", () => {
     });
     expect(check).toMatchObject({
       ok: true,
-      tokenStatus: "configured via private secret"
+      tokenStatus: "configured via private secret",
+      allowedUserIds: 1,
+      mutationUserIds: 1,
+      groupMode: "allowed_users"
     });
     expect(formatTelegramCheck(check)).not.toContain("secrettelegram");
+    expect(formatTelegramCheck(check)).toContain("Group mode: allowed_users");
+
+    await removeTelegramUserId(root, "42");
+    await removeTelegramMutationUserId(root, "42");
+    const updated = await new PolicyManager(root).loadPolicy();
+    expect(updated.connectors.telegram.allowedUserIds).toEqual([]);
+    expect(updated.connectors.telegram.mutationUserIds).toEqual([]);
   });
 
   it("processes Telegram updates with allowlist checks, state, chunks, and hash commands", async () => {
@@ -4196,6 +4224,216 @@ describe("status and listing", () => {
     const chunks = chunkTelegramMessage(`one\n\n${"x".repeat(80)}\n${"y".repeat(80)}`, 90);
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks[1]).toContain("[continued 2/");
+  });
+
+  it("keeps Telegram groups read-only by default and requires user-level mutation authorization", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Group safety");
+    const stylePath = join(root, "agents", "cosia-agent", "STYLE.md");
+    const originalStyle = await readFile(stylePath, "utf8");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const readOnlyGroupPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["-100"],
+          allowMutations: true,
+          groupMode: "read_only" as const,
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    let state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
+      chats: {},
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: -200, type: "group" },
+        from: { id: 42, username: "fox", first_name: "Fox" },
+        text: "/whoami"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Chat id: -200");
+    expect(sent.at(-1)?.text).toContain("User id: 42");
+    expect(sent.at(-1)?.text).toContain("cosia gateway telegram set mutation-user-id 42");
+    expect(state.chats["-200"]).toBeUndefined();
+
+    state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "/status"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("COSIA 0.45.0");
+
+    state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
+      ...state,
+      chats: {
+        "-100": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      }
+    }, {
+      update_id: 3,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "그냥 대화해줘"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Telegram group chats are read-only by default");
+
+    state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
+      ...state,
+      chats: {
+        "-100": {
+          providerId: "mock",
+          activeSessionId: session.id,
+          pendingCommand: {
+            id: "pending_group",
+            commandId: "write_file.overwrite",
+            args: {},
+            safety: "mutation",
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 300000).toISOString(),
+            createdAtMs: Date.now(),
+            expiresAtMs: Date.now() + 300000,
+            preview: "preview"
+          }
+        }
+      }
+    }, {
+      update_id: 4,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "#적용"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Telegram group chats are read-only by default");
+
+    const allowedGroupPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["-100"],
+          allowedUserIds: ["42"],
+          mutationUserIds: [],
+          allowMutations: true,
+          groupMode: "allowed_users" as const,
+          defaultProvider: "mock"
+        }
+      }
+    };
+    state = await processTelegramUpdate(root, allowedGroupPolicy, sender, {
+      chats: {
+        "-100": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 5,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_WRITE_ONLY:agents/cosia-agent/STYLE.md]"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("[PREVIEW] File overwrite requires approval.");
+    expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
+
+    state = await processTelegramUpdate(root, allowedGroupPolicy, sender, state, {
+      update_id: 6,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "#적용"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("not allowed to approve mutations");
+    expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
+
+    state = await processTelegramUpdate(root, {
+      ...allowedGroupPolicy,
+      connectors: {
+        telegram: {
+          ...allowedGroupPolicy.connectors.telegram,
+          mutationUserIds: ["42"]
+        }
+      }
+    }, sender, state, {
+      update_id: 7,
+      message: {
+        chat: { id: -100, type: "group" },
+        text: "#적용"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("did not provide a sender user id");
+    expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
+
+    const mutationGroupPolicy = {
+      ...allowedGroupPolicy,
+      connectors: {
+        telegram: {
+          ...allowedGroupPolicy.connectors.telegram,
+          mutationUserIds: ["42"]
+        }
+      }
+    };
+    state = await processTelegramUpdate(root, mutationGroupPolicy, sender, state, {
+      update_id: 8,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "#적용"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("[SUCCESS] File overwrite applied.");
+    expect(await readFile(stylePath, "utf8")).toBe("mock write");
   });
 
   it("clears missing active Telegram sessions and guides the user to create or select a session", async () => {

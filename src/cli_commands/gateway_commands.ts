@@ -56,9 +56,14 @@ import {
 } from "../runtime/telegram_gateway.js";
 import {
   addTelegramChatId,
+  addTelegramMutationUserId,
+  addTelegramUserId,
   enableTelegramConnector,
   formatTelegramConnectorList,
   removeTelegramChatId,
+  removeTelegramMutationUserId,
+  removeTelegramUserId,
+  setTelegramGroupMode,
   setTelegramToken,
   setTelegramTokenEnv,
   unsetTelegramToken,
@@ -224,7 +229,7 @@ export function registerGatewayCommands(program: Command): void {
     .command("set")
     .argument("<field>")
     .argument("[value]")
-    .description("Set Telegram connector fields: chat-id/id, token, token-env.")
+    .description("Set Telegram connector fields: chat-id/id, user-id, mutation-user-id, group-mode, token, token-env.")
     .action(async (field: string, value?: string) => {
       await main(async (workspaceRoot) => {
         switch (field) {
@@ -233,6 +238,27 @@ export function registerGatewayCommands(program: Command): void {
             if (!value) throw new Error(`Usage: cosia gateway telegram set ${field} <chat-id>`);
             const config = await addTelegramChatId(workspaceRoot, value);
             console.log(`Telegram allowed chat ids: ${config.allowedChatIds.length}`);
+            break;
+          }
+          case "user-id": {
+            if (!value) throw new Error("Usage: cosia gateway telegram set user-id <user-id>");
+            const config = await addTelegramUserId(workspaceRoot, value);
+            console.log(`Telegram allowed user ids: ${config.allowedUserIds.length}`);
+            break;
+          }
+          case "mutation-user-id": {
+            if (!value) throw new Error("Usage: cosia gateway telegram set mutation-user-id <user-id>");
+            const config = await addTelegramMutationUserId(workspaceRoot, value);
+            console.log(`Telegram mutation user ids: ${config.mutationUserIds.length}`);
+            break;
+          }
+          case "group-mode": {
+            if (value !== "read-only" && value !== "read_only" && value !== "allowed-users" && value !== "allowed_users") {
+              throw new Error("Usage: cosia gateway telegram set group-mode read-only|allowed-users");
+            }
+            const normalized = value.replace("-", "_") as "read_only" | "allowed_users";
+            const config = await setTelegramGroupMode(workspaceRoot, normalized);
+            console.log(`Telegram group mode: ${config.groupMode}`);
             break;
           }
           case "token": {
@@ -249,7 +275,7 @@ export function registerGatewayCommands(program: Command): void {
             break;
           }
           default:
-            throw new Error("Unsupported Telegram field. Use chat-id, id, token, or token-env.");
+            throw new Error("Unsupported Telegram field. Use chat-id, id, user-id, mutation-user-id, group-mode, token, or token-env.");
         }
       });
     });
@@ -258,7 +284,7 @@ export function registerGatewayCommands(program: Command): void {
     .command("unset")
     .argument("<field>")
     .argument("[value]")
-    .description("Unset Telegram connector fields: chat-id/id, token, token-env.")
+    .description("Unset Telegram connector fields: chat-id/id, user-id, mutation-user-id, token, token-env.")
     .action(async (field: string, value?: string) => {
       await main(async (workspaceRoot) => {
         switch (field) {
@@ -267,6 +293,18 @@ export function registerGatewayCommands(program: Command): void {
             if (!value) throw new Error(`Usage: cosia gateway telegram unset ${field} <chat-id>`);
             const config = await removeTelegramChatId(workspaceRoot, value);
             console.log(`Telegram allowed chat ids: ${config.allowedChatIds.length}`);
+            break;
+          }
+          case "user-id": {
+            if (!value) throw new Error("Usage: cosia gateway telegram unset user-id <user-id>");
+            const config = await removeTelegramUserId(workspaceRoot, value);
+            console.log(`Telegram allowed user ids: ${config.allowedUserIds.length}`);
+            break;
+          }
+          case "mutation-user-id": {
+            if (!value) throw new Error("Usage: cosia gateway telegram unset mutation-user-id <user-id>");
+            const config = await removeTelegramMutationUserId(workspaceRoot, value);
+            console.log(`Telegram mutation user ids: ${config.mutationUserIds.length}`);
             break;
           }
           case "token":
@@ -279,7 +317,7 @@ export function registerGatewayCommands(program: Command): void {
             break;
           }
           default:
-            throw new Error("Unsupported Telegram field. Use chat-id, id, token, or token-env.");
+            throw new Error("Unsupported Telegram field. Use chat-id, id, user-id, mutation-user-id, token, or token-env.");
         }
       });
     });

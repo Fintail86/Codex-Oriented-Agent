@@ -25,6 +25,15 @@ import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import type { SessionMetadata } from "./types.js";
 
+export type GatewaySourceContext = {
+  connector?: "telegram";
+  chatId?: string;
+  chatType?: string;
+  userId?: string;
+  username?: string;
+  firstName?: string;
+};
+
 export type GatewayChatState = {
   activeSessionId?: string;
   providerId?: string;
@@ -40,6 +49,7 @@ export type GatewayMessageOptions = {
   providerId: string;
   owner: string;
   chatId?: string;
+  source?: GatewaySourceContext;
   now?: () => number;
 };
 
@@ -57,6 +67,10 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   };
   if (!input) {
     return done("Send /help for available commands.", state);
+  }
+  const groupBlock = gatewayGroupBlockReason(options, input);
+  if (groupBlock) {
+    return done(groupBlock, state);
   }
   const staleSession = await clearMissingActiveSession(options.workspaceRoot, state);
   state = staleSession.state;
@@ -128,6 +142,7 @@ export function formatGatewayHelp(): string {
   return [
     "COSIA Telegram Gateway commands:",
     "  /help                 Show this help.",
+    "  /whoami               Show Telegram chat/user ids for local setup.",
     "  /status               Show compact COSIA status.",
     "  /sessions             List sessions.",
     "  /use <session-id>     Select active session for this chat.",
@@ -148,6 +163,121 @@ export function formatGatewayHelp(): string {
   ].join("\n");
 }
 
+type GatewayInputSafety = "read_only" | "state_change" | "mutation" | "session_run" | "unknown";
+
+function gatewayGroupBlockReason(options: GatewayMessageOptions, input: string): string | undefined {
+  const source = options.source;
+  if (source?.connector !== "telegram" || !isTelegramGroupType(source.chatType)) {
+    return undefined;
+  }
+  if (isGatewayWhoamiInput(input)) {
+    return undefined;
+  }
+
+  const safety = classifyGatewayInputSafety(input, options.workspaceRoot);
+  if (safety === "read_only") {
+    return undefined;
+  }
+
+  const config = options.policy.connectors.telegram;
+  if (config.groupMode === "read_only") {
+    return formatTelegramGroupBlocked(source, "Telegram group chats are read-only by default.");
+  }
+
+  if (safety === "unknown") {
+    return formatTelegramGroupBlocked(source, "Only recognized read-only or explicitly authorized group commands are allowed.");
+  }
+
+  if (safety === "mutation") {
+    if (!config.allowMutations) {
+      return formatTelegramGroupBlocked(source, "Telegram mutations are disabled by policy.");
+    }
+    if (!source.userId) {
+      return formatTelegramGroupBlocked(source, "Telegram did not provide a sender user id, so mutation approval is blocked.");
+    }
+    if (!config.mutationUserIds.includes(source.userId)) {
+      return formatTelegramGroupBlocked(source, "This Telegram user is not allowed to approve mutations.");
+    }
+    return undefined;
+  }
+
+  if (safety === "state_change" || safety === "session_run") {
+    if (!source.userId) {
+      return formatTelegramGroupBlocked(source, "Telegram did not provide a sender user id, so state-changing group interaction is blocked.");
+    }
+    if (!config.allowedUserIds.includes(source.userId)) {
+      return formatTelegramGroupBlocked(source, "This Telegram user is not allowed to run state-changing group interactions.");
+    }
+  }
+
+  return undefined;
+}
+
+function classifyGatewayInputSafety(input: string, workspaceRoot: string): GatewayInputSafety {
+  if (input.startsWith("/")) {
+    if (isReadOnlySlashCommand(input)) return "read_only";
+    if (input === "/apply" || input === "/cancel" || input.startsWith("/review cleanup") || input.startsWith("/review promote ") || input.startsWith("/review discard ")) {
+      return "mutation";
+    }
+    if (input.startsWith("/new ") || input.startsWith("/use ")) {
+      return "state_change";
+    }
+    return "unknown";
+  }
+  if (input.startsWith("#")) {
+    const parsed = parseRuntimeHashCommand(input);
+    if (parsed.type === "matched") {
+      if (parsed.commandId.startsWith("pending.")) {
+        return "mutation";
+      }
+      const definition = runtimeCommandDefinitionById(parsed.commandId);
+      return definition?.safety === "read_only" ? "read_only" : "mutation";
+    }
+    const candidates = retrieveRuntimeCommandCandidates(input, 8, workspaceRoot);
+    if (candidates.length && candidates.every((candidate) => candidate.safety === "read_only")) {
+      return "read_only";
+    }
+    return "unknown";
+  }
+  return "session_run";
+}
+
+function isReadOnlySlashCommand(input: string): boolean {
+  return input === "/help"
+    || input === "/whoami"
+    || input === "/status"
+    || input === "/sessions"
+    || input === "/review"
+    || input === "/review memory"
+    || input === "/review skill"
+    || input === "/review stats"
+    || input === "/review next"
+    || input.startsWith("/review show ")
+    || input.startsWith("/review conflicts ");
+}
+
+function isTelegramGroupType(chatType: string | undefined): boolean {
+  return Boolean(chatType && chatType !== "private");
+}
+
+function formatTelegramGroupBlocked(source: GatewaySourceContext, reason: string): string {
+  return [
+    "[BLOCKED] Telegram group safety gate.",
+    reason,
+    `Chat id: ${source.chatId ?? "unknown"}`,
+    `Chat type: ${source.chatType ?? "unknown"}`,
+    `User id: ${source.userId ?? "unknown"}`,
+    "",
+    "Use /whoami in Telegram to confirm ids.",
+    "",
+    "Local setup:",
+    source.chatId ? `  cosia gateway telegram set chat-id ${source.chatId}` : "  cosia gateway telegram set chat-id <chat-id>",
+    source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>",
+    source.userId ? `  cosia gateway telegram set mutation-user-id ${source.userId}` : "  cosia gateway telegram set mutation-user-id <user-id>",
+    "  cosia gateway telegram set group-mode allowed-users"
+  ].join("\n");
+}
+
 async function handleSlashCommand(options: GatewayMessageOptions & {
   input: string;
   state: GatewayChatState;
@@ -156,6 +286,9 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
   const { input, state } = options;
   if (input === "/help") {
     return done(formatGatewayHelp(), state);
+  }
+  if (input === "/whoami") {
+    return done(formatGatewayWhoami(options.source ?? { chatId: options.chatId, chatType: "private" }), state);
   }
   if (input === "/status") {
     return done(formatStatusReport(await getStatusReport(options.workspaceRoot, state.providerId ?? options.providerId), { compact: true }), state);
@@ -253,6 +386,9 @@ async function handleHashCommand(options: GatewayMessageOptions & {
   state: GatewayChatState;
   now: () => number;
 }): Promise<GatewayMessageResult> {
+  if (isGatewayWhoamiInput(options.input)) {
+    return done(formatGatewayWhoami(options.source ?? { chatId: options.chatId, chatType: "private" }), options.state);
+  }
   let intent = parseRuntimeHashCommand(options.input);
   if (intent.type === "no_match") {
     const candidates = retrieveRuntimeCommandCandidates(options.input, 8, options.workspaceRoot);
@@ -313,6 +449,33 @@ async function handleHashCommand(options: GatewayMessageOptions & {
     return done(preview.output, options.state);
   }
   return done("[BLOCKED] This natural command is recognized but is not available through the gateway yet.", options.state);
+}
+
+export function isGatewayWhoamiInput(input: string): boolean {
+  const normalized = input.trim().toLowerCase();
+  return normalized === "/whoami"
+    || normalized === "#내 정보"
+    || normalized === "#내정보"
+    || normalized === "#whoami";
+}
+
+export function formatGatewayWhoami(source: GatewaySourceContext): string {
+  const chatId = source.chatId ?? "unknown";
+  const userId = source.userId ?? "unknown";
+  return [
+    "Telegram identity",
+    `Chat id: ${chatId}`,
+    `Chat type: ${source.chatType ?? "private"}`,
+    `User id: ${userId}`,
+    source.username ? `Username: @${source.username}` : undefined,
+    source.firstName ? `Name: ${source.firstName}` : undefined,
+    "",
+    "Local setup hints:",
+    `  cosia gateway telegram set chat-id ${chatId}`,
+    source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>",
+    source.userId ? `  cosia gateway telegram set mutation-user-id ${source.userId}` : "  cosia gateway telegram set mutation-user-id <user-id>",
+    "  cosia gateway telegram set group-mode allowed-users"
+  ].filter(Boolean).join("\n");
 }
 
 async function executeSessionFreeReadOnly(intent: Extract<ReturnType<typeof parseRuntimeHashCommand>, { type: "matched" }>, options: GatewayMessageOptions & {

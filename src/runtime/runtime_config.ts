@@ -68,6 +68,9 @@ export const telegramConnectorSchema = z.object({
   enabled: z.boolean().default(false),
   tokenEnv: z.string().min(1).default("TELEGRAM_BOT_TOKEN"),
   allowedChatIds: z.array(z.string()).default([]),
+  allowedUserIds: z.array(z.string()).default([]),
+  mutationUserIds: z.array(z.string()).default([]),
+  groupMode: z.enum(["read_only", "allowed_users"]).default("read_only"),
   allowMutations: z.boolean().default(true),
   blockDangerous: z.boolean().default(true),
   messageChunkChars: z.number().int().positive().default(3500),
@@ -211,6 +214,9 @@ export const defaultRuntimeConfig: RuntimeConfig = {
       enabled: false,
       tokenEnv: "TELEGRAM_BOT_TOKEN",
       allowedChatIds: [],
+      allowedUserIds: [],
+      mutationUserIds: [],
+      groupMode: "read_only",
       allowMutations: true,
       blockDangerous: true,
       messageChunkChars: 3500,
@@ -437,7 +443,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   const hasLegacyRuntime = Object.keys(legacy).length > 0;
   const legacyToolLocal = localConfigFromLegacyPolicyTools(raw);
   const lawPolicy = stripRuntimeConfig(raw);
-  lawPolicy.version = "0.44.0";
+  lawPolicy.version = "0.45.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
   const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
