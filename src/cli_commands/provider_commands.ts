@@ -19,7 +19,16 @@ import {
   formatCapabilityScan
 } from "../runtime/capability.js";
 import { checkProvider, createProvider, listProviders, resolveProviderSelection } from "../runtime/model/provider_registry.js";
+import { addProviderProfile, useProviderProfile } from "../runtime/provider_profiles.js";
 import { registerProviderProfileCommands } from "./provider_profiles.js";
+import {
+  authModeFromOptions,
+  formatProviderSetupResult,
+  formatSupportedProviders,
+  listSupportedProviderDescriptors,
+  requireProviderDescriptor,
+  type ProviderAuthMode
+} from "../runtime/provider_onboarding.js";
 import { formatProviderFailure, ProviderError } from "../runtime/model/provider_errors.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../runtime/policy_audit.js";
 import { formatPolicySummary, PolicyManager } from "../runtime/policy_manager.js";
@@ -125,6 +134,76 @@ export function registerProviderCommands(program: Command): void {
   const providerCommand = program.command("provider").description("Inspect model providers.");
 
   providerCommand
+    .command("list-supported")
+    .description("List supported provider setup paths without selecting a default.")
+    .action(() => {
+      console.log(formatSupportedProviders());
+    });
+
+  providerCommand
+    .command("setup")
+    .option("--provider <provider-id>", "Provider implementation id to configure.")
+    .option("--name <profile-name>", "Provider profile name to create or update.")
+    .option("--oauth", "Use provider OAuth mode when supported.", false)
+    .option("--api-key", "Prompt for an API key and store it in the private secret store.", false)
+    .option("--api-key-env <env-name>", "Read the API key from an environment variable.")
+    .option("--model <model-id>", "Model id for providers that require one.")
+    .option("--base-url <url>", "Base URL for openai-compatible providers.")
+    .option("--use", "Select the created profile as the active provider profile.", false)
+    .description("Guided provider profile setup.")
+    .action(async (options: {
+      provider?: string;
+      name?: string;
+      oauth: boolean;
+      apiKey: boolean;
+      apiKeyEnv?: string;
+      model?: string;
+      baseUrl?: string;
+      use: boolean;
+    }) => {
+      await main(async (workspaceRoot) => {
+        const providerId = await resolveSetupProviderId(options.provider);
+        const descriptor = requireProviderDescriptor(providerId);
+        const name = options.name ?? await askProviderProfileName(descriptor.defaultProfileName);
+        const authMode = await resolveSetupAuthMode({
+          providerId: descriptor.providerId,
+          oauth: options.oauth,
+          apiKey: options.apiKey,
+          apiKeyEnv: options.apiKeyEnv
+        });
+        const model = descriptor.requiresModel
+          ? options.model ?? await askRequired("Model id: ")
+          : options.model;
+        const baseUrl = descriptor.requiresBaseUrl
+          ? options.baseUrl ?? await askRequired("Base URL: ")
+          : options.baseUrl;
+        const apiKeyEnv = authMode === "env"
+          ? options.apiKeyEnv ?? await askRequired(`API key env [${descriptor.defaultApiKeyEnv ?? "OPENAI_API_KEY"}]: `, descriptor.defaultApiKeyEnv)
+          : undefined;
+        const apiKey = authMode === "secret"
+          ? await promptHidden("API key: ")
+          : undefined;
+        const profile = await addProviderProfile(workspaceRoot, name, {
+          providerId: descriptor.providerId,
+          oauth: authMode === "oauth",
+          apiKey,
+          apiKeyEnv,
+          model,
+          baseUrl
+        });
+        if (options.use) {
+          await useProviderProfile(workspaceRoot, profile.name);
+        }
+        console.log(formatProviderSetupResult({
+          profileName: profile.name,
+          providerId: profile.providerId,
+          authMode,
+          used: options.use
+        }));
+      });
+    });
+
+  providerCommand
     .command("list")
     .description("List configured model providers.")
     .action(async () => {
@@ -169,4 +248,53 @@ export function registerProviderCommands(program: Command): void {
     });
 
   registerProviderProfileCommands(providerCommand, { main, promptHidden });
+}
+
+async function resolveSetupProviderId(providerId?: string): Promise<string> {
+  if (providerId) {
+    return providerId;
+  }
+  console.log(formatSupportedProviders());
+  return askRequired("Provider id: ");
+}
+
+async function askProviderProfileName(defaultName: string): Promise<string> {
+  const value = await askOnce(`Profile name [${defaultName}]: `);
+  return value || defaultName;
+}
+
+async function resolveSetupAuthMode(options: {
+  providerId: string;
+  oauth: boolean;
+  apiKey: boolean;
+  apiKeyEnv?: string;
+}): Promise<ProviderAuthMode> {
+  const explicit = authModeFromOptions({
+    providerId: options.providerId,
+    oauth: options.oauth,
+    apiKey: options.apiKey ? "__prompt__" : undefined,
+    apiKeyEnv: options.apiKeyEnv
+  });
+  if (explicit) {
+    return explicit;
+  }
+  const descriptor = requireProviderDescriptor(options.providerId);
+  if (descriptor.authModes.length === 1) {
+    return descriptor.authModes[0];
+  }
+  const raw = await askRequired(`Auth mode (${descriptor.authModes.map((mode) => mode === "secret" ? "api-key" : mode).join("/")}): `);
+  const normalized = raw === "api-key" ? "secret" : raw;
+  if (normalized !== "oauth" && normalized !== "secret" && normalized !== "env") {
+    throw new Error(`Unsupported auth mode: ${raw}`);
+  }
+  return normalized;
+}
+
+async function askRequired(prompt: string, defaultValue?: string): Promise<string> {
+  const value = await askOnce(prompt);
+  const resolved = value || defaultValue;
+  if (!resolved) {
+    throw new Error(`${prompt.trim()} is required.`);
+  }
+  return resolved;
 }

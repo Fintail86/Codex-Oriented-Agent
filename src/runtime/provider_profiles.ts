@@ -11,9 +11,13 @@ import {
   loadPrivateRuntimeConfig,
   savePrivateRuntimeConfig,
   setProviderApiKeySecret,
-  unsetProviderApiKeySecret,
+  unsetProviderSecrets,
   updatePrivateRuntimeConfig
 } from "./private_config.js";
+import {
+  missingProviderProfileHint as providerOnboardingMissingProviderProfileHint,
+  validateProviderProfileAddOptions
+} from "./provider_onboarding.js";
 import type { PolicyConfig } from "./policy_manager.js";
 
 export type ProviderProfileAddOptions = {
@@ -41,18 +45,19 @@ export async function addProviderProfile(
   options: ProviderProfileAddOptions
 ): Promise<ProviderProfile> {
   assertProfileName(name);
+  const normalizedOptions = validateProviderProfileAddOptions(name, options);
   const now = new Date().toISOString();
   const existing = (await loadRuntimeConfig(workspaceRoot)).config.model.providerProfiles[name];
-  const auth = options.oauth
+  const auth = normalizedOptions.oauth
     ? { mode: "oauth" as const }
-    : options.apiKeyEnv
-      ? { mode: "env" as const, envName: options.apiKeyEnv }
+    : normalizedOptions.apiKeyEnv
+      ? { mode: "env" as const, envName: normalizedOptions.apiKeyEnv }
       : { mode: "secret" as const, secretRef: `providers.${name}.apiKey` };
   const profile: ProviderProfile = {
     name,
-    providerId: options.providerId,
-    ...(options.model ? { model: options.model } : {}),
-    ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+    providerId: normalizedOptions.providerId,
+    ...(normalizedOptions.model ? { model: normalizedOptions.model } : {}),
+    ...(normalizedOptions.baseUrl ? { baseUrl: normalizedOptions.baseUrl } : {}),
     auth,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
@@ -64,8 +69,8 @@ export async function addProviderProfile(
       }
     }
   });
-  if (options.apiKey !== undefined) {
-    await setProviderApiKeySecret(workspaceRoot, name, options.apiKey);
+  if (normalizedOptions.apiKey !== undefined) {
+    await setProviderApiKeySecret(workspaceRoot, name, normalizedOptions.apiKey);
   }
   return profile;
 }
@@ -97,7 +102,7 @@ export async function removeProviderProfile(workspaceRoot: string, name: string)
       providerProfiles
     }
   });
-  await unsetProviderApiKeySecret(workspaceRoot, name);
+  await unsetProviderSecrets(workspaceRoot, name);
   return true;
 }
 
@@ -160,7 +165,10 @@ export function formatProviderProfileList(items: ProviderProfileSummary[]): stri
     return [
       "Provider profiles: none",
       "",
-      "Add one:",
+      "Guided setup:",
+      "  cosia provider setup",
+      "",
+      "Scriptable setup:",
       "  cosia provider profile add codex --provider codex-cli --oauth",
       "  cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>"
     ].join("\n");
@@ -207,14 +215,7 @@ export function formatProviderProfileUsed(profile: ProviderProfile): string {
 }
 
 export function missingProviderProfileHint(): string {
-  return [
-    "Run one of:",
-    "  cosia provider profile add codex --provider codex-cli --oauth",
-    "  cosia provider profile add openrouter --provider openrouter --api-key --model <model-id>",
-    "",
-    "Then select it:",
-    "  cosia provider profile use <name>"
-  ].join("\n");
+  return providerOnboardingMissingProviderProfileHint();
 }
 
 function summarizeProviderProfile(workspaceRoot: string, runtime: RuntimeConfig, profile: ProviderProfile): ProviderProfileSummary {

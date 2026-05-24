@@ -48,7 +48,9 @@ import {
   saveTelegramGatewayState,
   startTelegramGateway
 } from "../src/runtime/telegram_gateway.js";
-import { addProviderProfile, listProviderProfileSummaries, useProviderProfile } from "../src/runtime/provider_profiles.js";
+import { loadPrivateSecrets, savePrivateSecrets } from "../src/runtime/private_config.js";
+import { formatSupportedProviders, oauthHandlerForProvider, validateProviderProfileAddOptions } from "../src/runtime/provider_onboarding.js";
+import { addProviderProfile, listProviderProfileSummaries, missingProviderProfileHint, useProviderProfile } from "../src/runtime/provider_profiles.js";
 import { addTelegramChatId, enableTelegramConnector, setTelegramToken } from "../src/runtime/telegram_connector_config.js";
 import { ToolRegistry } from "../src/runtime/tool_registry.js";
 import {
@@ -152,7 +154,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.41.0\"");
+    expect(policyJson).toContain("\"version\": \"0.42.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -793,6 +795,81 @@ describe("policy core", () => {
       secretStatus: "configured via private secret"
     });
     expect(formatConfigCheck(root)).resolves.not.toContain("secret-openrouter-key");
+  });
+
+  it("lists supported provider setup paths and validates provider-specific setup fields", async () => {
+    const supported = formatSupportedProviders();
+    expect(supported).toContain("Supported provider setup paths");
+    expect(supported).toContain("codex-cli");
+    expect(supported).toContain("openrouter");
+    expect(supported).toContain("openai-compatible");
+    expect(supported).toContain("No provider is selected by default.");
+
+    expect(() => validateProviderProfileAddOptions("bad", {
+      providerId: "unknown",
+      oauth: true
+    })).toThrow("Unsupported provider");
+    expect(() => validateProviderProfileAddOptions("openrouter", {
+      providerId: "openrouter",
+      oauth: true
+    })).toThrow("does not support oauth auth");
+    expect(() => validateProviderProfileAddOptions("openai", {
+      providerId: "openai-compatible",
+      apiKey: "secret"
+    })).toThrow("requires --model");
+    expect(() => validateProviderProfileAddOptions("openai", {
+      providerId: "openai-compatible",
+      apiKey: "secret",
+      model: "gpt-test"
+    })).toThrow("requires --base-url");
+    expect(validateProviderProfileAddOptions("openai", {
+      providerId: "openai-compatible",
+      apiKeyEnv: "OPENAI_API_KEY",
+      model: "gpt-test",
+      baseUrl: "https://example.test/v1"
+    })).toMatchObject({
+      providerId: "openai-compatible",
+      apiKeyEnv: "OPENAI_API_KEY"
+    });
+    expect(missingProviderProfileHint()).toContain("cosia provider setup");
+  });
+
+  it("defines an OAuth boundary without storing codex-cli delegated OAuth tokens", async () => {
+    const root = await initializedWorkspace();
+    const handler = oauthHandlerForProvider("codex-cli");
+    expect(handler?.beginOAuthSetup()).toMatchObject({
+      ok: true,
+      mode: "external_cli_delegation"
+    });
+
+    await addProviderProfile(root, "codex", {
+      providerId: "codex-cli",
+      oauth: true
+    });
+    expect(await loadPrivateSecrets(root)).toEqual({
+      version: 1,
+      providers: {},
+      connectors: {}
+    });
+
+    await savePrivateSecrets(root, {
+      version: 1,
+      providers: {
+        future: {
+          oauth: {
+            accessToken: "access-secret",
+            refreshToken: "refresh-secret",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            tokenType: "Bearer",
+            scope: "test"
+          }
+        }
+      },
+      connectors: {}
+    });
+    const normalized = await loadPrivateSecrets(root);
+    expect(normalized.providers.future.oauth?.accessToken).toBe("access-secret");
+    expect(JSON.stringify(await listProviderProfileSummaries(root))).not.toContain("access-secret");
   });
 
   it("validates unknown bundled tool runtime config and removes legacy dedicated policy tools", async () => {
@@ -3248,7 +3325,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.41.0");
+    expect(emptyReport.version).toBe("0.42.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);

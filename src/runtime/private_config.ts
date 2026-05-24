@@ -12,7 +12,16 @@ type JsonObject = Record<string, unknown>;
 
 export type PrivateSecrets = {
   version: 1;
-  providers: Record<string, { apiKey?: string }>;
+  providers: Record<string, {
+    apiKey?: string;
+    oauth?: {
+      accessToken?: string;
+      refreshToken?: string;
+      expiresAt?: string;
+      tokenType?: string;
+      scope?: string;
+    };
+  }>;
   connectors: {
     telegram?: {
       botToken?: string;
@@ -80,6 +89,14 @@ export async function unsetProviderApiKeySecret(workspaceRoot: string, profileNa
   await savePrivateSecrets(workspaceRoot, secrets);
 }
 
+export async function unsetProviderSecrets(workspaceRoot: string, profileName: string): Promise<void> {
+  const secrets = await loadPrivateSecrets(workspaceRoot);
+  if (secrets.providers[profileName]) {
+    delete secrets.providers[profileName];
+  }
+  await savePrivateSecrets(workspaceRoot, secrets);
+}
+
 export function getProviderApiKeySecret(workspaceRoot: string, profileName: string): string | undefined {
   return loadPrivateSecretsSync(workspaceRoot).providers[profileName]?.apiKey;
 }
@@ -122,8 +139,25 @@ function normalizeSecrets(raw: unknown): PrivateSecrets {
   const connectors = isObject(data.connectors) ? data.connectors : {};
   const normalizedProviders: PrivateSecrets["providers"] = {};
   for (const [profileName, value] of Object.entries(providers)) {
-    if (isObject(value) && typeof value.apiKey === "string") {
-      normalizedProviders[profileName] = { apiKey: value.apiKey };
+    if (isObject(value)) {
+      const normalizedProvider: PrivateSecrets["providers"][string] = {};
+      if (typeof value.apiKey === "string") {
+        normalizedProvider.apiKey = value.apiKey;
+      }
+      if (isObject(value.oauth)) {
+        const oauth: NonNullable<PrivateSecrets["providers"][string]["oauth"]> = {};
+        if (typeof value.oauth.accessToken === "string") oauth.accessToken = value.oauth.accessToken;
+        if (typeof value.oauth.refreshToken === "string") oauth.refreshToken = value.oauth.refreshToken;
+        if (typeof value.oauth.expiresAt === "string") oauth.expiresAt = value.oauth.expiresAt;
+        if (typeof value.oauth.tokenType === "string") oauth.tokenType = value.oauth.tokenType;
+        if (typeof value.oauth.scope === "string") oauth.scope = value.oauth.scope;
+        if (Object.keys(oauth).length) {
+          normalizedProvider.oauth = oauth;
+        }
+      }
+      if (Object.keys(normalizedProvider).length) {
+        normalizedProviders[profileName] = normalizedProvider;
+      }
     }
   }
   const telegram = isObject(connectors.telegram) && typeof connectors.telegram.botToken === "string"

@@ -1,4 +1,4 @@
-# COSIA v0.41.0
+# COSIA v0.42.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.41.0 keeps the public behavior stable while splitting the large CLI entrypoint into focused command modules. v0.40.0 aligned the public surface with this identity and moved capability/tool-growth internals into advanced sections.
+v0.42.0 makes provider onboarding a first-class setup path while preserving explicit provider profiles and connector/provider separation. v0.41.0 kept public behavior stable while splitting the large CLI entrypoint into focused command modules.
 
 ## Requirements
 
@@ -67,8 +67,8 @@ Normal setup starts with a workspace, an explicit provider profile, and a sessio
 ```powershell
 cosia init
 
-cosia provider profile add codex --provider codex-cli --oauth
-cosia provider profile use codex
+cosia provider list-supported
+cosia provider setup --provider codex-cli --name codex --oauth --use
 cosia provider profile check codex
 
 cosia agent create architect-agent --template architect
@@ -78,6 +78,14 @@ cosia chat --session <session-id>
 cosia status
 cosia doctor
 cosia start --no-chat
+```
+
+The scriptable profile commands remain available:
+
+```powershell
+cosia provider profile add codex --provider codex-cli --oauth
+cosia provider profile use codex
+cosia provider profile check codex
 ```
 
 For another replaceable brain, create and select another provider profile:
@@ -707,6 +715,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.42.0: Provider onboarding setup registry and OAuth boundary.
 - v0.41.0: CLI surface module split with behavior-preserving command registration.
 - v0.40.0: Identity surface refactor for the user-amendable Codex runtime direction.
 - v0.38.0: Tool Growth Routine orchestration from request to candidate, explicit test, and explicit activation.

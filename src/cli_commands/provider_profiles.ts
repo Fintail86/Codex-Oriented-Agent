@@ -8,10 +8,12 @@ import {
   formatProviderProfileShow,
   formatProviderProfileUsed,
   listProviderProfileSummaries,
+  missingProviderProfileHint,
   removeProviderProfile,
   requireProviderProfile,
   useProviderProfile
 } from "../runtime/provider_profiles.js";
+import { validateProviderProfileAddOptions } from "../runtime/provider_onboarding.js";
 
 type CliMain = (
   fn: (workspaceRoot: string) => Promise<void>,
@@ -53,6 +55,14 @@ export function registerProviderProfileCommands(
         if (options.oauth && options.provider !== "codex-cli") {
           throw new Error("--oauth is currently supported for --provider codex-cli.");
         }
+        validateProviderProfileAddOptions(name, {
+          providerId: options.provider,
+          oauth: options.oauth,
+          apiKey: options.apiKey ? "__prompt__" : undefined,
+          apiKeyEnv: options.apiKeyEnv,
+          model: options.model,
+          baseUrl: options.baseUrl
+        });
         const apiKey = options.apiKey ? await deps.promptHidden("API key: ") : undefined;
         console.log(formatProviderProfileAdded(await addProviderProfile(workspaceRoot, name, {
           providerId: options.provider,
@@ -107,7 +117,10 @@ export function registerProviderProfileCommands(
         const policy = await new PolicyManager(workspaceRoot).loadPolicy();
         const profileName = name ?? policy.model.activeProviderProfile;
         if (!profileName) {
-          throw new Error("No active provider profile is configured. Run `cosia provider profile use <name>`.");
+          throw new Error([
+            "No active provider profile is configured.",
+            missingProviderProfileHint()
+          ].join("\n"));
         }
         await requireProviderProfile(workspaceRoot, profileName);
         const result = await checkProvider(profileName, workspaceRoot, policy);

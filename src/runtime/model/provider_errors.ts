@@ -55,9 +55,9 @@ export function providerFailureHint(reason: ProviderFailureReason, providerId: s
         ? "Run `codex login` and verify with `codex login status`."
         : "Check the provider API key and authentication settings.";
     case "disabled":
-      return `Create and select a provider profile for \`${providerId}\` before using it.`;
+      return `Run \`cosia provider setup --provider ${providerId}\` or create and select an explicit provider profile.`;
     case "missing_config":
-      return `Run \`cosia provider profile add <name> --provider ${providerId} ...\` and \`cosia provider profile use <name>\`.`;
+      return `Run \`cosia provider setup --provider ${providerId}\`, then \`cosia provider profile use <name>\`.`;
     case "missing_api_key":
       return "Configure the provider profile API key with hidden input or an environment variable.";
     case "timeout":
@@ -73,7 +73,7 @@ export function providerFailureHint(reason: ProviderFailureReason, providerId: s
     case "malformed_agent_step":
       return "The model did not return valid AgentStep JSON after structured retry.";
     case "unknown_provider":
-      return "Run `cosia provider profile list` and choose a configured provider profile.";
+      return "Run `cosia provider list-supported`, then `cosia provider setup` or choose a configured provider profile.";
   }
 }
 
