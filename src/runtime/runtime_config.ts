@@ -183,7 +183,7 @@ export const defaultRuntimeConfig: RuntimeConfig = {
         enabled: false,
         sandbox: "read-only",
         baseUrl: "https://chatgpt.com/backend-api",
-        model: "gpt-5.4",
+        model: "openai/gpt-5.5",
         apiKeyEnv: "OPENAI_API_KEY",
         endpointPath: "/codex/responses",
         timeoutMs: 120000,

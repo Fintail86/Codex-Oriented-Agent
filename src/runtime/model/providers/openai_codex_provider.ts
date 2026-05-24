@@ -16,7 +16,7 @@ type OAuthSecret = NonNullable<PrivateSecrets["providers"][string]["oauth"]>;
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 const DEFAULT_ENDPOINT_PATH = "/codex/responses";
-const DEFAULT_MODEL = "gpt-5.4";
+const DEFAULT_MODEL = "openai/gpt-5.5";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_SCOPE = "openid profile email offline_access";
 const DEFAULT_ORIGINATOR = "pi";
