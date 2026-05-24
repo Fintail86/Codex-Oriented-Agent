@@ -50,7 +50,7 @@ export function providerFailureHint(reason: ProviderFailureReason, providerId: s
   switch (reason) {
     case "cli_missing":
       return providerId === "openai-codex"
-        ? "Install a Codex build with `codex app-server` support, or choose another provider profile."
+        ? "Run `cosia provider oauth login <profile>` to create COSIA-owned OpenAI Codex OAuth tokens, or choose another provider profile."
         : "Install the Codex CLI and make sure `codex` is available on PATH.";
     case "auth_failed":
       return providerId === "openai-codex"

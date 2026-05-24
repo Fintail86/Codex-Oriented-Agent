@@ -337,7 +337,7 @@ cosia session show <session-id>
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
 - Destructive, network, external-send, and unrestricted shell permissions are disabled by policy. `shell_request` only creates a one-shot approval preview.
-- `openai-codex` OAuth profiles use the official OpenAI Codex app-server auth surface. `codex-cli` remains compatibility-only.
+- `openai-codex` OAuth profiles use COSIA-owned private token storage and direct Codex provider calls. `codex-cli` remains compatibility-only.
 - Provider config is profile-backed; no provider is active until `cosia provider profile use <name>`.
 - `mock` provider success proves regression safety only; validate at least one real provider profile when checking provider behavior.
 - Provider failures are reported with reason codes and short next-action hints.

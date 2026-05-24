@@ -60,6 +60,7 @@ export type ToolGrowthActivationResult = {
 
 export type ToolGrowthFormatOptions = {
   advanced?: boolean;
+  surface?: "cli" | "slash";
 };
 
 type StartOptions = {
@@ -374,12 +375,12 @@ export function formatToolGrowthStart(result: ToolGrowthStartResult, options: To
   lines.push("");
   if (candidateReady) {
     lines.push("Next:");
-    lines.push(`  cosia tool grow test ${result.routine.id} --yes`);
-    lines.push(`  cosia tool grow show ${result.routine.id}`);
+    lines.push(`  ${toolGrowthCommand(result.routine.id, "test", options)} --yes`);
+    lines.push(`  ${toolGrowthCommand(result.routine.id, "show", options)}`);
   } else {
     lines.push("Next:");
-    lines.push(`  cosia tool grow retry ${result.routine.id}`);
-    lines.push(`  cosia tool grow cancel ${result.routine.id} --reason "<reason>"`);
+    lines.push(`  ${toolGrowthCommand(result.routine.id, "retry", options)}`);
+    lines.push(`  ${toolGrowthCommand(result.routine.id, "cancel", options)} --reason "<reason>"`);
   }
   return lines.join("\n");
 }
@@ -392,7 +393,7 @@ export function formatToolGrowthReview(routines: ToolGrowthRoutine[], options: T
     const lines = [
       `${routine.id}\t${routine.status}\tattempts:${routine.attemptCount}`,
       `Request: ${routine.sourceRequest}`,
-      `Next: ${nextToolGrowthAction(routine)}`
+      `Next: ${nextToolGrowthAction(routine, options)}`
     ];
     if (options.advanced) {
       lines.push(
@@ -419,7 +420,7 @@ export function formatToolGrowthRoutine(
     routine.reason ? `Reason: ${routine.reason}` : undefined,
     "",
     "Next:",
-    `  ${nextToolGrowthAction(routine)}`
+    `  ${nextToolGrowthAction(routine, options)}`
   ].filter((line): line is string => line !== undefined);
   if (options.advanced) {
     lines.push(...[
@@ -451,12 +452,12 @@ export function formatToolGrowthTest(result: ToolGrowthTestResult, options: Tool
     passed
       ? [
           "Next:",
-          `  cosia tool grow activate ${result.routine.id} --agent <agent-id> --yes`
+          `  ${toolGrowthCommand(result.routine.id, "activate", options)} --agent <agent-id> --yes`
         ].join("\n")
       : [
           "Next:",
-          `  cosia tool grow retry ${result.routine.id}`,
-          `  cosia tool grow cancel ${result.routine.id} --reason "<reason>"`
+          `  ${toolGrowthCommand(result.routine.id, "retry", options)}`,
+          `  ${toolGrowthCommand(result.routine.id, "cancel", options)} --reason "<reason>"`
         ].join("\n")
   ];
   if (options.advanced) {
@@ -477,14 +478,14 @@ export function formatToolGrowthActivation(result: ToolGrowthActivationResult): 
   ].join("\n");
 }
 
-export function formatToolGrowthRejected(routine: ToolGrowthRoutine): string {
+export function formatToolGrowthRejected(routine: ToolGrowthRoutine, options: ToolGrowthFormatOptions = {}): string {
   return [
     "Candidate rejected and preserved as evidence.",
     `Routine: ${routine.id}`,
     `Reason: ${routine.reason ?? "rejected"}`,
     "Next:",
-    `  cosia tool grow retry ${routine.id}`,
-    `  cosia tool grow cancel ${routine.id} --reason "<reason>"`
+    `  ${toolGrowthCommand(routine.id, "retry", options)}`,
+    `  ${toolGrowthCommand(routine.id, "cancel", options)} --reason "<reason>"`
   ].join("\n");
 }
 
@@ -496,18 +497,18 @@ export function formatToolGrowthCancelled(routine: ToolGrowthRoutine): string {
   ].join("\n");
 }
 
-function nextToolGrowthAction(routine: ToolGrowthRoutine): string {
+function nextToolGrowthAction(routine: ToolGrowthRoutine, options: ToolGrowthFormatOptions = {}): string {
   if (routine.status === "candidate_ready") {
-    return `cosia tool grow test ${routine.id} --yes`;
+    return `${toolGrowthCommand(routine.id, "test", options)} --yes`;
   }
   if (routine.status === "test_failed") {
-    return `cosia tool grow retry ${routine.id}`;
+    return toolGrowthCommand(routine.id, "retry", options);
   }
   if (routine.status === "test_passed" || routine.status === "awaiting_activation") {
-    return `cosia tool grow activate ${routine.id} --agent <agent-id> --yes`;
+    return `${toolGrowthCommand(routine.id, "activate", options)} --agent <agent-id> --yes`;
   }
   if (routine.status === "rejected") {
-    return `cosia tool grow retry ${routine.id}`;
+    return toolGrowthCommand(routine.id, "retry", options);
   }
   if (routine.status === "cancelled") {
     return "closed; no further action";
@@ -516,6 +517,11 @@ function nextToolGrowthAction(routine: ToolGrowthRoutine): string {
     return "active tool registration already applied";
   }
   return "inspect routine";
+}
+
+function toolGrowthCommand(routineId: string, action: "show" | "test" | "activate" | "retry" | "cancel", options: ToolGrowthFormatOptions = {}): string {
+  const prefix = options.surface === "slash" ? "/tool grow" : "cosia tool grow";
+  return `${prefix} ${action} ${routineId}`;
 }
 
 function withGrowthDb<T>(workspaceRoot: string, fn: (db: DatabaseSync) => T): T {

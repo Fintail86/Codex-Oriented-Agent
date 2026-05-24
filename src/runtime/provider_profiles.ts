@@ -8,6 +8,7 @@ import {
 } from "./runtime_config.js";
 import {
   getProviderApiKeySecret,
+  getProviderOAuthSecret,
   loadPrivateRuntimeConfig,
   savePrivateRuntimeConfig,
   setProviderApiKeySecret,
@@ -241,6 +242,11 @@ function summarizeProviderProfile(workspaceRoot: string, runtime: RuntimeConfig,
 
 function providerSecretStatus(workspaceRoot: string, profile: ProviderProfile): ProviderProfileSummary["secretStatus"] {
   if (profile.auth.mode === "oauth") {
+    if (profile.providerId === "openai-codex") {
+      return getProviderOAuthSecret(workspaceRoot, profile.name)?.accessToken
+        ? "configured via private secret"
+        : "missing";
+    }
     return "not required";
   }
   if (profile.auth.mode === "env") {

@@ -2,7 +2,7 @@ import type { ProviderProfileAddOptions } from "./provider_profiles.js";
 
 export type ProviderAuthMode = "oauth" | "secret" | "env";
 
-export type OAuthSetupKind = "openai_codex_app_server" | "external_cli_delegation" | "cosia_owned_unimplemented";
+export type OAuthSetupKind = "cosia_owned_token_sink" | "external_cli_delegation" | "cosia_owned_unimplemented";
 
 export type ProviderOnboardingDescriptor = {
   providerId: string;
@@ -40,10 +40,10 @@ export const supportedProviderDescriptors: ProviderOnboardingDescriptor[] = [
     authModes: ["oauth"],
     requiresModel: false,
     requiresBaseUrl: false,
-    oauthSetupKind: "openai_codex_app_server",
+    oauthSetupKind: "cosia_owned_token_sink",
     notes: [
       "First-class OpenAI Codex OAuth provider path for COSIA.",
-      "Uses the official Codex app-server auth/account surface instead of `codex exec`.",
+      "Uses COSIA-owned OAuth token storage and direct provider calls instead of per-turn Codex app-server sessions.",
       "No OAuth token values are printed by COSIA."
     ]
   },
@@ -217,29 +217,29 @@ export function oauthHandlerForProvider(providerId: string): ProviderOAuthHandle
   if (!descriptor.authModes.includes("oauth")) {
     return undefined;
   }
-  if (descriptor.oauthSetupKind === "openai_codex_app_server") {
+  if (descriptor.oauthSetupKind === "cosia_owned_token_sink") {
     return {
       providerId: descriptor.providerId,
       beginOAuthSetup: () => ({
         ok: true,
-        mode: "openai_codex_app_server",
-        message: "OpenAI Codex OAuth is handled through the official Codex app-server auth flow.",
+        mode: "cosia_owned_token_sink",
+        message: "OpenAI Codex OAuth is handled through COSIA-owned private token storage.",
         hint: "Run `cosia provider oauth login <profile>`."
       }),
       checkOAuthStatus: () => ({
         ok: true,
-        mode: "openai_codex_app_server",
-        message: "OAuth status is checked by the openai-codex provider implementation."
+        mode: "cosia_owned_token_sink",
+        message: "OAuth status is checked from COSIA private provider secrets."
       }),
       refreshOAuthIfSupported: () => ({
         ok: true,
-        mode: "openai_codex_app_server",
-        message: "Token refresh is delegated to the official Codex app-server managed ChatGPT auth flow."
+        mode: "cosia_owned_token_sink",
+        message: "Token refresh is handled by the openai-codex provider token sink."
       }),
       revokeOAuthIfSupported: () => ({
-        ok: true,
-        mode: "openai_codex_app_server",
-        message: "OAuth logout is delegated to the official Codex app-server auth flow."
+        ok: false,
+        mode: "cosia_owned_token_sink",
+        message: "OAuth revocation is not implemented yet. Remove the provider profile or secret to disconnect locally."
       })
     };
   }

@@ -272,7 +272,7 @@ export function registerProviderCommands(program: Command): void {
         if (profile.auth.mode !== "oauth") {
           throw new Error(`Provider profile ${profileName} is not an OAuth profile.`);
         }
-        const result = await loginOpenAICodexOAuth(workspaceRoot, {
+        const result = await loginOpenAICodexOAuth(workspaceRoot, profileName, {
           onMessage: (message) => console.log(message)
         });
         console.log(result.message);

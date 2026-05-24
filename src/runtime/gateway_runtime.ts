@@ -18,7 +18,18 @@ import { formatReviewInbox, formatReviewNext, formatReviewStats, ReviewInboxServ
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
-import { formatToolGrowthStart, ToolGrowthManager } from "./tool_growth.js";
+import { ToolAcquisitionManager } from "./tool_acquisition.js";
+import {
+  formatToolGrowthActivation,
+  formatToolGrowthCancelled,
+  formatToolGrowthRejected,
+  formatToolGrowthReview,
+  formatToolGrowthRoutine,
+  formatToolGrowthStart,
+  formatToolGrowthTest,
+  ToolGrowthManager,
+  type ToolGrowthRoutine
+} from "./tool_growth.js";
 import type { SessionMetadata } from "./types.js";
 
 export type GatewaySourceContext = {
@@ -34,6 +45,7 @@ export type GatewayChatState = {
   activeSessionId?: string;
   providerId?: string;
   pendingCommand?: PendingCommand;
+  currentToolGrowthRoutineId?: string;
   updatedAt?: string;
 };
 
@@ -64,6 +76,10 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   if (!input) {
     return done("Send /help for available commands.", state);
   }
+  const slashOwnerBlock = telegramSlashOwnerBlockReason(options, input);
+  if (slashOwnerBlock) {
+    return done(slashOwnerBlock, options.state);
+  }
   const groupBlock = gatewayGroupBlockReason(options, input);
   if (groupBlock) {
     return done(groupBlock, state);
@@ -78,6 +94,9 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   }
   if (input.startsWith("#")) {
     return handleHashCommand({ ...options, input, state, now });
+  }
+  if (/^cosia\s+tool\s+grow(?:\s|$)/i.test(input)) {
+    return done(formatTelegramCliToolGrowGuidance(input), state);
   }
   if (!state.activeSessionId) {
     return done("No active session. Use /sessions, /use <session-id>, or /new <goal>.", state);
@@ -143,10 +162,13 @@ export function formatGatewayHelp(): string {
     "  /review               Show memory/skill review inbox.",
     "  /review memory|skill  Filter review inbox.",
     "  /tool grow <request>  Start a guided reusable-tool routine.",
+    "  /tool grow test [routine-id] --yes",
+    "  /tool grow activate [routine-id] --agent <agent-id> --yes",
     "  /cancel               Cancel pending mutation preview.",
     "  /apply                Apply pending mutation preview.",
     "",
     "Notes:",
+    "  Telegram slash commands require a configured owner user id. Use /whoami, then set it locally.",
     "  # command shortcuts were removed. Use slash commands or plain natural language.",
     "",
     "Plain text is sent to the active COSIA session."
@@ -154,6 +176,21 @@ export function formatGatewayHelp(): string {
 }
 
 type GatewayInputSafety = "read_only" | "state_change" | "mutation" | "session_run" | "unknown";
+
+function telegramSlashOwnerBlockReason(options: GatewayMessageOptions, input: string): string | undefined {
+  const source = options.source;
+  if (source?.connector !== "telegram" || !input.startsWith("/") || isGatewayWhoamiInput(input)) {
+    return undefined;
+  }
+  const allowedUserIds = options.policy.connectors.telegram.allowedUserIds;
+  if (!source.userId) {
+    return formatTelegramSlashOwnerBlocked(source, "Telegram did not provide a sender user id.");
+  }
+  if (!allowedUserIds.includes(source.userId)) {
+    return formatTelegramSlashOwnerBlocked(source, "This Telegram user is not allowed to run slash commands.");
+  }
+  return undefined;
+}
 
 function gatewayGroupBlockReason(options: GatewayMessageOptions, input: string): string | undefined {
   const source = options.source;
@@ -254,6 +291,23 @@ function formatTelegramGroupBlocked(source: GatewaySourceContext, reason: string
     source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>",
     source.userId ? `  cosia gateway telegram set mutation-user-id ${source.userId}` : "  cosia gateway telegram set mutation-user-id <user-id>",
     "  cosia gateway telegram set group-mode allowed-users"
+  ].join("\n");
+}
+
+function formatTelegramSlashOwnerBlocked(source: GatewaySourceContext, reason: string): string {
+  return [
+    "[BLOCKED] Telegram slash command owner gate.",
+    reason,
+    "Only configured Telegram owner user ids can run slash commands.",
+    `Chat id: ${source.chatId ?? "unknown"}`,
+    `Chat type: ${source.chatType ?? "unknown"}`,
+    `User id: ${source.userId ?? "unknown"}`,
+    "",
+    "Use /whoami in Telegram to confirm ids.",
+    "",
+    "Local setup:",
+    source.chatId ? `  cosia gateway telegram set chat-id ${source.chatId}` : "  cosia gateway telegram set chat-id <chat-id>",
+    source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>"
   ].join("\n");
 }
 
@@ -365,21 +419,133 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
   if (input === "/apply") {
     return applyGatewayPending(options);
   }
-  if (input.startsWith("/tool grow ")) {
-    const request = input.slice("/tool grow ".length).trim();
-    if (!request) return done("Usage: /tool grow <request>", state);
+  if (input === "/tool grow" || input.startsWith("/tool grow ")) {
+    return handleToolGrowthGatewayCommand({
+      ...options,
+      input,
+      state,
+      now: options.now
+    });
+  }
+  return done(`Unknown Telegram gateway command: ${input}\n\n${formatGatewayHelp()}`, state);
+}
+
+async function handleToolGrowthGatewayCommand(options: GatewayMessageOptions & {
+  input: string;
+  state: GatewayChatState;
+  now: () => number;
+}): Promise<GatewayMessageResult> {
+  const rest = options.input.slice("/tool grow".length).trim();
+  if (!rest) {
+    return done([
+      "Usage:",
+      "  /tool grow <request>",
+      "  /tool grow show [routine-id] [--advanced]",
+      "  /tool grow test [routine-id] --yes",
+      "  /tool grow activate [routine-id] --agent <agent-id> --yes",
+      "  /tool grow reject [routine-id] --reason \"<reason>\"",
+      "  /tool grow retry [routine-id]",
+      "  /tool grow cancel [routine-id] --reason \"<reason>\""
+    ].join("\n"), options.state);
+  }
+
+  const growth = new ToolGrowthManager(options.workspaceRoot);
+  const acquisition = new ToolAcquisitionManager(options.workspaceRoot);
+  const tokens = parseGatewayCommandLineArgs(rest);
+  const action = tokens[0];
+  const state = options.state;
+  const providerId = state.providerId ?? options.providerId;
+
+  if (!["review", "show", "test", "activate", "reject", "retry", "cancel"].includes(action)) {
     const agentId = state.activeSessionId
       ? (await new SessionManager(options.workspaceRoot).loadSession(state.activeSessionId)).assignedAgentId ?? options.policy.agents.defaultAgentId
       : options.policy.agents.defaultAgentId;
     if (!agentId) return done("No default agent. Run `cosia agent bootstrap` locally first.", state);
-    const result = await new ToolGrowthManager(options.workspaceRoot).start({
-      request,
+    const result = await growth.start({
+      request: rest,
       agentId,
-      providerId: state.providerId ?? options.providerId
+      providerId
     });
-    return done(formatToolGrowthStart(result), state);
+    return done(formatToolGrowthStart(result, { surface: "slash" }), touch({
+      ...state,
+      currentToolGrowthRoutineId: result.routine.id
+    }));
   }
-  return done(`Unknown Telegram gateway command: ${input}\n\n${formatGatewayHelp()}`, state);
+
+  const args = tokens.slice(1);
+  const flags = parseGatewayFlagArgs(args);
+  if (action === "review") {
+    return done(formatToolGrowthReview(growth.list({ all: flags.all === "true" }), {
+      advanced: flags.advanced === "true",
+      surface: "slash"
+    }), state);
+  }
+
+  const routineId = resolveGatewayToolGrowthRoutineId(args, state.currentToolGrowthRoutineId);
+  if (!routineId) {
+    return done("[BLOCKED] Tool growth routine id is required. Use /tool grow review or /tool grow show <routine-id>.", state);
+  }
+
+  if (action === "show") {
+    const routine = growth.get(routineId);
+    const candidate = routine.selectedCandidateId ? acquisition.getCandidate(routine.selectedCandidateId) : undefined;
+    return done(formatToolGrowthRoutine(routine, candidate, {
+      advanced: flags.advanced === "true",
+      surface: "slash"
+    }), touch({
+      ...state,
+      currentToolGrowthRoutineId: updateGatewayToolGrowthRoutineId(state.currentToolGrowthRoutineId, routine)
+    }));
+  }
+  if (action === "test") {
+    const result = await growth.test(routineId, { yes: flags.yes === "true" });
+    return done(formatToolGrowthTest(result, {
+      advanced: flags.advanced === "true",
+      surface: "slash"
+    }), touch({
+      ...state,
+      currentToolGrowthRoutineId: updateGatewayToolGrowthRoutineId(state.currentToolGrowthRoutineId, result.routine)
+    }));
+  }
+  if (action === "activate") {
+    const result = await growth.activate(routineId, {
+      agentId: flags.agent ?? options.policy.agents.defaultAgentId,
+      yes: flags.yes === "true"
+    });
+    return done(formatToolGrowthActivation(result), touch({
+      ...state,
+      currentToolGrowthRoutineId: updateGatewayToolGrowthRoutineId(state.currentToolGrowthRoutineId, result.routine)
+    }));
+  }
+  if (action === "reject") {
+    if (!flags.reason) {
+      return done("Usage: /tool grow reject [routine-id] --reason \"<reason>\"", state);
+    }
+    const routine = growth.reject(routineId, flags.reason);
+    return done(formatToolGrowthRejected(routine, { surface: "slash" }), touch({
+      ...state,
+      currentToolGrowthRoutineId: updateGatewayToolGrowthRoutineId(state.currentToolGrowthRoutineId, routine)
+    }));
+  }
+  if (action === "retry") {
+    const result = await growth.retry(routineId, { providerId });
+    return done(formatToolGrowthStart(result, { surface: "slash" }), touch({
+      ...state,
+      currentToolGrowthRoutineId: result.routine.id
+    }));
+  }
+  if (action === "cancel") {
+    if (!flags.reason) {
+      return done("Usage: /tool grow cancel [routine-id] --reason \"<reason>\"", state);
+    }
+    const routine = growth.cancel(routineId, flags.reason);
+    return done(formatToolGrowthCancelled(routine), touch({
+      ...state,
+      currentToolGrowthRoutineId: updateGatewayToolGrowthRoutineId(state.currentToolGrowthRoutineId, routine)
+    }));
+  }
+
+  return done("[BLOCKED] Unknown /tool grow command.", state);
 }
 
 async function handleHashCommand(options: GatewayMessageOptions & {
@@ -388,6 +554,68 @@ async function handleHashCommand(options: GatewayMessageOptions & {
   now: () => number;
 }): Promise<GatewayMessageResult> {
   return done(formatHashCommandRemovedNotice(), options.state);
+}
+
+function updateGatewayToolGrowthRoutineId(current: string | undefined, routine: ToolGrowthRoutine | undefined): string | undefined {
+  if (!routine) {
+    return current;
+  }
+  return ["activated", "cancelled", "rejected"].includes(routine.status) ? undefined : routine.id;
+}
+
+function resolveGatewayToolGrowthRoutineId(tokens: string[], current: string | undefined): string | undefined {
+  return positionalGatewayArgs(tokens)[0] ?? current;
+}
+
+function positionalGatewayArgs(tokens: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.startsWith("--")) {
+      const next = tokens[index + 1];
+      if (next && !next.startsWith("--")) {
+        index += 1;
+      }
+      continue;
+    }
+    result.push(token);
+  }
+  return result;
+}
+
+function parseGatewayCommandLineArgs(value: string): string[] {
+  const matches = value.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g);
+  return [...matches].map((match) => match[1] ?? match[2] ?? match[3]);
+}
+
+function parseGatewayFlagArgs(tokens: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token.startsWith("--")) {
+      continue;
+    }
+    const key = token.slice(2);
+    const next = tokens[index + 1];
+    if (!next || next.startsWith("--")) {
+      result[key] = "true";
+      continue;
+    }
+    result[key] = next;
+    index += 1;
+  }
+  return result;
+}
+
+function formatTelegramCliToolGrowGuidance(input: string): string {
+  const slash = input.replace(/^cosia\s+tool\s+grow/i, "/tool grow").trim();
+  return [
+    "Telegram does not execute local CLI commands.",
+    "Use the Telegram slash command form instead:",
+    `  ${slash}`,
+    "",
+    "For local PowerShell, run the cosia command directly outside Telegram."
+  ].join("\n");
 }
 
 export function isGatewayWhoamiInput(input: string): boolean {

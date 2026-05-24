@@ -20,6 +20,9 @@ export type PrivateSecrets = {
       expiresAt?: string;
       tokenType?: string;
       scope?: string;
+      accountId?: string;
+      providerId?: string;
+      source?: string;
     };
   }>;
   connectors: {
@@ -89,6 +92,30 @@ export async function unsetProviderApiKeySecret(workspaceRoot: string, profileNa
   await savePrivateSecrets(workspaceRoot, secrets);
 }
 
+export async function setProviderOAuthSecret(
+  workspaceRoot: string,
+  profileName: string,
+  oauth: NonNullable<PrivateSecrets["providers"][string]["oauth"]>
+): Promise<void> {
+  const secrets = await loadPrivateSecrets(workspaceRoot);
+  secrets.providers[profileName] = {
+    ...(secrets.providers[profileName] ?? {}),
+    oauth
+  };
+  await savePrivateSecrets(workspaceRoot, secrets);
+}
+
+export async function unsetProviderOAuthSecret(workspaceRoot: string, profileName: string): Promise<void> {
+  const secrets = await loadPrivateSecrets(workspaceRoot);
+  if (secrets.providers[profileName]) {
+    delete secrets.providers[profileName].oauth;
+    if (!Object.keys(secrets.providers[profileName]).length) {
+      delete secrets.providers[profileName];
+    }
+  }
+  await savePrivateSecrets(workspaceRoot, secrets);
+}
+
 export async function unsetProviderSecrets(workspaceRoot: string, profileName: string): Promise<void> {
   const secrets = await loadPrivateSecrets(workspaceRoot);
   if (secrets.providers[profileName]) {
@@ -99,6 +126,13 @@ export async function unsetProviderSecrets(workspaceRoot: string, profileName: s
 
 export function getProviderApiKeySecret(workspaceRoot: string, profileName: string): string | undefined {
   return loadPrivateSecretsSync(workspaceRoot).providers[profileName]?.apiKey;
+}
+
+export function getProviderOAuthSecret(
+  workspaceRoot: string,
+  profileName: string
+): NonNullable<PrivateSecrets["providers"][string]["oauth"]> | undefined {
+  return loadPrivateSecretsSync(workspaceRoot).providers[profileName]?.oauth;
 }
 
 export async function setTelegramBotTokenSecret(workspaceRoot: string, token: string): Promise<void> {
@@ -151,6 +185,9 @@ function normalizeSecrets(raw: unknown): PrivateSecrets {
         if (typeof value.oauth.expiresAt === "string") oauth.expiresAt = value.oauth.expiresAt;
         if (typeof value.oauth.tokenType === "string") oauth.tokenType = value.oauth.tokenType;
         if (typeof value.oauth.scope === "string") oauth.scope = value.oauth.scope;
+        if (typeof value.oauth.accountId === "string") oauth.accountId = value.oauth.accountId;
+        if (typeof value.oauth.providerId === "string") oauth.providerId = value.oauth.providerId;
+        if (typeof value.oauth.source === "string") oauth.source = value.oauth.source;
         if (Object.keys(oauth).length) {
           normalizedProvider.oauth = oauth;
         }

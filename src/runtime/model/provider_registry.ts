@@ -74,11 +74,15 @@ export function createProvider(id: string, workspaceRoot: string, options: Provi
   if (providerType === "openai-codex") {
     return new OpenAICodexProvider({
       id: profile?.name ?? providerId,
+      profileName: profile?.name ?? providerId,
       workspaceRoot,
       model: profile?.model ?? config.model,
+      baseUrl: config.baseUrl,
+      endpointPath: config.endpointPath,
       timeoutMs,
       structuredRetryCount: config.structuredRetryCount,
-      maxPromptChars: config.maxPromptChars
+      maxPromptChars: config.maxPromptChars,
+      fetchImpl: options.fetchImpl
     });
   }
   if (providerType === "openai-compatible") {

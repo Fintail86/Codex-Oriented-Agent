@@ -949,7 +949,7 @@ describe("policy core", () => {
     const handler = oauthHandlerForProvider("openai-codex");
     expect(handler?.beginOAuthSetup()).toMatchObject({
       ok: true,
-      mode: "openai_codex_app_server"
+      mode: "cosia_owned_token_sink"
     });
     const legacyHandler = oauthHandlerForProvider("codex-cli");
     expect(legacyHandler?.beginOAuthSetup()).toMatchObject({
@@ -976,7 +976,10 @@ describe("policy core", () => {
             refreshToken: "refresh-secret",
             expiresAt: "2099-01-01T00:00:00.000Z",
             tokenType: "Bearer",
-            scope: "test"
+            scope: "test",
+            accountId: "acct-test",
+            providerId: "openai-codex",
+            source: "cosia-owned-oauth"
           }
         }
       },
@@ -984,7 +987,53 @@ describe("policy core", () => {
     });
     const normalized = await loadPrivateSecrets(root);
     expect(normalized.providers.future.oauth?.accessToken).toBe("access-secret");
+    expect(normalized.providers.future.oauth?.accountId).toBe("acct-test");
     expect(JSON.stringify(await listProviderProfileSummaries(root))).not.toContain("access-secret");
+  });
+
+  it("uses openai-codex OAuth tokens from the private token sink without app-server threads", async () => {
+    const root = await initializedWorkspace();
+    await addProviderProfile(root, "codex", {
+      providerId: "openai-codex",
+      oauth: true
+    });
+    await useProviderProfile(root, "codex");
+    await savePrivateSecrets(root, {
+      version: 1,
+      providers: {
+        codex: {
+          oauth: {
+            accessToken: "access-secret",
+            refreshToken: "refresh-secret",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            tokenType: "Bearer",
+            scope: "test",
+            accountId: "acct-test",
+            providerId: "openai-codex",
+            source: "cosia-owned-oauth"
+          }
+        }
+      },
+      connectors: {}
+    });
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      requests.push({ url: String(input), init });
+      return new Response(JSON.stringify({ output_text: "{\"type\":\"final\",\"content\":\"ok\"}" }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+    const provider = createProvider("codex", root, {
+      policy: await new PolicyManager(root).loadPolicy(),
+      fetchImpl
+    });
+    const result = await provider.complete({ sessionId: "session-test", prompt: "hello" });
+    expect(result.raw).toContain("\"content\":\"ok\"");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toContain("/codex/responses");
+    expect((requests[0].init?.headers as Record<string, string>).authorization).toBe("Bearer access-secret");
+    expect(String(requests[0].init?.body)).toContain("Return exactly one COSIA AgentStep JSON object");
   });
 
   it("validates unknown bundled tool runtime config and removes legacy dedicated policy tools", async () => {
@@ -1761,6 +1810,7 @@ describe("tool acquisition", () => {
     expect(normalStart).not.toContain("Capability proposal:");
     expect(normalStart).not.toContain(`Draft created: ${started.draftResult.draft.id}`);
     expect(normalStart).not.toContain(`Candidate created: ${started.draftResult.candidate?.id}`);
+    expect(formatToolGrowthStart(started, { surface: "slash" })).toContain(`/tool grow test ${started.routine.id} --yes`);
 
     const advancedStart = formatToolGrowthStart(started, { advanced: true });
     expect(advancedStart).toContain("Advanced details:");
@@ -4198,6 +4248,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           defaultProvider: "mock",
           messageChunkChars: 120
         }
@@ -4226,10 +4277,29 @@ describe("status and listing", () => {
     expect(sent.at(-1)?.text).toContain("Unauthorized");
     expect(state.chats["999"]).toBeUndefined();
 
+    const sentBeforeOwnerGate = sent.length;
     state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
       update_id: 2,
       message: {
         chat: { id: 123 },
+        from: { id: 7, username: "guest" },
+        text: "/status"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    const ownerGateOutput = sent.slice(sentBeforeOwnerGate).map((message) => message.text).join("\n");
+    expect(ownerGateOutput).toContain("Telegram slash command owner gate");
+    expect(ownerGateOutput).toContain("cosia gateway telegram set user-id 7");
+    expect(state.chats["123"]?.activeSessionId).toBeUndefined();
+    expect(state.chats["123"]?.pendingCommand).toBeUndefined();
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "/status"
       }
     }, {
@@ -4241,9 +4311,10 @@ describe("status and listing", () => {
 
     const sentBeforeBatch = sent.length;
     state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
-      update_id: 3,
+      update_id: 4,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "/help\n/sessions\n/status"
       }
     }, {
@@ -4274,6 +4345,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["-100"],
+          allowedUserIds: ["42"],
           allowMutations: true,
           groupMode: "read_only" as const,
           defaultProvider: "mock"
@@ -4481,6 +4553,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -4528,6 +4601,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -4576,6 +4650,7 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "/status"
       }
     }, {
@@ -4585,6 +4660,81 @@ describe("status and listing", () => {
 
     expect(sent.at(-1)?.text).toContain("COSIA 0.51.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
+  });
+
+  it("handles Telegram tool growth follow-up commands with slash syntax", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {},
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "/tool grow provider settings inspector"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    const routineId = state.chats["123"]?.currentToolGrowthRoutineId;
+    expect(routineId).toMatch(/^grow_/);
+    expect(sent.at(-1)?.text).toContain(`Tool growth routine created: ${routineId}`);
+    expect(sent.at(-1)?.text).toContain(`/tool grow test ${routineId} --yes`);
+    expect(sent.at(-1)?.text).not.toContain("cosia tool grow test");
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "/tool grow test --yes"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("Tool candidate test passed.");
+    expect(sent.at(-1)?.text).toContain(`/tool grow activate ${routineId} --agent <agent-id> --yes`);
+    expect(state.chats["123"]?.currentToolGrowthRoutineId).toBe(routineId);
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        text: `cosia tool grow test ${routineId} --yes`
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("Telegram does not execute local CLI commands.");
+    expect(sent.at(-1)?.text).toContain(`/tool grow test ${routineId} --yes`);
   });
 
   it("turns Telegram write_file overwrite denials into explicit pending apply previews", async () => {
@@ -4602,6 +4752,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           allowMutations: true,
           defaultProvider: "mock"
         }
@@ -4657,6 +4808,7 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "/apply"
       }
     }, {
@@ -4683,6 +4835,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           allowMutations: true,
           defaultProvider: "mock"
         }
@@ -4737,6 +4890,7 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "/apply"
       }
     }, {
@@ -4833,6 +4987,7 @@ describe("status and listing", () => {
             update_id: 11,
             message: {
               chat: { id: 123 },
+              from: { id: 42, username: "fox" },
               text: "/status"
             }
           }]
@@ -4884,6 +5039,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -4987,6 +5143,7 @@ describe("status and listing", () => {
     await useProviderProfile(root, "gateway-profile");
     await enableTelegramConnector(root, true);
     await addTelegramChatId(root, "123");
+    await addTelegramUserId(root, "42");
     await setTelegramToken(root, "test-token");
     const requests: string[] = [];
     const fetchImpl: FetchLike = async (url) => {
@@ -5001,6 +5158,7 @@ describe("status and listing", () => {
             update_id: 1,
             message: {
               chat: { id: 123 },
+              from: { id: 42, username: "fox" },
               text: "/status"
             }
           }]
