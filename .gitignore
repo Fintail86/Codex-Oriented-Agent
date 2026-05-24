@@ -13,6 +13,8 @@ Docs/*
 !Docs/plans/*.md
 !Docs/architecture/
 !Docs/architecture/*.md
+!Docs/refactors/
+!Docs/refactors/*.md
 .cosia-gateway/
 .cosia-reset-backups/
 config/runtime.local.json

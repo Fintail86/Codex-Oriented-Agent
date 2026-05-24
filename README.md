@@ -1,10 +1,12 @@
-# COSIA v0.38.0
+# COSIA v0.40.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
-A TypeScript CLI MVP for a Codex / Agent / Session runtime with scored SQLite memory, executable policy core, zero-base capability planning, approved shell previews, governed tool draft/candidate acquisition, governed memory promotion, prompt budgeting, session chat, a global skill toolbox, and a Codex CLI model provider.
+COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amendable Codex.
 
-v0.38.0 adds Tool Growth Routine orchestration. A user can start from a request, get a capability proposal, LLM ToolDraft, normalized ToolCandidate, then explicitly test and activate through the existing hardened paths. Routine startup never creates shell approvals, executes commands, or registers active tools.
+`Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
+
+v0.40.0 aligns the public surface with that identity. It keeps the existing runtime behavior intact while making the normal setup path lighter and moving capability/tool-growth internals into advanced sections.
 
 ## Requirements
 
@@ -12,7 +14,6 @@ v0.38.0 adds Tool Growth Routine orchestration. A user can start from a request,
 - npm for local development/install workflows
 - Git for repository development workflows
 - ripgrep (`rg`)
-- Codex CLI logged in with `codex login`
 
 Check the local environment:
 
@@ -21,6 +22,11 @@ node --version
 npm --version
 git --version
 rg --version
+```
+
+If you choose the `codex-cli` provider profile, check that provider separately:
+
+```powershell
 codex login
 codex login status
 codex exec --json "Say only: codex-ready"
@@ -56,44 +62,60 @@ The legacy `agent-runtime` alias is also kept for compatibility.
 
 ## Quick Start
 
+Normal setup starts with a workspace, an explicit provider profile, and a session:
+
 ```powershell
 cosia init
-cosia agent create architect-agent --template architect
-cosia session create --agent architect-agent --goal "Design the COSIA runtime MVP"
-cosia memory add --tier core --content "COSIA uses Codex / Agent / Session layers." --importance 5 --confidence 0.9
-cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
-cosia chat --session <session-id>
-cosia tool list
-cosia capability scan --request "변경 상태 확인"
-cosia capability plan --request "변경 상태 확인"
-cosia shell preview --from-capability <proposal-id> --command "<exact command>"
-cosia shell preview --command "echo ready" --reason "one-shot local shell check"
-cosia tool draft --from-capability <proposal-id> --provider mock
-cosia tool grow --request "테스트 돌려봐" --provider mock
-cosia tool grow test <routine-id> --yes
-cosia tool grow activate <routine-id> --agent <agent-id> --yes
-cosia tool candidate review
-cosia tool candidate test <candidate-id>
-cosia tool candidate approve <candidate-id>
-cosia tool activate <candidate-id> --agent <agent-id> --yes
-cosia tool active list
+
 cosia provider profile add codex --provider codex-cli --oauth
 cosia provider profile use codex
-cosia provider profile list
 cosia provider profile check codex
-cosia mvp checklist
+
+cosia agent create architect-agent --template architect
+cosia session create --agent architect-agent --goal "Design the COSIA runtime"
+cosia run --session <session-id> --prompt "현재 세션 목표와 관련 메모리를 요약해줘."
+cosia chat --session <session-id>
 cosia status
 cosia doctor
 cosia start --no-chat
 ```
 
-For runtime-only regression checks without Codex login:
+For another replaceable brain, create and select another provider profile:
+
+```powershell
+cosia provider profile add openrouter --provider openrouter --api-key --model <openrouter-model-id>
+cosia provider profile use openrouter
+cosia provider profile check openrouter
+```
+
+Gateway connectors are optional external surfaces. They do not own provider selection:
+
+```powershell
+cosia gateway telegram enable
+cosia gateway telegram set chat-id <chat-id>
+cosia gateway telegram set token
+cosia gateway telegram check
+cosia gateway start
+```
+
+Use `mock` only for deterministic runtime regression checks:
 
 ```powershell
 cosia run --session <session-id> --prompt "Smoke test" --provider mock
 ```
 
-`mock` is not an MVP readiness signal. Manual MVP acceptance must pass with `codex-cli`.
+Advanced capability and tool-growth flows are available when you want COSIA to turn repeated work into reviewable local tooling:
+
+```powershell
+cosia capability scan --request "변경 상태 확인"
+cosia capability plan --request "변경 상태 확인"
+cosia shell preview --from-capability <proposal-id> --command "<exact command>"
+cosia tool draft --from-capability <proposal-id> --provider mock
+cosia tool grow --request "테스트 돌려봐" --provider mock
+cosia tool grow test <routine-id> --yes
+cosia tool grow activate <routine-id> --agent <agent-id> --yes
+cosia tool active list
+```
 
 ## UX Foundation
 
@@ -281,9 +303,9 @@ cosia session show <session-id>
 - Per-session policy decisions are written to `sessions/<session-id>/POLICY_AUDIT.jsonl`.
 - Per-session prompt manifests are written to `sessions/<session-id>/PROMPT_MANIFEST.jsonl`.
 - Destructive, network, external-send, and unrestricted shell permissions are disabled by policy. `shell_request` only creates a one-shot approval preview.
-- Codex authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
+- For `codex-cli` OAuth profiles, authentication is delegated to the Codex CLI. This runtime does not read or store Codex tokens.
 - Provider config is profile-backed; no provider is active until `cosia provider profile use <name>`.
-- `mock` provider success proves regression safety only; MVP acceptance requires an explicit Codex provider profile.
+- `mock` provider success proves regression safety only; validate at least one real provider profile when checking provider behavior.
 - Provider failures are reported with reason codes and short next-action hints.
 - Invalid AgentStep JSON triggers a bounded structured retry that includes the parse error and a short malformed-output preview.
 - `--require-tools` rejects final answers until `read_file` or `search_files` has run at least once.
@@ -306,8 +328,7 @@ cosia session show <session-id>
 - Long-term memory archive is explicit CLI-only soft deletion.
 - `session archive` soft-archives session-tier memory. Deleting an agent soft-archives that agent's agent-tier memory.
 - CLI commands discover the nearest parent COSIA workspace. Outside a workspace, run `cosia init` first.
-- Git and NPM tools are bundled extension tools controlled by runtime config and still gated by Tool Registry, agent allowlists, and Policy Engine boundaries.
-- NPM tools use the `project_check` permission class. They run only fixed registered package scripts and are not generic shell access.
+- Concrete project tools are not assumed from filenames or workspace shape. They become available only through configured or activated runtime paths and remain gated by Tool Registry, agent allowlists, and Policy Engine boundaries.
 - Long tool output is capped with an explicit truncation marker.
 - Session context size warnings appear in status/session/chat output; context summary and compaction are explicit CLI/REPL actions.
 - Skill candidates are stored in SQLite and remain pending until explicit promotion.
@@ -343,17 +364,17 @@ cosia policy audit --session <session-id> --latest-run --json
 `policy check` validates `codex/POLICY.json` and its Markdown mirror. `policy sync` regenerates `codex/POLICY.md` from the JSON source. Use `policy check --repair` to regenerate a stale or missing Markdown mirror without changing the JSON source.
 Policy audit logs are append-only per session. Each new `run` writes a `runId`, so `--latest-run` or `--run-id <id>` can focus the output. The default audit output is a readable summary; use `--json` for raw events. Clear/archive commands are intentionally deferred to a later maintenance pass.
 
-## MVP Acceptance
+## Historical Manual Acceptance
 
 ```powershell
 cosia mvp checklist
 ```
 
-Detailed manual acceptance steps live in [MVP_ACCEPTANCE.md](MVP_ACCEPTANCE.md). The short version is:
+The `mvp` checklist is kept as a historical/manual regression aid while the public product surface moves toward provider-neutral setup. Detailed manual acceptance steps live in [MVP_ACCEPTANCE.md](MVP_ACCEPTANCE.md). The short version is:
 
 - `mock` is allowed for unit/integration regression only.
-- `codex-cli` through Codex OAuth is required for MVP acceptance.
-- OpenRouter/openai-compatible providers are optional acceptance paths.
+- Real provider behavior should be validated through an explicit provider profile.
+- `codex-cli`, OpenRouter, and OpenAI-compatible providers are selectable profile paths.
 - Every acceptance step has a command, expected outcome, and failure hint.
 
 ## Agent Lifecycle
@@ -686,6 +707,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.40.0: Identity surface refactor for the user-amendable Codex runtime direction.
 - v0.38.0: Tool Growth Routine orchestration from request to candidate, explicit test, and explicit activation.
 - v0.37.0: Learned local blueprint records from successful active command_adapter tools.
 - v0.36.0: Governor tool candidate recommendation evidence from repeated shell approval patterns.

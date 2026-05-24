@@ -5,6 +5,8 @@ It is not an implementation plan for a single feature version.
 
 The goal is to make future cleanup work explicit: what should be refactored, what should be removed, what must remain private, and how each cleanup item should be verified.
 
+For staged execution plans, see `Docs/refactors/`. This document remains the project-wide cleanup backlog; the refactor phase documents describe the order and acceptance criteria for implementing that backlog.
+
 ## Goals
 
 - Identify project-wide refactoring targets across runtime code, CLI, tests, docs, config, policy, and generated artifacts.
@@ -19,6 +21,17 @@ The goal is to make future cleanup work explicit: what should be refactored, wha
 - `docs-fix`: documentation or guide consistency cleanup.
 - `test-split`: test organization cleanup.
 - `artifact-boundary`: tracked vs private/generated artifact cleanup.
+
+## Staged Refactor Plans
+
+- `Docs/refactors/README.md`: staged roadmap and normal/advanced/debug UX summary.
+- `Docs/refactors/v0.40-identity-surface-refactor.md`: identity, README, CLI wording, and surface language.
+- `Docs/refactors/v0.41-cli-surface-and-module-split.md`: CLI command module split without behavior changes.
+- `Docs/refactors/v0.42-provider-onboarding-and-oauth.md`: provider onboarding and COSIA-owned OAuth boundary.
+- `Docs/refactors/v0.43-codex-law-amendment-flow.md`: governed amendment flow for `codex/*.md`.
+- `Docs/refactors/v0.44-memory-session-debug-ux.md`: memory, session, summary, and debug UX separation.
+- `Docs/refactors/v0.45-connector-gateway-safety.md`: connector authorization and Telegram/group safety.
+- `Docs/refactors/v0.46-tool-growth-surface-slimming.md`: guided tool-growth UX and advanced internals boundary.
 
 ## Completed Cleanup Slices
 

@@ -30,8 +30,8 @@ export function registerProviderProfileCommands(
   providerProfile
     .command("add")
     .argument("<name>")
-    .requiredOption("--provider <provider-id>", "Provider implementation id, e.g. codex-cli, openrouter, openai-compatible.")
-    .option("--oauth", "Use provider-managed OAuth status. For codex-cli this uses Codex CLI login.", false)
+    .requiredOption("--provider <provider-id>", "Provider implementation id, e.g. openrouter, openai-compatible, codex-cli.")
+    .option("--oauth", "Use provider-managed OAuth status. For codex-cli this uses an explicit Codex CLI-backed profile.", false)
     .option("--api-key", "Prompt for an API key and store it in the private secret store.", false)
     .option("--api-key-env <env-name>", "Read the API key from an environment variable.")
     .option("--model <model-id>", "Model id for OpenAI-compatible providers.")

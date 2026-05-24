@@ -152,7 +152,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.39.0\"");
+    expect(policyJson).toContain("\"version\": \"0.40.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -3248,7 +3248,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.39.0");
+    expect(emptyReport.version).toBe("0.40.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -3855,7 +3855,7 @@ describe("status and listing", () => {
     expect(checklist).toContain("COSIA MVP Acceptance Checklist");
     expect(checklist).toContain("[ ] 1. Environment and build");
     expect(checklist).toContain("mock: regression only");
-    expect(checklist).toContain("codex-cli: required MVP acceptance provider");
+    expect(checklist).toContain("codex-cli: historical Codex OAuth acceptance path");
     expect(checklist).toContain("[ ] 8. Review inbox");
     expect(checklist).toContain("Command:");
     expect(checklist).toContain("Expected:");

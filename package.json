@@ -1,7 +1,7 @@
 {
   "name": "cosia",
-  "version": "0.39.0",
-  "description": "COSIA: Codex-Oriented Self-Improving Agent Runtime CLI MVP with tiered memory, policy-gated tools, and Codex CLI provider.",
+  "version": "0.40.0",
+  "description": "COSIA: lightweight agentic runtime guided by a user-amendable Codex.",
   "type": "module",
   "bin": {
     "cosia": "./dist/src/bin.js",

@@ -107,12 +107,12 @@ const program = new Command();
 
 program
   .name("cosia")
-  .description("COSIA: Codex-Oriented Self-Improving Agent Runtime CLI MVP")
+  .description("COSIA: lightweight agentic runtime guided by a user-amendable Codex")
   .version(COSIA_VERSION);
 
 program
   .command("status")
-  .option("--provider <provider>", "Model provider smoke check: default, codex-cli, openai-compatible, or mock", "default")
+  .option("--provider <provider>", "Provider smoke check override: active profile default, a provider profile name, provider id, or mock", "default")
   .option("--compact", "Print a compact status summary.", false)
   .option("--json", "Print structured JSON status.", false)
   .description("Show workspace, runtime, memory, session, and provider status.")
@@ -2292,7 +2292,7 @@ program
   .requiredOption("--session <session-id>", "Session id")
   .requiredOption("--prompt <prompt>", "Current user request")
   .option("--agent <agent-id>", "Agent id for this run. Overrides the session assignment without changing it.")
-  .option("--provider <provider>", "Model provider: codex-cli, openai-compatible, or mock")
+  .option("--provider <provider>", "Provider override: provider profile name, provider id, or mock")
   .option("--provider-timeout-ms <ms>", "Override provider call timeout in milliseconds")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
@@ -2322,7 +2322,7 @@ program
   .command("chat")
   .requiredOption("--session <session-id>", "Session id")
   .option("--agent <agent-id>", "Agent id for this chat. Overrides the session assignment without changing it.")
-  .option("--provider <provider>", "Model provider: codex-cli, openai-compatible, or mock")
+  .option("--provider <provider>", "Provider override: provider profile name, provider id, or mock")
   .option("--provider-timeout-ms <ms>", "Override provider call timeout in milliseconds")
   .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
   .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
