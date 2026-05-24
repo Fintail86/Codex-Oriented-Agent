@@ -360,17 +360,30 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
             break;
           }
           await heartbeatGatewayProcessLock(workspaceRoot, lock, options.now);
-          state = await processTelegramUpdate(workspaceRoot, policy, client, state, update, {
-            providerId,
-            owner: `telegram:${telegramUpdateChatId(update) ?? "unknown"}`,
-            now: options.now
-          });
+          try {
+            state = await processTelegramUpdate(workspaceRoot, policy, client, state, update, {
+              providerId,
+              owner: `telegram:${telegramUpdateChatId(update) ?? "unknown"}`,
+              now: options.now
+            });
+            state.failureCount = 0;
+            state.lastFailure = undefined;
+            await appendTelegramLog(workspaceRoot, "update", { updateId: update.update_id, nextOffset: update.update_id + 1 });
+          } catch (error) {
+            const message = (error as Error).message;
+            state.failureCount = state.failureCount + 1;
+            state.lastFailure = message;
+            await notifyTelegramUpdateFailure(client, update, message);
+            await appendTelegramLog(workspaceRoot, "update_failure", { updateId: update.update_id, error: message });
+          }
           state.nextOffset = update.update_id + 1;
-          state.failureCount = 0;
-          state.lastFailure = undefined;
           state.updatedAt = new Date().toISOString();
           await saveTelegramGatewayState(workspaceRoot, state);
-          await appendTelegramLog(workspaceRoot, "update", { updateId: update.update_id, nextOffset: state.nextOffset });
+          await writeTelegramStatus(workspaceRoot, {
+            running: true,
+            failureCount: state.failureCount,
+            lastFailure: state.lastFailure
+          });
         }
         if (options.once) break;
       } catch (error) {
@@ -856,6 +869,42 @@ function startTelegramTyping(client: TelegramMessageSender, chatId: string): () 
     stopped = true;
     clearInterval(timer);
   };
+}
+
+async function notifyTelegramUpdateFailure(
+  client: TelegramMessageSender,
+  update: TelegramUpdate,
+  message: string
+): Promise<void> {
+  const chatId = telegramUpdateChatId(update);
+  if (!chatId) {
+    return;
+  }
+  try {
+    for (const chunk of chunkTelegramMessage(formatTelegramUpdateFailure(message), 3500)) {
+      await client.sendMessage(chatId, chunk);
+    }
+  } catch {
+    // Failure notifications must not keep an update alive forever.
+  }
+}
+
+function formatTelegramUpdateFailure(message: string): string {
+  return [
+    "[FAILED] COSIA could not finish this Telegram request.",
+    "",
+    previewTelegramFailure(message),
+    "",
+    "This update was marked handled so it will not retry forever.",
+    "Check locally:",
+    "  cosia gateway status",
+    "  cosia provider profile check"
+  ].join("\n");
+}
+
+function previewTelegramFailure(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length <= 700 ? normalized : `${normalized.slice(0, 700)}... [truncated]`;
 }
 
 function telegramCallbackInput(data: string): string {

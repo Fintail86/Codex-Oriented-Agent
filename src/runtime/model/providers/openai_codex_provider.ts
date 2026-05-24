@@ -17,7 +17,8 @@ const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 const DEFAULT_ENDPOINT_PATH = "/codex/responses";
 const DEFAULT_MODEL = "gpt-5.4";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_SCOPE = "openid profile email offline_access model.request";
+const DEFAULT_SCOPE = "openid profile email offline_access";
+const DEFAULT_ORIGINATOR = "pi";
 const DEFAULT_OAUTH_PORT = 1455;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 
@@ -87,15 +88,18 @@ export class OpenAICodexProvider implements ModelProvider {
   private async completeOnce(prompt: string): Promise<string> {
     enforcePromptLimit(prompt, this.options.maxPromptChars, this.id);
     const firstToken = await this.validAccessToken();
-    const first = await this.sendCodexRequest(prompt, firstToken.accessToken);
+    const first = await this.sendCodexRequest(prompt, firstToken);
     if (first.status === 401 || first.status === 403) {
       const refreshed = await this.refreshOAuthToken(firstToken.secret);
-      return this.sendCodexRequest(prompt, refreshed.accessToken).then((response) => this.responseTextOrThrow(response));
+      return this.sendCodexRequest(prompt, refreshed).then((response) => this.responseTextOrThrow(response));
     }
     return this.responseTextOrThrow(first);
   }
 
-  private async sendCodexRequest(prompt: string, accessToken: string): Promise<Response> {
+  private async sendCodexRequest(
+    prompt: string,
+    token: { accessToken: string; secret: OAuthSecret }
+  ): Promise<Response> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
@@ -104,11 +108,23 @@ export class OpenAICodexProvider implements ModelProvider {
         headers: {
           "content-type": "application/json",
           accept: "application/json",
-          authorization: `Bearer ${accessToken}`
+          authorization: `Bearer ${token.accessToken}`,
+          ...codexAccountHeaders(token.secret)
         },
         body: JSON.stringify({
           model: this.options.model ?? DEFAULT_MODEL,
-          input: boundaryPrompt(prompt),
+          input: [
+            {
+              type: "message",
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: boundaryPrompt(prompt)
+                }
+              ]
+            }
+          ],
           stream: false
         }),
         signal: controller.signal
@@ -231,7 +247,7 @@ export async function loginOpenAICodexOAuth(
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? 10 * 60_000;
   const port = options.port ?? Number(process.env.COSIA_OPENAI_CODEX_OAUTH_PORT ?? DEFAULT_OAUTH_PORT);
-  const redirectUri = `http://127.0.0.1:${port}/auth/callback`;
+  const redirectUri = `http://localhost:${port}/auth/callback`;
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash("sha256").update(verifier).digest());
   const state = base64Url(randomBytes(24));
@@ -272,7 +288,7 @@ async function waitForOAuthCallback(port: number, expectedState: string, timeout
       const timeout = setTimeout(() => {
         server.close();
         reject(new ProviderError("timeout", "Timed out waiting for OpenAI OAuth browser callback.", {
-          hint: `Open the URL again and make sure it redirects to http://127.0.0.1:${port}/auth/callback.`
+          hint: `Open the URL again and make sure it redirects to http://localhost:${port}/auth/callback.`
         }));
       }, timeoutMs);
       server = createServer((request, response) => {
@@ -292,7 +308,7 @@ async function waitForOAuthCallback(port: number, expectedState: string, timeout
           hint: "Set COSIA_OPENAI_CODEX_OAUTH_PORT to another localhost port, then retry."
         }));
       });
-      server.listen(port, "127.0.0.1");
+      server.listen(port, "localhost");
       void authUrl;
     })
   };
@@ -397,7 +413,7 @@ function authorizationUrl(args: {
   url.searchParams.set("state", args.state);
   url.searchParams.set("id_token_add_organizations", "true");
   url.searchParams.set("codex_cli_simplified_flow", "true");
-  url.searchParams.set("originator", "cosia");
+  url.searchParams.set("originator", process.env.COSIA_OPENAI_CODEX_OAUTH_ORIGINATOR || DEFAULT_ORIGINATOR);
   return url.toString();
 }
 
@@ -416,10 +432,14 @@ function buildOAuthSecret(
   const expiresAt = expiresAtFromToken(token);
   const account = accessToken ? jwtPayload(accessToken) : {};
   const accountId = firstString(
+    account.chatgpt_account_id,
     account.account_id,
     account.sub,
     account["https://api.openai.com/auth"] && isObject(account["https://api.openai.com/auth"])
-      ? account["https://api.openai.com/auth"].account_id
+      ? firstString(
+        account["https://api.openai.com/auth"].chatgpt_account_id,
+        account["https://api.openai.com/auth"].account_id
+      )
       : undefined,
     fallbacks.fallbackAccountId
   );
@@ -473,6 +493,10 @@ function extractProviderContent(json: unknown): string | undefined {
   const collected: string[] = [];
   collectResponseText(json, collected);
   return collected.join("").trim() || undefined;
+}
+
+function codexAccountHeaders(secret: OAuthSecret): Record<string, string> {
+  return secret.accountId ? { "chatgpt-account-id": secret.accountId } : {};
 }
 
 function chatCompletionContent(json: JsonObject): string | undefined {

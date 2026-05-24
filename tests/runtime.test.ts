@@ -1033,6 +1033,7 @@ describe("policy core", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toContain("/codex/responses");
     expect((requests[0].init?.headers as Record<string, string>).authorization).toBe("Bearer access-secret");
+    expect((requests[0].init?.headers as Record<string, string>)["chatgpt-account-id"]).toBe("acct-test");
     expect(String(requests[0].init?.body)).toContain("Return exactly one COSIA AgentStep JSON object");
   });
 
@@ -5027,6 +5028,82 @@ describe("status and listing", () => {
     expect(state.chats["123"]).toBeDefined();
     expect(await pathExists(join(root, ".cosia-gateway", "telegram", "process.lock"))).toBe(false);
     expect(await pathExists(gatewayProcessLockPath(root))).toBe(false);
+  });
+
+  it("marks failing Telegram updates handled instead of retrying them forever", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    await writeRuntimeLocal(root, {
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"]
+        }
+      }
+    });
+    const session = await new SessionManager(root).createSession("cosia-agent", "Telegram provider failure");
+    await saveTelegramGatewayState(root, {
+      nextOffset: 20,
+      chats: {
+        "123": {
+          providerId: "unknown-provider",
+          activeSessionId: session.id,
+          updatedAt: new Date().toISOString()
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    });
+    const previousToken = process.env.TELEGRAM_BOT_TOKEN;
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    const sent: string[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      if (String(url).endsWith("/getMe")) {
+        return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getUpdates")) {
+        return jsonResponse({
+          ok: true,
+          result: [{
+            update_id: 21,
+            message: {
+              chat: { id: 123 },
+              from: { id: 42, username: "fox" },
+              text: "hello"
+            }
+          }]
+        });
+      }
+      if (String(url).endsWith("/sendMessage")) {
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        sent.push(String(body.text ?? ""));
+        return jsonResponse({ ok: true, result: { message_id: 1 } });
+      }
+      if (String(url).endsWith("/sendChatAction")) {
+        return jsonResponse({ ok: true, result: true });
+      }
+      return jsonResponse({ ok: false, description: "unknown" }, 404);
+    };
+    try {
+      await startTelegramGateway(root, {
+        providerId: "unknown-provider",
+        once: true,
+        fetchImpl
+      });
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.TELEGRAM_BOT_TOKEN;
+      } else {
+        process.env.TELEGRAM_BOT_TOKEN = previousToken;
+      }
+    }
+
+    const state = await loadTelegramGatewayState(root);
+    expect(state.nextOffset).toBe(22);
+    expect(state.lastFailure).toContain("Unknown model provider");
+    expect(sent.join("\n")).toContain("will not retry forever");
   });
 
   it("runs the top-level gateway supervisor once and manages stop/unlock state", async () => {
