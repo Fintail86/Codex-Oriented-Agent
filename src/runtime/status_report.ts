@@ -303,7 +303,7 @@ export function sortIssues(issues: StatusIssue[]): StatusIssue[] {
 export function formatStatusReport(report: StatusReport, options: { compact?: boolean } = {}): string {
   if (options.compact) {
     return [
-      `COSIA ${report.version} | ${report.providerId}:${report.providerOk ? "ok" : "failed"} | agents:${report.agentsCount} sessions:${report.activeSessionsCount}/${report.sessionsCount} memories:${report.memoriesCount}`,
+      `COSIA ${report.version} | ${report.providerId}:${report.providerOk ? "ok" : "failed"} | agents:${report.agentsCount} sessions:${report.activeSessionsCount}/${report.sessionsCount} longTermMemories:${report.memoriesCount}`,
       `Issues: ${report.issues.length ? report.issues.map((issue) => `${issue.severity}:${issue.id}`).join(", ") : "none"}`,
       report.recommendedActions[0] ? `Next: ${report.recommendedActions[0]}` : "Next: cosia start"
     ].join("\n");
@@ -321,7 +321,7 @@ export function formatStatusReport(report: StatusReport, options: { compact?: bo
     `  Default agent: ${report.defaultAgentId ?? "none"} (${report.defaultAgentExists ? "ok" : "missing"})`,
     `  Agents: ${report.agentsCount}`,
     `  Sessions: ${report.activeSessionsCount} active / ${report.sessionsCount} total`,
-    `  Memories: ${report.memoriesCount}`,
+    `  Long-term memories: ${report.memoriesCount}`,
     "",
     "Review Queues",
     `  Memory candidates: ${report.pendingCandidatesCount}`,
@@ -330,8 +330,8 @@ export function formatStatusReport(report: StatusReport, options: { compact?: bo
     "Health",
     `  Policy mirror: ${report.policyOk ? "ok" : "needs attention"}`,
     `  Skill mirror: ${report.skillMirrorOk ? "ok" : "needs attention"}`,
-    `  Context: ${report.contextWarningCount} warning / ${report.contextCriticalCount} critical`,
-    report.largestContext ? `  Largest context: ${formatContextHealth(report.largestContext)}` : "  Largest context: none",
+    `  Working context files: ${report.contextWarningCount} warning / ${report.contextCriticalCount} critical`,
+    report.largestContext ? `  Largest working context: ${formatContextHealth(report.largestContext)}` : "  Largest working context: none",
     ""
   ];
 

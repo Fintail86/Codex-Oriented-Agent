@@ -38,6 +38,16 @@ export type LastTurnDebugInput = {
   timestamp?: string;
 };
 
+export type LastTurnDebugRecord = {
+  sessionId: string;
+  debugDir: string;
+  metadata: Record<string, unknown>;
+  userMessage: string;
+  prompt: string;
+};
+
+export type LastTurnDebugPart = "metadata" | "user-message" | "prompt" | "all";
+
 export class SessionManager {
   constructor(private readonly workspaceRoot: string) {}
 
@@ -212,6 +222,24 @@ export class SessionManager {
     await writeText(join(debugDir, "LAST_TURN.json"), `${JSON.stringify(metadata, null, 2)}\n`);
     await writeText(join(debugDir, "LAST_USER_MESSAGE.md"), renderDebugText("LAST USER MESSAGE", input.userMessage, metadata));
     await writeText(join(debugDir, "LAST_PROMPT.md"), renderDebugText("LAST PROMPT", input.prompt, metadata));
+  }
+
+  async readLastTurnDebug(sessionId: string): Promise<LastTurnDebugRecord | null> {
+    const session = await this.loadSession(sessionId);
+    const debugDir = join(this.sessionDir(session.id), "debug");
+    const metadataPath = join(debugDir, "LAST_TURN.json");
+    const userMessagePath = join(debugDir, "LAST_USER_MESSAGE.md");
+    const promptPath = join(debugDir, "LAST_PROMPT.md");
+    if (!(await pathExists(metadataPath))) {
+      return null;
+    }
+    return {
+      sessionId: session.id,
+      debugDir,
+      metadata: JSON.parse(await readText(metadataPath)) as Record<string, unknown>,
+      userMessage: (await pathExists(userMessagePath)) ? await readText(userMessagePath) : "",
+      prompt: (await pathExists(promptPath)) ? await readText(promptPath) : ""
+    };
   }
 
   async listPromptManifests(sessionId: string, limit = 1): Promise<PromptManifest[]> {
@@ -427,6 +455,67 @@ export function isPlaceholderSessionSummary(content: string): boolean {
     .replace(/^# SESSION SUMMARY\s*/i, "")
     .trim();
   return normalized.length === 0 || normalized === "No compact session summary yet.";
+}
+
+export function formatLastTurnDebug(
+  record: LastTurnDebugRecord,
+  options: { part?: LastTurnDebugPart; maxChars?: number } = {}
+): string {
+  const part = options.part ?? "metadata";
+  const maxChars = Math.max(0, options.maxChars ?? 4000);
+  if (part === "metadata") {
+    return formatLastTurnDebugMetadata(record);
+  }
+  if (part === "user-message") {
+    return [
+      "Last user message debug record",
+      "Layer: diagnostic record, not memory.",
+      `Session: ${record.sessionId}`,
+      "",
+      capDebugText(record.userMessage || "No LAST_USER_MESSAGE.md content.", maxChars)
+    ].join("\n");
+  }
+  if (part === "prompt") {
+    return [
+      "Last prompt debug record",
+      "Layer: diagnostic record, not prompt manifest and not memory.",
+      `Session: ${record.sessionId}`,
+      "",
+      capDebugText(record.prompt || "No LAST_PROMPT.md content.", maxChars)
+    ].join("\n");
+  }
+  return [
+    formatLastTurnDebugMetadata(record),
+    "",
+    "# Last user message",
+    "",
+    capDebugText(record.userMessage || "No LAST_USER_MESSAGE.md content.", maxChars),
+    "",
+    "# Last prompt",
+    "",
+    capDebugText(record.prompt || "No LAST_PROMPT.md content.", maxChars)
+  ].join("\n");
+}
+
+function formatLastTurnDebugMetadata(record: LastTurnDebugRecord): string {
+  return [
+    "Session debug metadata",
+    "Layer: diagnostic record, not memory.",
+    `Session: ${record.sessionId}`,
+    `Location: sessions/${record.sessionId}/debug/`,
+    `Run: ${String(record.metadata.runId ?? "unknown")}`,
+    `Model step: ${String(record.metadata.modelStep ?? "unknown")}`,
+    `Timestamp: ${String(record.metadata.timestamp ?? "unknown")}`,
+    `Prompt chars: ${String(record.metadata.promptChars ?? "unknown")}`,
+    `Estimated tokens: ${String(record.metadata.estimatedTokens ?? "unknown")}`
+  ].join("\n");
+}
+
+function capDebugText(content: string, maxChars: number): string {
+  if (content.length <= maxChars) {
+    return content.trimEnd();
+  }
+  return `${content.slice(0, maxChars).trimEnd()}\n\n[truncated: showing ${maxChars} of ${content.length} chars]`;
 }
 
 function renderDebugText(title: string, content: string, metadata: Record<string, unknown>): string {

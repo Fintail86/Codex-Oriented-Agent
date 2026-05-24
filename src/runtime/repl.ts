@@ -854,10 +854,11 @@ function formatContextStatus(status: {
 }): string {
   return [
     `Session: ${status.sessionId}`,
-    `Context: ${status.level} ${status.chars} chars (warning:${status.warningChars}, critical:${status.criticalChars})`,
+    "Layer: working context (CONTEXT_MEMORY.md), not reviewed durable memory.",
+    `Working context: ${status.level} ${status.chars} chars (warning:${status.warningChars}, critical:${status.criticalChars})`,
     `Run entries: ${status.runEntryCount}`,
     `Archived entries: ${status.archiveEntryCount}`,
-    `Summary placeholder: ${status.summaryIsPlaceholder}`,
+    `Compact summary placeholder: ${status.summaryIsPlaceholder}`,
     `Compact recommended: ${status.compactRecommended}`
   ].join("\n");
 }
@@ -879,9 +880,12 @@ function formatContextCompactResult(result: {
     `Blocked: ${result.blocked}`,
     `Kept runs: ${result.keptRuns}`,
     `Archived runs: ${result.archivedRuns}`,
-    `Context chars: ${result.contextCharsBefore} -> ${result.contextCharsAfter}`,
-    `Summary placeholder: ${result.summaryIsPlaceholder}`
+    `Working context chars: ${result.contextCharsBefore} -> ${result.contextCharsAfter}`,
+    `Compact summary placeholder: ${result.summaryIsPlaceholder}`
   ];
+  if (result.blocked && result.summaryIsPlaceholder) {
+    lines.push("Next: write SESSION_SUMMARY.md first, or pass --allow-empty-summary if this archive is acceptable without a compact summary.");
+  }
   if (result.movedAt) {
     lines.push(`Moved at: ${result.movedAt}`);
   }

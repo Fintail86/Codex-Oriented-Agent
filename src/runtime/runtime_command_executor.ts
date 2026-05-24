@@ -501,10 +501,11 @@ function formatContextStatus(status: {
 }): string {
   return [
     `Session: ${status.sessionId}`,
-    `Context: ${status.level} ${status.chars} chars (warning:${status.warningChars}, critical:${status.criticalChars})`,
+    "Layer: working context (CONTEXT_MEMORY.md), not reviewed durable memory.",
+    `Working context: ${status.level} ${status.chars} chars (warning:${status.warningChars}, critical:${status.criticalChars})`,
     `Run entries: ${status.runEntryCount}`,
     `Archived entries: ${status.archiveEntryCount}`,
-    `Summary placeholder: ${status.summaryIsPlaceholder}`,
+    `Compact summary placeholder: ${status.summaryIsPlaceholder}`,
     `Compact recommended: ${status.compactRecommended}`
   ].join("\n");
 }

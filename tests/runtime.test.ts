@@ -32,7 +32,7 @@ import { formatChatHelp, runChatRepl } from "../src/runtime/repl.js";
 import { formatReviewInbox, ReviewInboxService } from "../src/runtime/review_inbox.js";
 import { runSession } from "../src/runtime/runner.js";
 import { SelfImprovementGovernor } from "../src/runtime/self_improvement.js";
-import { SessionManager } from "../src/runtime/session_manager.js";
+import { formatLastTurnDebug, SessionManager } from "../src/runtime/session_manager.js";
 import { assessShellRisk, buildShellApprovalRecord, ShellApprovalLedger } from "../src/runtime/shell_approval.js";
 import { calculateSkillTriggerMatch, SkillManager } from "../src/runtime/skill_manager.js";
 import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_flow.js";
@@ -155,7 +155,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.43.0\"");
+    expect(policyJson).toContain("\"version\": \"0.44.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -320,6 +320,40 @@ describe("runtime setup", () => {
 
     const emptySession = await sessions.createSession("architect-agent", "No context");
     await expect(sessions.undoLastContextEntry(emptySession.id, "nothing")).resolves.toMatchObject({ moved: false });
+  });
+
+  it("reports missing and present last-turn debug records", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Debug inspection");
+
+    await expect(sessions.readLastTurnDebug(session.id)).resolves.toBeNull();
+
+    await sessions.writeLastTurnDebug(session.id, {
+      userMessage: "User asked for debug visibility.",
+      prompt: `Prompt header\n${"x".repeat(80)}`,
+      runId: "run_debug_1",
+      modelStep: 2,
+      promptChars: 94,
+      estimatedTokens: 24,
+      timestamp: "2026-05-24T00:00:00.000Z"
+    });
+
+    const record = await sessions.readLastTurnDebug(session.id);
+    expect(record?.metadata).toMatchObject({
+      runId: "run_debug_1",
+      modelStep: 2,
+      promptChars: 94,
+      estimatedTokens: 24
+    });
+    expect(formatLastTurnDebug(record!, { part: "metadata" })).toContain("Layer: diagnostic record, not memory.");
+    expect(formatLastTurnDebug(record!, { part: "user-message" })).toContain("User asked for debug visibility.");
+    const promptOutput = formatLastTurnDebug(record!, { part: "prompt", maxChars: 30 });
+    expect(promptOutput).toContain("[truncated: showing 30 of");
+    const allOutput = formatLastTurnDebug(record!, { part: "all", maxChars: 30 });
+    expect(allOutput).toContain("# Last user message");
+    expect(allOutput).toContain("# Last prompt");
+    expect(allOutput).toContain("[truncated: showing 30 of");
   });
 
   it("reports context status and compacts run blocks into archive", async () => {
@@ -1009,7 +1043,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.43.0-policy-amended";
+    policy.version = "0.44.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1017,8 +1051,8 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.43.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.43.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.44.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.44.0-policy-amended");
   });
 
   it("discovers a COSIA workspace from nested directories and fails clearly outside one", async () => {
@@ -3389,7 +3423,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.43.0");
+    expect(emptyReport.version).toBe("0.44.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -3587,7 +3621,7 @@ describe("status and listing", () => {
     expect(output.read()).toContain("COSIA chat commands");
     expect(output.read()).toContain(`Session: ${session.id}`);
     expect(output.read()).toContain("# SESSION SUMMARY");
-    expect(output.read()).toContain("Context:");
+    expect(output.read()).toContain("Working context:");
     expect(errorOutput.read()).toContain("Type /help for commands");
   });
 

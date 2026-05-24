@@ -1,4 +1,4 @@
-# COSIA v0.43.0
+# COSIA v0.44.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.43.0 adds a dedicated Codex law amendment flow for protected `codex/*` files. v0.42.0 made provider onboarding a first-class setup path while preserving explicit provider profiles and connector/provider separation.
+v0.44.0 clarifies COSIA's continuity layers with session debug inspection and clearer session/context wording. v0.43.0 added a dedicated Codex law amendment flow for protected `codex/*` files.
 
 ## Requirements
 
@@ -224,6 +224,8 @@ cosia session list --agent <agent-id>
 cosia session summarize <session-id> --content "<summary>"
 cosia session summarize <session-id> --from-context --provider <provider-profile>
 cosia session prompt <session-id> --latest
+cosia session debug <session-id> --part metadata
+cosia session debug <session-id> --part prompt --max-chars 4000
 cosia session context status <session-id>
 cosia session context compact <session-id> --keep-last <n> --reason "<reason>" --yes
 cosia session context undo-last <session-id> --reason "<reason>"
@@ -602,6 +604,15 @@ git commit -m "chore: stop tracking runtime state"
 
 Source, policy, agent definitions, global skill files, tests, and docs remain project files. Runtime files such as `CONTEXT_MEMORY.md`, `REF_MEMORY.md`, `POLICY_AUDIT.jsonl`, `PROMPT_MANIFEST.jsonl`, SQLite databases, migration reports, and `.bak` queue files should not be committed.
 
+## Four Continuity Layers
+
+COSIA keeps continuity in four separate layers. They are intentionally not the same thing:
+
+- **Session context**: `sessions/<session-id>/CONTEXT_MEMORY.md` is recent working history for the active session. It is useful prompt material, not reviewed durable truth.
+- **Session summary**: `sessions/<session-id>/SESSION_SUMMARY.md` is compact continuity written by the user or an explicit summary command before older context is archived.
+- **Long-term memory**: reviewed/promoted memory records in COSIA's memory store are durable context that can outlive one session.
+- **Debug records**: `sessions/<session-id>/debug/LAST_TURN.json`, `LAST_USER_MESSAGE.md`, and `LAST_PROMPT.md` are last-turn diagnostics. They are overwritten, local-only runtime artifacts and are never auto-promoted to memory.
+
 Prompt manifests record block sizes and truncation metadata without storing full prompt text:
 
 ```text
@@ -613,13 +624,15 @@ Readable prompt budget summaries and safe context undo are available through:
 ```powershell
 cosia session prompt <session-id> --latest
 cosia session prompt <session-id> --limit 2
+cosia session debug <session-id>
+cosia session debug <session-id> --part prompt --max-chars 4000
 cosia session context status <session-id>
 cosia session summarize <session-id> --from-context --provider openrouter --yes
 cosia session context compact <session-id> --keep-last 5 --reason "Summary captured older turns" --yes
 cosia session context undo-last <session-id> --reason "Mistyped chat command"
 ```
 
-`undo-last` archives only the latest `CONTEXT_MEMORY.md` run entry into `CONTEXT_ARCHIVE.md`; it does not delete the entry without a trace. `compact` archives older whole run blocks in batches after a summary has captured their useful context.
+`session prompt` inspects prompt budget manifests, not `debug/LAST_PROMPT.md`. Use `session debug` when you need the last full prompt/user-message diagnostic record. `undo-last` archives only the latest `CONTEXT_MEMORY.md` run entry into `CONTEXT_ARCHIVE.md`; it does not delete the entry without a trace. `compact` archives older whole run blocks in batches after a summary has captured their useful context.
 
 ## Memory Candidate Review
 
@@ -717,6 +730,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.44.0: Memory/session/debug UX labels and last-turn debug inspection.
 - v0.43.0: Codex law amendment preview/apply flow for protected `codex/*` files.
 - v0.42.0: Provider onboarding setup registry and OAuth boundary.
 - v0.41.0: CLI surface module split with behavior-preserving command registration.

@@ -27,7 +27,7 @@ import { applyRuntimeConfigMigration, buildRuntimeConfigMigration, formatConfigC
 import { runChatRepl } from "../runtime/repl.js";
 import { formatReviewCleanup, formatReviewInbox, formatReviewStats, ReviewInboxService } from "../runtime/review_inbox.js";
 import { runSession } from "../runtime/runner.js";
-import { SessionManager } from "../runtime/session_manager.js";
+import { formatLastTurnDebug, SessionManager, type LastTurnDebugPart } from "../runtime/session_manager.js";
 import {
   formatImprovementDetail,
   formatImprovementMutation,
@@ -378,7 +378,7 @@ export function registerAgentSessionCommands(program: Command): void {
     .command("show")
     .argument("<session-id>")
     .option("--tail <chars>", "Context tail character count", "1200")
-    .description("Show session metadata and recent context memory.")
+    .description("Show session metadata and recent working context.")
     .action(async (sessionId: string, options: { tail: string }) => {
       await main(async (workspaceRoot) => {
         const sessions = new SessionManager(workspaceRoot);
@@ -388,15 +388,19 @@ export function registerAgentSessionCommands(program: Command): void {
           warningChars: policy.promptBudget.contextWarningChars,
           criticalChars: policy.promptBudget.contextCriticalChars
         });
+        console.log("# Session metadata\n");
         console.log(JSON.stringify(metadata, null, 2));
-        console.log(`\n# CONTEXT STATUS\n`);
+        console.log(`\n# Working context status\n`);
         console.log(formatContextStatus(contextStatus));
+        console.log("\n# Next maintenance commands\n");
         if (contextStatus.level !== "ok" || contextStatus.compactRecommended) {
           console.log(contextMaintenanceHint(sessionId));
+        } else {
+          console.log("No context maintenance currently recommended.");
         }
         const tail = await sessions.contextTail(sessionId, Number.parseInt(options.tail, 10));
-        console.log("\n# CONTEXT TAIL\n");
-        console.log(tail || "No context memory.");
+        console.log("\n# Working context tail\n");
+        console.log(tail || "No working context yet.");
       });
     });
 
@@ -446,7 +450,7 @@ export function registerAgentSessionCommands(program: Command): void {
     .argument("<session-id>")
     .option("--latest", "Show only the latest prompt manifest.", false)
     .option("--limit <n>", "Prompt manifest count", "1")
-    .description("Show readable prompt budget manifests for a session.")
+    .description("Show readable prompt budget manifests for a session; this is not debug/LAST_PROMPT.md.")
     .action(async (sessionId: string, options: { latest: boolean; limit: string }) => {
       await main(async (workspaceRoot) => {
         const sessions = new SessionManager(workspaceRoot);
@@ -458,6 +462,27 @@ export function registerAgentSessionCommands(program: Command): void {
           return;
         }
         console.log(manifests.map(formatPromptManifest).join("\n\n"));
+      });
+    });
+
+  session
+    .command("debug")
+    .argument("<session-id>")
+    .option("--part <part>", "Debug part: metadata, user-message, prompt, or all.", "metadata")
+    .option("--max-chars <n>", "Maximum chars for prompt/user-message output.", "4000")
+    .description("Inspect the last-turn diagnostic debug files for a session.")
+    .action(async (sessionId: string, options: { part: string; maxChars: string }) => {
+      await main(async (workspaceRoot) => {
+        const sessions = new SessionManager(workspaceRoot);
+        const record = await sessions.readLastTurnDebug(sessionId);
+        if (!record) {
+          console.log("No debug record yet. Run/chat once first.");
+          return;
+        }
+        console.log(formatLastTurnDebug(record, {
+          part: parseSessionDebugPart(options.part),
+          maxChars: parseIntegerOption(options.maxChars, "max-chars")
+        }));
       });
     });
 
@@ -527,4 +552,11 @@ export function registerAgentSessionCommands(program: Command): void {
         }
       });
     });
+}
+
+function parseSessionDebugPart(value: string): LastTurnDebugPart {
+  if (value === "metadata" || value === "user-message" || value === "prompt" || value === "all") {
+    return value;
+  }
+  throw new Error("Invalid debug part. Use metadata, user-message, prompt, or all.");
 }
