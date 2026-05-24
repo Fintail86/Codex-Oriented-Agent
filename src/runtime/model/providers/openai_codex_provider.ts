@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { completeWithStructuredRetry } from "../model_provider.js";
 import { previewText, ProviderError, providerFailureHint } from "../provider_errors.js";
@@ -21,6 +22,7 @@ const DEFAULT_SCOPE = "openid profile email offline_access";
 const DEFAULT_ORIGINATOR = "pi";
 const DEFAULT_OAUTH_PORT = 1455;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
+const POWERSHELL_HTTP_STATUS_MARKER = "__COSIA_HTTP_STATUS__:";
 
 export type OpenAICodexProviderOptions = {
   id?: string;
@@ -100,33 +102,39 @@ export class OpenAICodexProvider implements ModelProvider {
     prompt: string,
     token: { accessToken: string; secret: OAuthSecret }
   ): Promise<Response> {
+    const body = JSON.stringify({
+      model: this.options.model ?? DEFAULT_MODEL,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: boundaryPrompt(prompt)
+            }
+          ]
+        }
+      ],
+      stream: false
+    });
+    const headers = codexRequestHeaders(token);
+    if (this.shouldUseNativeTransport()) {
+      return sendWithPowerShellNativeTransport({
+        url: this.endpointUrl(),
+        headers,
+        body,
+        timeoutMs: this.options.timeoutMs,
+        providerId: this.id
+      });
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
       return await this.fetchImpl(this.endpointUrl(), {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-          authorization: `Bearer ${token.accessToken}`,
-          ...codexAccountHeaders(token.secret)
-        },
-        body: JSON.stringify({
-          model: this.options.model ?? DEFAULT_MODEL,
-          input: [
-            {
-              type: "message",
-              role: "user",
-              content: [
-                {
-                  type: "input_text",
-                  text: boundaryPrompt(prompt)
-                }
-              ]
-            }
-          ],
-          stream: false
-        }),
+        headers,
+        body,
         signal: controller.signal
       });
     } catch (error) {
@@ -170,6 +178,20 @@ export class OpenAICodexProvider implements ModelProvider {
     const base = this.options.baseUrl ?? DEFAULT_BASE_URL;
     const endpoint = this.options.endpointPath ?? DEFAULT_ENDPOINT_PATH;
     return `${base.replace(/\/+$/, "")}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+  }
+
+  private shouldUseNativeTransport(): boolean {
+    if (this.options.fetchImpl) {
+      return false;
+    }
+    const transport = process.env.COSIA_OPENAI_CODEX_TRANSPORT?.trim().toLowerCase();
+    if (transport === "fetch" || transport === "node") {
+      return false;
+    }
+    if (transport === "native" || transport === "powershell") {
+      return process.platform === "win32";
+    }
+    return process.platform === "win32" && this.endpointUrl().startsWith("https://chatgpt.com/");
   }
 
   private async validAccessToken(): Promise<{ accessToken: string; secret: OAuthSecret }> {
@@ -221,7 +243,7 @@ export class OpenAICodexProvider implements ModelProvider {
       return new ProviderError("auth_failed", `OpenAI Codex returned HTTP ${response.status}.`, {
         statusCode: response.status,
         preview: body,
-        hint: providerFailureHint("auth_failed", this.id)
+        hint: openAICodexAuthFailureHint(response.status, body, this.options.profileName)
       });
     }
     if (response.status === 429) {
@@ -495,8 +517,153 @@ function extractProviderContent(json: unknown): string | undefined {
   return collected.join("").trim() || undefined;
 }
 
-function codexAccountHeaders(secret: OAuthSecret): Record<string, string> {
-  return secret.accountId ? { "chatgpt-account-id": secret.accountId } : {};
+function codexRequestHeaders(token: { accessToken: string; secret: OAuthSecret }): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    accept: "application/json",
+    authorization: `Bearer ${token.accessToken}`,
+    "openai-beta": "responses=experimental",
+    originator: process.env.COSIA_OPENAI_CODEX_OAUTH_ORIGINATOR || DEFAULT_ORIGINATOR,
+    "user-agent": nativeUserAgent(),
+    ...(token.secret.accountId ? { "chatgpt-account-id": token.secret.accountId } : {})
+  };
+}
+
+function openAICodexAuthFailureHint(status: number, bodyPreview: string, profileName: string): string {
+  if (status === 403 && looksLikeHtml(bodyPreview)) {
+    return [
+      "The OpenAI Codex OAuth token exists, but the ChatGPT Codex backend rejected COSIA's direct transport with an HTML 403.",
+      "Restart the gateway after updating COSIA. If it still repeats, run `cosia provider oauth login " + profileName + "` once more, or select another provider profile until a supported Codex API route is available."
+    ].join(" ");
+  }
+  return providerFailureHint("auth_failed", "openai-codex");
+}
+
+function looksLikeHtml(value: string): boolean {
+  return /^\s*<!doctype html/i.test(value) || /^\s*<html[\s>]/i.test(value);
+}
+
+function nativeUserAgent(): string {
+  const arch = process.arch === "x64" ? "x86_64" : process.arch;
+  const platform = process.platform === "win32"
+    ? "windows"
+    : process.platform === "darwin"
+      ? "darwin"
+      : "linux";
+  return `pi (${platform}; ${arch})`;
+}
+
+async function sendWithPowerShellNativeTransport(args: {
+  url: string;
+  headers: Record<string, string>;
+  body: string;
+  timeoutMs: number;
+  providerId: string;
+}): Promise<Response> {
+  const script = powershellRequestScript(args);
+  return new Promise((resolve, reject) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new ProviderError("timeout", `Native OpenAI Codex transport timed out after ${args.timeoutMs}ms.`, {
+        hint: providerFailureHint("timeout", args.providerId),
+        preview: previewText(stderr)
+      }));
+    }, args.timeoutMs + 5_000);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(new ProviderError("network_error", `Could not start native OpenAI Codex transport: ${error.message}`, {
+        hint: "Use COSIA_OPENAI_CODEX_TRANSPORT=fetch to force Node fetch, or verify powershell.exe is available.",
+        cause: error
+      }));
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0 && !stdout.includes(POWERSHELL_HTTP_STATUS_MARKER)) {
+        reject(new ProviderError("network_error", `Native OpenAI Codex transport exited with code ${code}.`, {
+          hint: providerFailureHint("network_error", args.providerId),
+          preview: previewText(stderr)
+        }));
+        return;
+      }
+      resolve(parsePowerShellTransportResponse(stdout));
+    });
+    child.stdin.end(script);
+  });
+}
+
+function powershellRequestScript(args: {
+  url: string;
+  headers: Record<string, string>;
+  body: string;
+  timeoutMs: number;
+}): string {
+  const headers = Buffer.from(JSON.stringify(args.headers), "utf8").toString("base64");
+  const body = Buffer.from(args.body, "utf8").toString("base64");
+  const url = Buffer.from(args.url, "utf8").toString("base64");
+  const timeoutSec = Math.max(1, Math.ceil(args.timeoutMs / 1000));
+  return `$ErrorActionPreference = 'Stop'
+$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${url}'))
+$headersJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${headers}'))
+$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${body}'))
+$headers = @{}
+($headersJson | ConvertFrom-Json).PSObject.Properties | ForEach-Object { $headers[$_.Name] = [string]$_.Value }
+$status = 0
+$content = ''
+try {
+  $response = Invoke-WebRequest -Uri $url -Method Post -Headers $headers -Body $body -UseBasicParsing -TimeoutSec ${timeoutSec}
+  $status = [int]$response.StatusCode
+  $content = [string]$response.Content
+} catch {
+  $response = $_.Exception.Response
+  if ($null -ne $response) {
+    try { $status = [int]$response.StatusCode } catch { $status = 0 }
+    try {
+      $stream = $response.GetResponseStream()
+      if ($null -ne $stream) {
+        $reader = New-Object System.IO.StreamReader($stream)
+        $content = $reader.ReadToEnd()
+        $reader.Dispose()
+      }
+    } catch {
+      $content = $_.Exception.Message
+    }
+  } else {
+    $content = $_.Exception.Message
+  }
+}
+[Console]::Out.WriteLine($content)
+[Console]::Out.WriteLine('${POWERSHELL_HTTP_STATUS_MARKER}' + $status)
+`;
+}
+
+function parsePowerShellTransportResponse(stdout: string): Response {
+  const index = stdout.lastIndexOf(POWERSHELL_HTTP_STATUS_MARKER);
+  if (index === -1) {
+    return new Response(stdout, { status: 599 });
+  }
+  const body = stdout.slice(0, index).trimEnd();
+  const statusText = stdout.slice(index + POWERSHELL_HTTP_STATUS_MARKER.length).trim();
+  const status = Number.parseInt(statusText, 10);
+  return new Response(body, {
+    status: Number.isFinite(status) && status >= 200 && status <= 599 ? status : 599,
+    headers: {
+      "content-type": body.trimStart().startsWith("{") ? "application/json" : "text/plain"
+    }
+  });
 }
 
 function chatCompletionContent(json: JsonObject): string | undefined {
