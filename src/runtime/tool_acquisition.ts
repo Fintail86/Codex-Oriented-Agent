@@ -13,6 +13,7 @@ import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
 import { ShellApprovalLedger, type ShellApproval } from "./shell_approval.js";
 import { isToolId } from "./tool_catalog.js";
+import type { GatewayAccessPolicy } from "./gateway_auth_types.js";
 import type { ToolPermission } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -103,6 +104,7 @@ export type ActiveToolRecord = {
   targetAgentIds: string[];
   status: ActiveToolStatus;
   executorPlan: CommandAdapterPlan | TsModulePlan;
+  gatewayAccess?: GatewayAccessPolicy;
   createdAt: string;
   activatedAt: string;
   deactivatedAt?: string;

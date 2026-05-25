@@ -180,7 +180,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.52.0\"");
+    expect(policyJson).toContain("\"version\": \"0.53.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1502,7 +1502,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.52.0-policy-amended";
+    policy.version = "0.53.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1510,8 +1510,8 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.52.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.52.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.53.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.53.0-policy-amended");
   });
 
   it("summarizes durable pending approvals and requires explicit top-level apply", async () => {
@@ -3990,7 +3990,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.52.0");
+    expect(emptyReport.version).toBe("0.53.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4555,9 +4555,9 @@ describe("status and listing", () => {
 
     const policy = await new PolicyManager(root).loadPolicy();
     expect(policy.connectors.telegram.enabled).toBe(true);
-    expect(policy.connectors.telegram.allowedChatIds).toEqual(["123"]);
-    expect(policy.connectors.telegram.allowedUserIds).toEqual(["42"]);
-    expect(policy.connectors.telegram.mutationUserIds).toEqual(["42"]);
+    expect(policy.gateway.authorization.chats).toMatchObject([{ connector: "telegram", chatId: "123" }]);
+    expect(policy.gateway.authorization.roleBindings).toEqual([]);
+    expect(policy.gateway.authorization.masterUser).toMatchObject({ connector: "telegram", userId: "42" });
     expect(policy.connectors.telegram.groupMode).toBe("allowed_users");
     expect(JSON.stringify(policy.connectors.telegram)).not.toContain("secrettelegram");
     expect(await readFile(runtimePrivatePath(root), "utf8")).not.toContain("secrettelegram");
@@ -4569,8 +4569,9 @@ describe("status and listing", () => {
     expect(check).toMatchObject({
       ok: true,
       tokenStatus: "configured via private secret",
-      allowedUserIds: 1,
-      mutationUserIds: 1,
+      authChatCount: 1,
+      masterConfigured: true,
+      adminBindings: 0,
       groupMode: "allowed_users"
     });
     expect(formatTelegramCheck(check)).not.toContain("secrettelegram");
@@ -4579,8 +4580,8 @@ describe("status and listing", () => {
     await removeTelegramUserId(root, "42");
     await removeTelegramMutationUserId(root, "42");
     const updated = await new PolicyManager(root).loadPolicy();
-    expect(updated.connectors.telegram.allowedUserIds).toEqual([]);
-    expect(updated.connectors.telegram.mutationUserIds).toEqual([]);
+    expect(updated.gateway.authorization.roleBindings).toEqual([]);
+    expect(updated.gateway.authorization.masterUser).toBeUndefined();
   });
 
   it("processes Telegram updates with allowlist checks, state, chunks, and slash commands", async () => {
@@ -4620,7 +4621,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("Unauthorized");
+    expect(sent.map((message) => message.text).join("\n")).toContain("not registered");
     expect(state.chats["999"]).toBeUndefined();
 
     const sentBeforeOwnerGate = sent.length;
@@ -4636,8 +4637,8 @@ describe("status and listing", () => {
       owner: "test"
     });
     const ownerGateOutput = sent.slice(sentBeforeOwnerGate).map((message) => message.text).join("\n");
-    expect(ownerGateOutput).toContain("Telegram slash command owner gate");
-    expect(ownerGateOutput).toContain("cosia gateway telegram set user-id 7");
+    expect(ownerGateOutput).toContain("Gateway authorization gate");
+    expect(ownerGateOutput).toContain("cosia gateway auth set-role telegram 7 guest --chat-id 123");
     expect(state.chats["123"]?.activeSessionId).toBeUndefined();
     expect(state.chats["123"]?.pendingCommand).toBeUndefined();
 
@@ -4652,7 +4653,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(state.chats["123"]).toBeDefined();
+    expect(state.chats["123"]).toBeUndefined();
     expect(sent.some((message) => message.chatId === "123" && message.text.includes("COSIA"))).toBe(true);
 
     const sentBeforeBatch = sent.length;
@@ -4690,6 +4691,7 @@ describe("status and listing", () => {
           enabled: true,
           allowedChatIds: ["123"],
           allowedUserIds: ["42"],
+          mutationUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -4787,7 +4789,7 @@ describe("status and listing", () => {
     });
     expect(sent.at(-1)?.text).toContain("Chat id: -200");
     expect(sent.at(-1)?.text).toContain("User id: 42");
-    expect(sent.at(-1)?.text).toContain("cosia gateway telegram set mutation-user-id 42");
+    expect(sent.at(-1)?.text).toContain("cosia gateway auth set-master telegram 42");
     expect(state.chats["-200"]).toBeUndefined();
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, state, {
@@ -4801,8 +4803,9 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.52.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.53.0");
 
+    const sentBeforeUnknownGroupNatural = sent.length;
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
       ...state,
       chats: {
@@ -4815,14 +4818,14 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: -100, type: "group" },
-        from: { id: 42, username: "fox" },
+        from: { id: 77, username: "unknown" },
         text: "그냥 대화해줘"
       }
     }, {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("Telegram group chats are read-only by default");
+    expect(sent.length).toBe(sentBeforeUnknownGroupNatural);
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
       ...state,
@@ -4854,7 +4857,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("Telegram group chats are read-only by default");
+    expect(sent.at(-1)?.text).toContain("Required role: master");
 
     const allowedGroupPolicy = {
       ...policy,
@@ -4864,7 +4867,7 @@ describe("status and listing", () => {
           enabled: true,
           allowedChatIds: ["-100"],
           allowedUserIds: ["42"],
-          mutationUserIds: [],
+          mutationUserIds: ["42"],
           allowMutations: true,
           groupMode: "allowed_users" as const,
           defaultProvider: "mock"
@@ -4900,14 +4903,14 @@ describe("status and listing", () => {
       update_id: 6,
       message: {
         chat: { id: -100, type: "group" },
-        from: { id: 42, username: "fox" },
+        from: { id: 43, username: "notmaster" },
         text: "/apply"
       }
     }, {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("not allowed to approve mutations");
+    expect(sent.at(-1)?.text).toContain("not registered");
     expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
 
     state = await processTelegramUpdate(root, {
@@ -4928,7 +4931,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("did not provide a sender user id");
+    expect(sent.at(-1)?.text).toContain("did not provide a user id");
     expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
 
     const mutationGroupPolicy = {
@@ -4967,6 +4970,7 @@ describe("status and listing", () => {
           enabled: true,
           allowedChatIds: ["123"],
           allowedUserIds: ["42"],
+          mutationUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -4991,6 +4995,7 @@ describe("status and listing", () => {
       update_id: 1,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "hello"
       }
     }, {
@@ -5015,6 +5020,7 @@ describe("status and listing", () => {
           enabled: true,
           allowedChatIds: ["123"],
           allowedUserIds: ["42"],
+          mutationUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -5034,6 +5040,7 @@ describe("status and listing", () => {
       update_id: 1,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "지금 게이트웨이 살아 있어?"
       }
     }, {
@@ -5049,6 +5056,7 @@ describe("status and listing", () => {
       update_id: 2,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "#리뷰 보여줘"
       }
     }, {
@@ -5071,7 +5079,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.52.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.53.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
@@ -5086,6 +5094,7 @@ describe("status and listing", () => {
           enabled: true,
           allowedChatIds: ["123"],
           allowedUserIds: ["42"],
+          mutationUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -5139,6 +5148,7 @@ describe("status and listing", () => {
       update_id: 3,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: `cosia tool grow test ${routineId} --yes`
       }
     }, {
@@ -5239,6 +5249,7 @@ describe("status and listing", () => {
           allowedChatIds: ["123"],
           allowedUserIds: ["42"],
           allowMutations: true,
+          mutationUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -5263,6 +5274,7 @@ describe("status and listing", () => {
       update_id: 1,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "[MOCK_WRITE_ONLY:agents/cosia-agent/STYLE.md]"
       }
     }, {
@@ -5282,6 +5294,7 @@ describe("status and listing", () => {
       update_id: 2,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "승인할게 변경해"
       }
     }, {
@@ -5325,6 +5338,7 @@ describe("status and listing", () => {
           allowedChatIds: ["123"],
           allowedUserIds: ["42"],
           allowMutations: true,
+          mutationUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -5349,6 +5363,7 @@ describe("status and listing", () => {
       update_id: 1,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "[MOCK_WRITE_ONLY:codex/RULES.md]"
       }
     }, {
@@ -5368,6 +5383,7 @@ describe("status and listing", () => {
       update_id: 2,
       message: {
         chat: { id: 123 },
+        from: { id: 42, username: "fox" },
         text: "승인할게 변경해"
       }
     }, {
@@ -5502,6 +5518,7 @@ describe("status and listing", () => {
           ...policy.connectors.telegram,
           enabled: true,
           allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
           defaultProvider: "mock"
         }
       }
@@ -5565,7 +5582,7 @@ describe("status and listing", () => {
     });
     const state = await loadTelegramGatewayState(root);
     expect(state.nextOffset).toBe(12);
-    expect(state.chats["123"]).toBeDefined();
+    expect(state.chats["123"]).toBeUndefined();
     expect(await pathExists(join(root, ".cosia-gateway", "telegram", "process.lock"))).toBe(false);
     expect(await pathExists(gatewayProcessLockPath(root))).toBe(false);
   });
@@ -5579,7 +5596,9 @@ describe("status and listing", () => {
         telegram: {
           ...policy.connectors.telegram,
           enabled: true,
-          allowedChatIds: ["123"]
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          mutationUserIds: ["42"]
         }
       }
     });
@@ -5798,7 +5817,7 @@ describe("status and listing", () => {
 
     expect(requests.some((url) => url.includes("bottest-token/getUpdates"))).toBe(true);
     const state = await loadTelegramGatewayState(root);
-    expect(state.chats["123"]?.providerId).toBe("gateway-profile");
+    expect(state.chats["123"]).toBeUndefined();
   });
 
   it("releases session locks when async work rejects", async () => {

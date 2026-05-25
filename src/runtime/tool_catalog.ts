@@ -1,3 +1,5 @@
+import type { GatewayAccessPolicy } from "./gateway_auth_types.js";
+
 export type ToolCategory = "core" | "bundled";
 export type ToolExposure = "model" | "cli_only" | "internal";
 export type ToolWorkspaceBoundary = "inside_only";
@@ -20,6 +22,7 @@ export type ToolCatalogEntry = {
   defaultEnabled: boolean;
   defaultAgentAllow: boolean;
   exposure: ToolExposure;
+  gatewayAccess?: GatewayAccessPolicy;
   description: string;
 };
 
@@ -33,6 +36,10 @@ export const toolCatalog = {
     defaultEnabled: true,
     defaultAgentAllow: true,
     exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
     description: "Read a file inside the workspace."
   },
   write_file: {
@@ -44,6 +51,11 @@ export const toolCatalog = {
     defaultEnabled: true,
     defaultAgentAllow: true,
     exposure: "model",
+    gatewayAccess: {
+      minRole: "master",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"],
+      requiresPreview: true
+    },
     description: "Write a file inside the workspace through policy gates."
   },
   search_files: {
@@ -55,6 +67,10 @@ export const toolCatalog = {
     defaultEnabled: true,
     defaultAgentAllow: true,
     exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
     description: "Search workspace files by path or content."
   },
   review_inbox_read: {
@@ -66,6 +82,10 @@ export const toolCatalog = {
     defaultEnabled: true,
     defaultAgentAllow: true,
     exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
     description: "Read pending COSIA memory and skill review inbox items without mutating them."
   },
   shell_request: {
@@ -77,6 +97,11 @@ export const toolCatalog = {
     defaultEnabled: true,
     defaultAgentAllow: true,
     exposure: "model",
+    gatewayAccess: {
+      minRole: "master",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"],
+      requiresPreview: true
+    },
     description: "Create a one-shot user-reviewable shell approval preview without executing it."
   }
 } as const satisfies Record<string, ToolCatalogEntry>;

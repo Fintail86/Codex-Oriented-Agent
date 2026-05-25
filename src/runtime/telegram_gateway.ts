@@ -15,6 +15,7 @@ import {
 } from "./gateway_locks.js";
 import { chunkTelegramMessage } from "./gateway_format.js";
 import { formatGatewayWhoami, handleGatewayMessage, isGatewayWhoamiInput, type GatewayChatState, type GatewaySourceContext } from "./gateway_runtime.js";
+import { gatewayAuthSummary } from "./gateway_auth.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
@@ -39,6 +40,11 @@ export type TelegramGatewayCheck = {
   allowedChatIds?: number;
   allowedUserIds?: number;
   mutationUserIds?: number;
+  authChatCount?: number;
+  masterConfigured?: boolean;
+  guestBindings?: number;
+  adminBindings?: number;
+  legacyWarning?: string;
   groupMode?: PolicyConfig["connectors"]["telegram"]["groupMode"];
 };
 
@@ -158,6 +164,7 @@ class TelegramApiClient {
     const timeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1000));
     return this.call<TelegramUpdate[]>("getUpdates", {
       timeout: timeoutSeconds,
+      allowed_updates: ["message", "callback_query"],
       ...(offset !== undefined ? { offset } : {})
     });
   }
@@ -212,6 +219,7 @@ export async function checkTelegramGateway(
 ): Promise<TelegramGatewayCheck> {
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const config = policy.connectors.telegram;
+  const auth = gatewayAuthSummary(policy);
   if (!config.enabled) {
     return {
       ok: false,
@@ -219,22 +227,26 @@ export async function checkTelegramGateway(
       reason: "disabled",
       message: "Telegram connector is disabled.",
       hint: "Run `cosia gateway telegram enable`.",
-      allowedChatIds: config.allowedChatIds.length,
-      allowedUserIds: config.allowedUserIds.length,
-      mutationUserIds: config.mutationUserIds.length,
+      authChatCount: auth.chatCount,
+      masterConfigured: auth.masterConfigured,
+      guestBindings: auth.guestBindings,
+      adminBindings: auth.adminBindings,
+      legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode
     };
   }
-  if (!config.allowedChatIds.length) {
+  if (!auth.chatCount) {
     return {
       ok: false,
       status: "failed",
       reason: "missing_allowed_chat_ids",
-      message: "Telegram connector has no allowed chat ids.",
-      hint: "Run `cosia gateway telegram set chat-id <chat-id>`.",
-      allowedChatIds: config.allowedChatIds.length,
-      allowedUserIds: config.allowedUserIds.length,
-      mutationUserIds: config.mutationUserIds.length,
+      message: "Telegram connector has no Gateway-authorized chats.",
+      hint: "Run `cosia gateway auth allow-chat telegram <chat-id>`.",
+      authChatCount: auth.chatCount,
+      masterConfigured: auth.masterConfigured,
+      guestBindings: auth.guestBindings,
+      adminBindings: auth.adminBindings,
+      legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode
     };
   }
@@ -247,9 +259,11 @@ export async function checkTelegramGateway(
       message: "Telegram bot token is not configured.",
       hint: "Run `cosia gateway telegram set token` or `cosia gateway telegram set token-env <ENV_NAME>`.",
       tokenStatus: tokenResolution.status,
-      allowedChatIds: config.allowedChatIds.length,
-      allowedUserIds: config.allowedUserIds.length,
-      mutationUserIds: config.mutationUserIds.length,
+      authChatCount: auth.chatCount,
+      masterConfigured: auth.masterConfigured,
+      guestBindings: auth.guestBindings,
+      adminBindings: auth.adminBindings,
+      legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode
     };
   }
@@ -258,11 +272,16 @@ export async function checkTelegramGateway(
     return {
       ok: true,
       status: "ok",
-      message: "Telegram connector is configured and getMe succeeded.",
+      message: auth.masterConfigured
+        ? "Telegram connector is configured and getMe succeeded."
+        : "Telegram connector is configured and getMe succeeded, but no Gateway master user is registered.",
+      hint: auth.masterConfigured ? undefined : "Run `cosia gateway auth set-master telegram <user-id>` after /whoami discovery.",
       tokenStatus: tokenResolution.status,
-      allowedChatIds: config.allowedChatIds.length,
-      allowedUserIds: config.allowedUserIds.length,
-      mutationUserIds: config.mutationUserIds.length,
+      authChatCount: auth.chatCount,
+      masterConfigured: auth.masterConfigured,
+      guestBindings: auth.guestBindings,
+      adminBindings: auth.adminBindings,
+      legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode
     };
   } catch (error) {
@@ -273,9 +292,11 @@ export async function checkTelegramGateway(
       reason: classified.reason,
       message: (error as Error).message,
       hint: classified.hint,
-      allowedChatIds: config.allowedChatIds.length,
-      allowedUserIds: config.allowedUserIds.length,
-      mutationUserIds: config.mutationUserIds.length,
+      authChatCount: auth.chatCount,
+      masterConfigured: auth.masterConfigured,
+      guestBindings: auth.guestBindings,
+      adminBindings: auth.adminBindings,
+      legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode
     };
   }
@@ -442,15 +463,6 @@ export async function processTelegramUpdate(
   if (callback) {
     const chatId = String(callback.message?.chat.id ?? "");
     const source = telegramSourceFromCallback(callback);
-    if (!chatId || !policy.connectors.telegram.allowedChatIds.includes(chatId)) {
-      if (chatId) {
-        await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
-      }
-      if (client.answerCallbackQuery) {
-        await client.answerCallbackQuery(callback.id, "Unauthorized");
-      }
-      return state;
-    }
     if (client.answerCallbackQuery) {
       await client.answerCallbackQuery(callback.id);
     }
@@ -484,15 +496,15 @@ export async function processTelegramUpdate(
         })
       });
       chatState = result.state;
-      for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-        await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+      if (result.output.trim()) {
+        for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
+          await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+        }
       }
+      const chats = nextTelegramChats(state.chats, chatId, chatState);
       return {
         ...state,
-        chats: {
-          ...state.chats,
-          [chatId]: chatState
-        },
+        chats,
         updatedAt: new Date().toISOString()
       };
     });
@@ -504,16 +516,11 @@ export async function processTelegramUpdate(
   }
   const messageText = message.text;
   const chatId = String(message.chat.id);
-  if (!policy.connectors.telegram.allowedChatIds.includes(chatId)) {
-    const source = telegramSourceFromMessage(message);
-    if (isGatewayWhoamiInput(messageText)) {
-      await client.sendMessage(chatId, formatGatewayWhoami(source));
-      return state;
-    }
-    await client.sendMessage(chatId, "Unauthorized COSIA Telegram chat.");
+  const source = telegramSourceFromMessage(message);
+  if (isGatewayWhoamiInput(messageText)) {
+    await client.sendMessage(chatId, formatGatewayWhoami(source));
     return state;
   }
-  const source = telegramSourceFromMessage(message);
   return withTelegramTyping(client, chatId, async () => {
     let chatState = state.chats[chatId] ?? {
       providerId: options.providerId
@@ -544,16 +551,16 @@ export async function processTelegramUpdate(
         })
       });
       chatState = result.state;
-      for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-        await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+      if (result.output.trim()) {
+        for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
+          await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+        }
       }
     }
+    const chats = nextTelegramChats(state.chats, chatId, chatState);
     return {
       ...state,
-      chats: {
-        ...state.chats,
-        [chatId]: chatState
-      },
+      chats,
       updatedAt: new Date().toISOString()
     };
   });
@@ -753,6 +760,25 @@ function latestTelegramChatState(state: TelegramGatewayState, job: RunJobRecord)
     ...existing,
     activeSessionId: existing?.activeSessionId ?? job.sessionId
   };
+}
+
+function shouldPersistTelegramChatState(state: GatewayChatState): boolean {
+  return Boolean(
+    state.activeSessionId
+    || state.pendingCommand
+    || state.pendingToolGrowthRequest
+    || state.currentToolGrowthRoutineId
+  );
+}
+
+function nextTelegramChats(chats: TelegramGatewayState["chats"], chatId: string, state: GatewayChatState): TelegramGatewayState["chats"] {
+  const next = { ...chats };
+  if (shouldPersistTelegramChatState(state)) {
+    next[chatId] = state;
+  } else {
+    delete next[chatId];
+  }
+  return next;
 }
 
 async function persistTelegramChatState(
@@ -978,6 +1004,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
   const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now());
   const legacyLockStale = isGatewayProcessLockStale(legacyLock, workspaceRoot, Date.now(), 120000, "telegram");
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const auth = gatewayAuthSummary(policy);
   const report = {
     supervisor: {
       processLock: processLocked,
@@ -991,9 +1018,11 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
       lock,
       legacyProcessLock: Boolean(legacyLock),
       legacyLockStale,
-      allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
-      allowedUserIds: policy.connectors.telegram.allowedUserIds.length,
-      mutationUserIds: policy.connectors.telegram.mutationUserIds.length,
+      authChatCount: auth.chatCount,
+      masterConfigured: auth.masterConfigured,
+      guestBindings: auth.guestBindings,
+      adminBindings: auth.adminBindings,
+      legacyWarning: auth.legacyWarning,
       groupMode: policy.connectors.telegram.groupMode,
       activeChats: Object.keys(state.chats).length,
       nextOffset: state.nextOffset,
@@ -1012,9 +1041,11 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Process lock: ${processLocked ? "present" : "none"}`,
     `  Lock stale: ${lockStale}`,
     lock?.heartbeatAt ? `  Heartbeat: ${lock.heartbeatAt}` : undefined,
-    `  Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length}`,
-    `  Allowed user ids: ${policy.connectors.telegram.allowedUserIds.length}`,
-    `  Mutation user ids: ${policy.connectors.telegram.mutationUserIds.length}`,
+    `  Authorized chats: ${auth.chatCount}`,
+    `  Master configured: ${auth.masterConfigured}`,
+    `  Guest bindings: ${auth.guestBindings}`,
+    `  Admin bindings: ${auth.adminBindings}`,
+    auth.legacyWarning ? `  Warning: ${auth.legacyWarning}` : undefined,
     `  Group mode: ${policy.connectors.telegram.groupMode}`,
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
@@ -1078,9 +1109,11 @@ export function formatTelegramCheck(result: TelegramGatewayCheck): string {
     `Status: ${result.status}`,
     `Message: ${result.message}`,
     result.tokenStatus ? `Token: ${result.tokenStatus}` : undefined,
-    result.allowedChatIds !== undefined ? `Allowed chat ids: ${result.allowedChatIds}` : undefined,
-    result.allowedUserIds !== undefined ? `Allowed user ids: ${result.allowedUserIds}` : undefined,
-    result.mutationUserIds !== undefined ? `Mutation user ids: ${result.mutationUserIds}` : undefined,
+    result.authChatCount !== undefined ? `Authorized chats: ${result.authChatCount}` : undefined,
+    result.masterConfigured !== undefined ? `Master configured: ${result.masterConfigured}` : undefined,
+    result.guestBindings !== undefined ? `Guest bindings: ${result.guestBindings}` : undefined,
+    result.adminBindings !== undefined ? `Admin bindings: ${result.adminBindings}` : undefined,
+    result.legacyWarning ? `Warning: ${result.legacyWarning}` : undefined,
     result.groupMode ? `Group mode: ${result.groupMode}` : undefined,
     result.reason ? `Reason: ${result.reason}` : undefined,
     result.hint ? `Hint: ${result.hint}` : undefined
@@ -1154,7 +1187,8 @@ function telegramSourceFromMessage(message: NonNullable<TelegramUpdate["message"
     chatType: message.chat.type ?? "private",
     userId: message.from?.id !== undefined ? String(message.from.id) : undefined,
     username: message.from?.username,
-    firstName: message.from?.first_name
+    firstName: message.from?.first_name,
+    displayName: message.from?.first_name
   };
 }
 
@@ -1165,7 +1199,8 @@ function telegramSourceFromCallback(callback: NonNullable<TelegramUpdate["callba
     chatType: callback.message?.chat.type ?? "private",
     userId: callback.from?.id !== undefined ? String(callback.from.id) : undefined,
     username: callback.from?.username,
-    firstName: callback.from?.first_name
+    firstName: callback.from?.first_name,
+    displayName: callback.from?.first_name
   };
 }
 

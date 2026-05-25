@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
+import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import { readText, resolveInside } from "./fs_utils.js";
 import { PolicyManager, formatPolicySummary } from "./policy_manager.js";
@@ -67,6 +68,8 @@ export type CommandCatalogContext = {
     chatId?: string;
     sessionId?: string;
   };
+  gatewayActor?: GatewayActor;
+  gatewayRole?: GatewayRole;
 };
 
 export async function executeReadOnlyCommand(intent: Extract<RuntimeCommandResult, { type: "matched" }>, ctx: CommandCatalogContext): Promise<string | undefined> {
@@ -428,7 +431,9 @@ async function executeTool(name: ToolName, args: unknown, ctx: CommandCatalogCon
     allowedTools: ctx.agent.allowedTools,
     sessionId: ctx.session.id,
     agentId: ctx.agent.id,
-    sourceChannel: ctx.previewScope?.chatId ? "gateway" : "repl"
+    sourceChannel: ctx.previewScope?.chatId ? "gateway" : "repl",
+    gatewayActor: ctx.gatewayActor,
+    gatewayRole: ctx.gatewayRole
   });
   return result.content;
 }
@@ -455,6 +460,8 @@ async function applyWriteFileOverwrite(pending: PendingCommand, ctx: CommandCata
     sessionId: ctx.session.id,
     agentId: ctx.agent.id,
     sourceChannel: ctx.previewScope?.chatId ? "gateway" : "repl",
+    gatewayActor: ctx.gatewayActor,
+    gatewayRole: ctx.gatewayRole,
     approveOverwrite: async () => true
   });
   if (!result.ok) {

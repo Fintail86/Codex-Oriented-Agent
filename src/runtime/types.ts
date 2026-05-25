@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 
 export const memoryScopeSchema = z.enum([
   "global",
@@ -261,6 +262,8 @@ export type ToolContext = {
   agentId?: string;
   runId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
+  gatewayActor?: GatewayActor;
+  gatewayRole?: GatewayRole;
   forceOverwriteApproval?: boolean;
   approveOverwrite?: (filePath: string, request?: OverwriteApprovalRequest) => Promise<boolean>;
   onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
@@ -289,6 +292,11 @@ export type ToolDefinition = {
   name: ToolName;
   permission: ToolPermission;
   source?: "catalog" | "active";
+  gatewayAccess?: {
+    minRole: GatewayRole;
+    allowedChatTypes: string[];
+    requiresPreview?: boolean;
+  };
   execute(args: unknown, ctx: ToolContext): Promise<ToolResult>;
 };
 

@@ -4,6 +4,8 @@ import { isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { readText, resolveExistingInside, resolveInside, writeText } from "./fs_utils.js";
+import { gatewayRoleAtLeast } from "./gateway_auth.js";
+import type { GatewayAccessPolicy } from "./gateway_auth_types.js";
 import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
@@ -12,7 +14,7 @@ import { ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
 import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
 import { executeCommandAdapterPlan, getActiveToolRecord, recordActiveToolExecution, type CommandAdapterPlan } from "./tool_acquisition.js";
-import { getToolCatalogEntry, type CatalogToolId } from "./tool_catalog.js";
+import { getToolCatalogEntry, isToolId, type CatalogToolId } from "./tool_catalog.js";
 import type { ToolContext, ToolDefinition, ToolName, ToolPermission, ToolResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -144,6 +146,19 @@ export class ToolRegistry {
         });
         return { ok: false, content: `Tool is not allowed for this agent: ${name}` };
       }
+      const gatewayAccess = gatewayToolAccessDecision(name, tool, ctx);
+      if (!gatewayAccess.allowed) {
+        await ctx.policyAudit?.({
+          eventType: "tool_decision",
+          allowed: false,
+          ruleId: "gateway.tool_access",
+          reason: gatewayAccess.reason,
+          tool: name,
+          permission: tool.permission,
+          argsSummary
+        });
+        return { ok: false, content: gatewayAccess.reason };
+      }
       const policy = await new PolicyManager(ctx.workspaceRoot).loadPolicy();
       const runtime = await loadRuntimeConfig(ctx.workspaceRoot);
       const engine = new PolicyEngine(policy, runtime.config);
@@ -203,6 +218,45 @@ export class ToolRegistry {
   }
 }
 
+function gatewayToolAccessDecision(
+  name: ToolName,
+  tool: ToolDefinition,
+  ctx: ToolContext
+): { allowed: true } | { allowed: false; reason: string } {
+  if (ctx.sourceChannel !== "gateway") {
+    return { allowed: true };
+  }
+  if (!ctx.gatewayActor || !ctx.gatewayRole) {
+    return { allowed: false, reason: `Gateway tool access denied for ${name}: missing registered gateway actor role.` };
+  }
+  const access = gatewayToolAccessPolicy(name, tool);
+  const chatType = ctx.gatewayActor.chatType ?? "private";
+  if (!access.allowedChatTypes.includes(chatType)) {
+    return { allowed: false, reason: `Gateway tool access denied for ${name}: chat type ${chatType} is not allowed.` };
+  }
+  if (!gatewayRoleAtLeast(ctx.gatewayRole, access.minRole)) {
+    return { allowed: false, reason: `Gateway tool access denied for ${name}: role ${ctx.gatewayRole} is below required role ${access.minRole}.` };
+  }
+  return { allowed: true };
+}
+
+function gatewayToolAccessPolicy(name: ToolName, tool: ToolDefinition): GatewayAccessPolicy {
+  if (tool.gatewayAccess) {
+    return tool.gatewayAccess;
+  }
+  if (tool.source === "catalog" && isToolId(name)) {
+    return getToolCatalogEntry(name).gatewayAccess ?? defaultGatewayToolAccess();
+  }
+  return defaultGatewayToolAccess();
+}
+
+function defaultGatewayToolAccess(): GatewayAccessPolicy {
+  return {
+    minRole: "master",
+    allowedChatTypes: ["private", "group", "supergroup", "channel"]
+  };
+}
+
 async function requiresOverwriteApproval(
   args: unknown,
   ctx: ToolContext,
@@ -237,6 +291,7 @@ function activeToolDefinition(name: ToolName, workspaceRoot: string): ToolDefini
     name,
     permission: active.permission,
     source: "active",
+    gatewayAccess: active.gatewayAccess,
     execute: async (args) => {
       if (args && typeof args === "object" && Object.keys(args as Record<string, unknown>).length > 0) {
         recordActiveToolExecution(workspaceRoot, {

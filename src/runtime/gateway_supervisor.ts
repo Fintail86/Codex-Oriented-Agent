@@ -12,6 +12,7 @@ import {
   removeLegacyTelegramProcessLock,
   type GatewayLockRecord
 } from "./gateway_locks.js";
+import { gatewayAuthSummary } from "./gateway_auth.js";
 import type { FetchLike } from "./model/providers/openai_compatible_provider.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
@@ -209,6 +210,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
   const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, now);
   const legacyLockStale = isGatewayProcessLockStale(legacyTelegramLock, workspaceRoot, now, 120000, "telegram");
   const tokenStatus = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
+  const auth = gatewayAuthSummary(policy);
   const report = {
     supervisor: {
       running: Boolean(lock && !lockStale),
@@ -221,12 +223,14 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
       telegram: {
         enabled: policy.connectors.telegram.enabled,
         configured: policy.connectors.telegram.enabled
-          && policy.connectors.telegram.allowedChatIds.length > 0
+          && auth.chatCount > 0
           && Boolean(tokenStatus.token),
         tokenStatus: tokenStatus.status,
-        allowedChatIds: policy.connectors.telegram.allowedChatIds.length,
-        allowedUserIds: policy.connectors.telegram.allowedUserIds.length,
-        mutationUserIds: policy.connectors.telegram.mutationUserIds.length,
+        authChatCount: auth.chatCount,
+        masterConfigured: auth.masterConfigured,
+        guestBindings: auth.guestBindings,
+        adminBindings: auth.adminBindings,
+        legacyWarning: auth.legacyWarning,
         groupMode: policy.connectors.telegram.groupMode,
         activeChats: Object.keys(state.chats).length,
         staleActiveSessions: telegramStateInspection.staleSessions.length,
@@ -259,9 +263,11 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `    Enabled: ${policy.connectors.telegram.enabled}`,
     `    Configured: ${report.connectors.telegram.configured}`,
     `    Token: ${report.connectors.telegram.tokenStatus}`,
-    `    Allowed chat ids: ${policy.connectors.telegram.allowedChatIds.length}`,
-    `    Allowed user ids: ${policy.connectors.telegram.allowedUserIds.length}`,
-    `    Mutation user ids: ${policy.connectors.telegram.mutationUserIds.length}`,
+    `    Authorized chats: ${auth.chatCount}`,
+    `    Master configured: ${auth.masterConfigured}`,
+    `    Guest bindings: ${auth.guestBindings}`,
+    `    Admin bindings: ${auth.adminBindings}`,
+    auth.legacyWarning ? `    Warning: ${auth.legacyWarning}` : undefined,
     `    Group mode: ${policy.connectors.telegram.groupMode}`,
     `    Active chats: ${Object.keys(state.chats).length}`,
     `    Stale active sessions: ${telegramStateInspection.staleSessions.length}`,

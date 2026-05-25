@@ -42,6 +42,17 @@ import { formatStatusReport, getStatusReport } from "../runtime/status_report.js
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "../runtime/start_flow.js";
 import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult, restartGateway, startGateway, stopGateway, unlockStaleGateway } from "../runtime/gateway_supervisor.js";
 import {
+  allowGatewayChat,
+  clearGatewayMaster,
+  formatGatewayAuthCheck,
+  formatGatewayAuthList,
+  gatewayAuthSummary,
+  removeGatewayChat,
+  setGatewayMaster,
+  setGatewayRoleBinding,
+  unsetGatewayRoleBinding
+} from "../runtime/gateway_auth.js";
+import {
   checkTelegramGateway,
   formatTelegramCheck,
   formatTelegramStateInspection,
@@ -203,6 +214,114 @@ export function registerGatewayCommands(program: Command): void {
       });
     });
 
+  const auth = gateway.command("auth").description("Manage connector-neutral Gateway chat/user authorization.");
+
+  auth
+    .command("allow-chat")
+    .argument("<connector>")
+    .argument("<chat-id>")
+    .option("--label <label>", "Optional local label.")
+    .description("Allow an external connector chat.")
+    .action(async (connector: string, chatId: string, options: { label?: string }) => {
+      await main(async (workspaceRoot) => {
+        const next = await allowGatewayChat(workspaceRoot, connector, chatId, options.label);
+        console.log(`Gateway authorized chats: ${next.chats.length}`);
+      });
+    });
+
+  auth
+    .command("remove-chat")
+    .argument("<connector>")
+    .argument("<chat-id>")
+    .description("Remove an external connector chat and its scoped role bindings.")
+    .action(async (connector: string, chatId: string) => {
+      await main(async (workspaceRoot) => {
+        const next = await removeGatewayChat(workspaceRoot, connector, chatId);
+        console.log(`Gateway authorized chats: ${next.chats.length}`);
+      });
+    });
+
+  auth
+    .command("set-master")
+    .argument("<connector>")
+    .argument("<user-id>")
+    .option("--label <label>", "Optional local label.")
+    .description("Set the single global Gateway master user.")
+    .action(async (connector: string, userId: string, options: { label?: string }) => {
+      await main(async (workspaceRoot) => {
+        await setGatewayMaster(workspaceRoot, connector, userId, options.label);
+        console.log(`Gateway master user: ${connector}:${userId}`);
+      });
+    });
+
+  auth
+    .command("clear-master")
+    .description("Clear the global Gateway master user.")
+    .action(async () => {
+      await main(async (workspaceRoot) => {
+        await clearGatewayMaster(workspaceRoot);
+        console.log("Gateway master user cleared.");
+      });
+    });
+
+  auth
+    .command("set-role")
+    .argument("<connector>")
+    .argument("<user-id>")
+    .argument("<role>")
+    .requiredOption("--chat-id <chat-id>", "Chat id for this scoped role binding.")
+    .option("--label <label>", "Optional local label.")
+    .description("Set a chat-scoped Gateway role binding. Use set-master for master.")
+    .action(async (connector: string, userId: string, role: string, options: { chatId: string; label?: string }) => {
+      await main(async (workspaceRoot) => {
+        if (role !== "guest" && role !== "admin") {
+          throw new Error("Gateway chat-scoped role must be guest or admin. Use `cosia gateway auth set-master` for master.");
+        }
+        const next = await setGatewayRoleBinding(workspaceRoot, connector, userId, role, options.chatId, options.label);
+        console.log(`Gateway role bindings: ${next.roleBindings.length}`);
+      });
+    });
+
+  auth
+    .command("unset-role")
+    .argument("<connector>")
+    .argument("<user-id>")
+    .requiredOption("--chat-id <chat-id>", "Chat id for this scoped role binding.")
+    .description("Remove a chat-scoped Gateway role binding.")
+    .action(async (connector: string, userId: string, options: { chatId: string }) => {
+      await main(async (workspaceRoot) => {
+        const next = await unsetGatewayRoleBinding(workspaceRoot, connector, userId, options.chatId);
+        console.log(`Gateway role bindings: ${next.roleBindings.length}`);
+      });
+    });
+
+  auth
+    .command("list")
+    .description("List Gateway authorization without printing secrets.")
+    .action(async () => {
+      await main(async (workspaceRoot) => {
+        console.log(await formatGatewayAuthList(workspaceRoot));
+      });
+    });
+
+  auth
+    .command("check")
+    .argument("<connector>")
+    .requiredOption("--chat-id <id>", "External connector chat id.")
+    .requiredOption("--user-id <id>", "External connector user id.")
+    .option("--chat-type <type>", "private|group|supergroup|channel", "private")
+    .description("Check the resolved Gateway role for a connector actor.")
+    .action(async (connector: string, options: { chatId: string; userId: string; chatType: string }) => {
+      await main(async (workspaceRoot) => {
+        console.log(await formatGatewayAuthCheck(workspaceRoot, {
+          connector,
+          chatId: options.chatId,
+          userId: options.userId,
+          chatType: options.chatType
+        }));
+      });
+    });
+
   const telegram = gateway.command("telegram").description("Manage the Telegram remote console connector.");
 
   telegram
@@ -236,20 +355,25 @@ export function registerGatewayCommands(program: Command): void {
           case "chat-id":
           case "id": {
             if (!value) throw new Error(`Usage: cosia gateway telegram set ${field} <chat-id>`);
-            const config = await addTelegramChatId(workspaceRoot, value);
-            console.log(`Telegram allowed chat ids: ${config.allowedChatIds.length}`);
+            await addTelegramChatId(workspaceRoot, value);
+            const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+            console.log(`Gateway authorized chats: ${gatewayAuthSummary(policy).chatCount}`);
+            console.log(`Canonical: cosia gateway auth allow-chat telegram ${value}`);
             break;
           }
           case "user-id": {
             if (!value) throw new Error("Usage: cosia gateway telegram set user-id <user-id>");
-            const config = await addTelegramUserId(workspaceRoot, value);
-            console.log(`Telegram allowed user ids: ${config.allowedUserIds.length}`);
+            await addTelegramUserId(workspaceRoot, value);
+            const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+            console.log(`Gateway admin bindings: ${gatewayAuthSummary(policy).adminBindings}`);
+            console.log("Compatibility alias: prefer `cosia gateway auth set-role telegram <user-id> admin --chat-id <chat-id>`.");
             break;
           }
           case "mutation-user-id": {
             if (!value) throw new Error("Usage: cosia gateway telegram set mutation-user-id <user-id>");
-            const config = await addTelegramMutationUserId(workspaceRoot, value);
-            console.log(`Telegram mutation user ids: ${config.mutationUserIds.length}`);
+            await addTelegramMutationUserId(workspaceRoot, value);
+            console.log(`Gateway master user: telegram:${value}`);
+            console.log("Compatibility alias: prefer `cosia gateway auth set-master telegram <user-id>`.");
             break;
           }
           case "group-mode": {
@@ -291,20 +415,22 @@ export function registerGatewayCommands(program: Command): void {
           case "chat-id":
           case "id": {
             if (!value) throw new Error(`Usage: cosia gateway telegram unset ${field} <chat-id>`);
-            const config = await removeTelegramChatId(workspaceRoot, value);
-            console.log(`Telegram allowed chat ids: ${config.allowedChatIds.length}`);
+            await removeTelegramChatId(workspaceRoot, value);
+            const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+            console.log(`Gateway authorized chats: ${gatewayAuthSummary(policy).chatCount}`);
             break;
           }
           case "user-id": {
             if (!value) throw new Error("Usage: cosia gateway telegram unset user-id <user-id>");
-            const config = await removeTelegramUserId(workspaceRoot, value);
-            console.log(`Telegram allowed user ids: ${config.allowedUserIds.length}`);
+            await removeTelegramUserId(workspaceRoot, value);
+            const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+            console.log(`Gateway admin bindings: ${gatewayAuthSummary(policy).adminBindings}`);
             break;
           }
           case "mutation-user-id": {
             if (!value) throw new Error("Usage: cosia gateway telegram unset mutation-user-id <user-id>");
-            const config = await removeTelegramMutationUserId(workspaceRoot, value);
-            console.log(`Telegram mutation user ids: ${config.mutationUserIds.length}`);
+            await removeTelegramMutationUserId(workspaceRoot, value);
+            console.log("Gateway master user cleared when it matched this Telegram user.");
             break;
           }
           case "token":
@@ -328,7 +454,7 @@ export function registerGatewayCommands(program: Command): void {
     .action(async () => {
       await main(async (workspaceRoot) => {
         const policy = await new PolicyManager(workspaceRoot).loadPolicy();
-        console.log(formatTelegramConnectorList(policy.connectors.telegram, resolveTelegramToken(workspaceRoot, policy.connectors.telegram)));
+        console.log(formatTelegramConnectorList(policy.connectors.telegram, resolveTelegramToken(workspaceRoot, policy.connectors.telegram), gatewayAuthSummary(policy)));
       });
     });
 

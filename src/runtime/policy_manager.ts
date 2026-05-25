@@ -7,6 +7,7 @@ import {
   defaultRuntimeConfig,
   ensureRuntimeDefaults,
   extractLegacyRuntimeConfig,
+  gatewayConfigSchema,
   loadRuntimeConfig,
   modelConfigSchema,
   providerTypeForId,
@@ -195,6 +196,7 @@ export const policyConfigSchema = z.object({
   selfImprovement: selfImprovementSchema,
   promptBudget: promptBudgetSchema.default(defaultRuntimeConfig.promptBudget),
   model: modelConfigSchema.default(defaultRuntimeConfig.model),
+  gateway: gatewayConfigSchema.default(defaultRuntimeConfig.gateway),
   connectors: connectorsConfigSchema.default(defaultRuntimeConfig.connectors),
   review: reviewRetentionSchema.default(defaultRuntimeConfig.review)
 });
@@ -213,7 +215,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.52.0",
+  version: "0.53.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -345,6 +347,7 @@ export const defaultPolicy: PolicyConfig = {
   },
   promptBudget: defaultRuntimeConfig.promptBudget,
   model: defaultRuntimeConfig.model,
+  gateway: defaultRuntimeConfig.gateway,
   connectors: defaultRuntimeConfig.connectors,
   review: defaultRuntimeConfig.review
 };
@@ -376,6 +379,7 @@ export class PolicyManager {
       ...(raw as Record<string, unknown>),
       promptBudget: runtime.config.promptBudget,
       model: runtime.config.model,
+      gateway: runtime.config.gateway,
       connectors: runtime.config.connectors,
       review: runtime.config.review
     }));
@@ -555,6 +559,14 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
       ...policy.model,
       providerProfiles,
       providers
+    },
+    gateway: {
+      authorization: {
+        ...defaultPolicy.gateway.authorization,
+        ...policy.gateway?.authorization,
+        chats: policy.gateway?.authorization?.chats ?? defaultPolicy.gateway.authorization.chats,
+        roleBindings: policy.gateway?.authorization?.roleBindings ?? defaultPolicy.gateway.authorization.roleBindings
+      }
     },
     connectors: {
       telegram: {

@@ -14,6 +14,7 @@ import { SelfImprovementGovernor } from "./self_improvement.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
+import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 import type { AgentStep, CodexAmendmentApprovalRequest, ModelProvider, OverwriteApprovalRequest, ToolGrowthDecision, ToolGrowthRequest, ToolName } from "./types.js";
 import type { MemoryReviewSummary } from "./memory_manager.js";
 
@@ -43,6 +44,8 @@ type RunOptions = {
   manualSkillIds?: string[];
   agentId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
+  gatewayActor?: GatewayActor;
+  gatewayRole?: GatewayRole;
 };
 
 export type RunProgressEvent = {
@@ -246,6 +249,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       agentId: agent.id,
       runId,
       sourceChannel: options.sourceChannel ?? "cli",
+      gatewayActor: options.gatewayActor,
+      gatewayRole: options.gatewayRole,
       forceOverwriteApproval: options.forceOverwriteApproval,
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false,
       onOverwriteApprovalRequired: async (request) => {

@@ -64,6 +64,43 @@ export const modelConfigSchema = z.object({
   providers: z.record(z.string(), providerConfigSchema).default({})
 });
 
+const gatewayRoleSchema = z.enum(["guest", "admin", "master"]);
+
+export const gatewayAuthChatSchema = z.object({
+  connector: z.string().min(1),
+  chatId: z.string().min(1),
+  label: z.string().min(1).optional()
+});
+
+export const gatewayMasterUserSchema = z.object({
+  connector: z.string().min(1),
+  userId: z.string().min(1),
+  label: z.string().min(1).optional()
+});
+
+export const gatewayRoleBindingSchema = z.object({
+  connector: z.string().min(1),
+  chatId: z.string().min(1),
+  userId: z.string().min(1),
+  role: z.enum(["guest", "admin"]),
+  label: z.string().min(1).optional()
+});
+
+export const gatewayAuthorizationSchema = z.object({
+  chats: z.array(gatewayAuthChatSchema).default([]),
+  masterUser: gatewayMasterUserSchema.optional(),
+  roleBindings: z.array(gatewayRoleBindingSchema).default([]),
+  unknownBlockThrottleMs: z.number().int().positive().default(300000)
+});
+
+export const gatewayConfigSchema = z.object({
+  authorization: gatewayAuthorizationSchema.default({
+    chats: [],
+    roleBindings: [],
+    unknownBlockThrottleMs: 300000
+  })
+});
+
 export const telegramConnectorSchema = z.object({
   enabled: z.boolean().default(false),
   tokenEnv: z.string().min(1).default("TELEGRAM_BOT_TOKEN"),
@@ -101,6 +138,7 @@ export const runtimeToolsConfigSchema = z.object({
 export const runtimeConfigSchema = z.object({
   promptBudget: promptBudgetSchema,
   model: modelConfigSchema,
+  gateway: gatewayConfigSchema,
   connectors: connectorsConfigSchema,
   review: reviewRetentionSchema,
   tools: runtimeToolsConfigSchema
@@ -110,6 +148,7 @@ export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export type ProviderType = z.infer<typeof providerTypeSchema>;
 export type ProviderProfile = z.infer<typeof providerProfileSchema>;
+export type GatewayRole = z.infer<typeof gatewayRoleSchema>;
 
 export type RuntimeConfigIssue = {
   severity: "info" | "warning" | "high";
@@ -223,6 +262,13 @@ export const defaultRuntimeConfig: RuntimeConfig = {
       }
     }
   },
+  gateway: {
+    authorization: {
+      chats: [],
+      roleBindings: [],
+      unknownBlockThrottleMs: 300000
+    }
+  },
   connectors: {
     telegram: {
       enabled: false,
@@ -269,7 +315,7 @@ export function defaultProviderConfigForId(id: string): ProviderConfig {
   });
 }
 
-const RUNTIME_KEYS = ["promptBudget", "model", "connectors", "review"] as const;
+const RUNTIME_KEYS = ["promptBudget", "model", "gateway", "connectors", "review"] as const;
 
 export async function ensureRuntimeDefaults(workspaceRoot: string): Promise<string[]> {
   await ensureDir(configDir(workspaceRoot));
@@ -404,6 +450,7 @@ export function normalizeRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
       providerProfiles,
       providers
     },
+    gateway: normalizeGatewayConfig(config.gateway, config.connectors.telegram),
     connectors: {
       telegram: {
         ...defaultRuntimeConfig.connectors.telegram,
@@ -421,6 +468,49 @@ export function normalizeRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
       }
     }
   });
+}
+
+function normalizeGatewayConfig(
+  gateway: RuntimeConfig["gateway"],
+  telegram: RuntimeConfig["connectors"]["telegram"]
+): RuntimeConfig["gateway"] {
+  const existing = gateway.authorization;
+  const chats = uniqueBy([
+    ...existing.chats,
+    ...telegram.allowedChatIds.map((chatId) => ({ connector: "telegram", chatId }))
+  ], (item) => `${item.connector}:${item.chatId}`);
+  const legacyAdminBindings = telegram.allowedUserIds.flatMap((userId) =>
+    telegram.allowedChatIds.map((chatId) => ({ connector: "telegram", chatId, userId, role: "admin" as const }))
+  );
+  const roleBindings = uniqueBy([
+    ...existing.roleBindings,
+    ...legacyAdminBindings
+  ], (item) => `${item.connector}:${item.chatId}:${item.userId}`);
+  const masterUser = existing.masterUser
+    ?? (telegram.mutationUserIds.length === 1
+      ? { connector: "telegram", userId: telegram.mutationUserIds[0] }
+      : undefined);
+  return gatewayConfigSchema.parse({
+    ...gateway,
+    authorization: {
+      ...existing,
+      chats,
+      masterUser,
+      roleBindings
+    }
+  });
+}
+
+function uniqueBy<T>(items: T[], keyFor: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    const key = keyFor(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
 }
 
 export function extractLegacyRuntimeConfig(raw: unknown): PartialRuntimeConfig {
@@ -463,7 +553,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   const hasLegacyRuntime = Object.keys(legacy).length > 0;
   const legacyToolLocal = localConfigFromLegacyPolicyTools(raw);
   const lawPolicy = stripRuntimeConfig(raw);
-  lawPolicy.version = "0.52.0";
+  lawPolicy.version = "0.53.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
   const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
@@ -525,6 +615,9 @@ export async function formatConfigShow(workspaceRoot: string, legacyPolicyRaw?: 
     ["model.providers.codex-cli.enabled", String(result.config.model.providers["codex-cli"]?.enabled ?? false)],
     ["model.providers.openrouter.enabled", String(result.config.model.providers.openrouter?.enabled ?? false)],
     ["model.providers.openrouter.model", result.config.model.providers.openrouter?.model ?? "null"],
+    ["gateway.authorization.chats", String(result.config.gateway.authorization.chats.length)],
+    ["gateway.authorization.masterUser", result.config.gateway.authorization.masterUser ? "configured" : "none"],
+    ["gateway.authorization.roleBindings", String(result.config.gateway.authorization.roleBindings.length)],
     ["connectors.telegram.enabled", String(result.config.connectors.telegram.enabled)],
     ["connectors.telegram.allowedChatIds", String(result.config.connectors.telegram.allowedChatIds.length)],
     ["connectors.telegram.messageChunkChars", String(result.config.connectors.telegram.messageChunkChars)],

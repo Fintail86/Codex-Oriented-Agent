@@ -1,5 +1,13 @@
 import { AgentManager } from "./agent_manager.js";
 import {
+  authorizeGatewayInput,
+  formatGatewayAuthBlocked,
+  formatGatewayWhoami as formatGatewayActorWhoami,
+  isWhoamiInput,
+  shouldSendGatewayBlockNotice
+} from "./gateway_auth.js";
+import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
+import {
   createCodexAmendmentPendingCommand,
   applyPendingCommand,
   cancelPendingCommand,
@@ -45,6 +53,7 @@ export type GatewaySourceContext = {
   userId?: string;
   username?: string;
   firstName?: string;
+  displayName?: string;
 };
 
 export type GatewayChatState = {
@@ -72,6 +81,7 @@ export type GatewayMessageOptions = {
   now?: () => number;
   enqueueSessionRun?: (input: string, state: GatewayChatState) => Promise<GatewayMessageResult>;
   onRunProgress?: (event: RunProgressEvent) => Promise<void> | void;
+  gatewayRole?: GatewayRole;
 };
 
 export type GatewayMessageResult = {
@@ -89,24 +99,22 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   if (!input) {
     return done("Send /help for available commands.", state);
   }
-  const slashOwnerBlock = telegramSlashOwnerBlockReason(options, input);
-  if (slashOwnerBlock) {
-    return done(slashOwnerBlock, options.state);
+  const gatewayAuth = gatewayAuthBlockReason(options, input);
+  if (gatewayAuth) {
+    return done(gatewayAuth.output, gatewayAuth.state);
   }
-  const groupBlock = gatewayGroupBlockReason(options, input);
-  if (groupBlock) {
-    return done(groupBlock, state);
-  }
+  const gatewayRole = resolveGatewayRoleForOptions(options, input);
+  const authedOptions = gatewayRole ? { ...options, gatewayRole } : options;
   const staleSession = await clearMissingActiveSession(options.workspaceRoot, state);
   state = staleSession.state;
   if (staleSession.cleared && !input.startsWith("/") && !input.startsWith("#")) {
     return done(formatMissingActiveSession(staleSession.sessionId), state);
   }
   if (input.startsWith("/")) {
-    return handleSlashCommand({ ...options, input, state, now });
+    return handleSlashCommand({ ...authedOptions, input, state, now });
   }
   if (input.startsWith("#")) {
-    return handleHashCommand({ ...options, input, state, now });
+    return handleHashCommand({ ...authedOptions, input, state, now });
   }
   if (/^cosia\s+tool\s+grow(?:\s|$)/i.test(input)) {
     return done(formatTelegramCliToolGrowGuidance(input), state);
@@ -123,7 +131,7 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   if (options.enqueueSessionRun) {
     return options.enqueueSessionRun(input, state);
   }
-  return runGatewaySessionMessage({ ...options, input, state, now });
+  return runGatewaySessionMessage({ ...authedOptions, input, state, now });
 }
 
 async function runGatewaySessionMessage(options: GatewayMessageOptions & {
@@ -141,6 +149,8 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
     prompt: input,
     providerId: state.providerId,
     sourceChannel: "gateway",
+    gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
+    gatewayRole: options.gatewayRole,
     providerTimeoutAfterToolMs: options.source?.connector === "telegram" ? gatewayToolAssistedProviderTimeoutMs : undefined,
     runDeadlineMs: options.source?.connector === "telegram" ? gatewayRunJobDeadlineMs : undefined,
     promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
@@ -221,149 +231,53 @@ export function formatGatewayHelp(): string {
     "  /apply                Apply pending mutation preview.",
     "",
     "Notes:",
-    "  Telegram slash commands require a configured owner user id. Use /whoami, then set it locally.",
+    "  Gateway slash commands require a registered admin or master role. Use /whoami, then set Gateway auth locally.",
     "  # command shortcuts were removed. Use slash commands or plain natural language.",
     "",
     "Plain text is sent to the active COSIA session."
   ].join("\n");
 }
 
-type GatewayInputSafety = "read_only" | "state_change" | "mutation" | "session_run" | "unknown";
-
-function telegramSlashOwnerBlockReason(options: GatewayMessageOptions, input: string): string | undefined {
+function gatewayAuthBlockReason(options: GatewayMessageOptions, input: string): { output: string; state: GatewayChatState } | undefined {
   const source = options.source;
-  if (source?.connector !== "telegram" || !input.startsWith("/") || isGatewayWhoamiInput(input)) {
+  if (!source?.connector) {
     return undefined;
   }
-  const allowedUserIds = options.policy.connectors.telegram.allowedUserIds;
-  if (!source.userId) {
-    return formatTelegramSlashOwnerBlocked(source, "Telegram did not provide a sender user id.");
+  const actor = sourceToGatewayActor(source);
+  const decision = authorizeGatewayInput(options.policy, actor, input);
+  if (decision.allowed) {
+    return undefined;
   }
-  if (!allowedUserIds.includes(source.userId)) {
-    return formatTelegramSlashOwnerBlocked(source, "This Telegram user is not allowed to run slash commands.");
+  if (isTelegramGroupType(actor.chatType) && !input.startsWith("/")) {
+    return { output: "", state: options.state };
   }
-  return undefined;
+  if (!shouldSendGatewayBlockNotice(actor, decision.reason, options.policy.gateway.authorization.unknownBlockThrottleMs, options.now?.() ?? Date.now())) {
+    return { output: "", state: options.state };
+  }
+  return { output: formatGatewayAuthBlocked(actor, decision), state: options.state };
 }
 
-function gatewayGroupBlockReason(options: GatewayMessageOptions, input: string): string | undefined {
-  const source = options.source;
-  if (source?.connector !== "telegram" || !isTelegramGroupType(source.chatType)) {
+function resolveGatewayRoleForOptions(options: GatewayMessageOptions, input: string): GatewayRole | undefined {
+  if (!options.source?.connector) {
     return undefined;
   }
-  if (isGatewayWhoamiInput(input)) {
-    return undefined;
-  }
-
-  const safety = classifyGatewayInputSafety(input, options.workspaceRoot);
-  if (safety === "read_only") {
-    return undefined;
-  }
-
-  const config = options.policy.connectors.telegram;
-  if (config.groupMode === "read_only") {
-    return formatTelegramGroupBlocked(source, "Telegram group chats are read-only by default.");
-  }
-
-  if (safety === "unknown") {
-    return formatTelegramGroupBlocked(source, "Only recognized read-only or explicitly authorized group commands are allowed.");
-  }
-
-  if (safety === "mutation") {
-    if (!config.allowMutations) {
-      return formatTelegramGroupBlocked(source, "Telegram mutations are disabled by policy.");
-    }
-    if (!source.userId) {
-      return formatTelegramGroupBlocked(source, "Telegram did not provide a sender user id, so mutation approval is blocked.");
-    }
-    if (!config.mutationUserIds.includes(source.userId)) {
-      return formatTelegramGroupBlocked(source, "This Telegram user is not allowed to approve mutations.");
-    }
-    return undefined;
-  }
-
-  if (safety === "state_change" || safety === "session_run") {
-    if (!source.userId) {
-      return formatTelegramGroupBlocked(source, "Telegram did not provide a sender user id, so state-changing group interaction is blocked.");
-    }
-    if (!config.allowedUserIds.includes(source.userId)) {
-      return formatTelegramGroupBlocked(source, "This Telegram user is not allowed to run state-changing group interactions.");
-    }
-  }
-
-  return undefined;
+  const decision = authorizeGatewayInput(options.policy, sourceToGatewayActor(options.source), input);
+  return decision.allowed ? decision.role : undefined;
 }
 
-function classifyGatewayInputSafety(input: string, workspaceRoot: string): GatewayInputSafety {
-  if (input.startsWith("/")) {
-    if (isReadOnlySlashCommand(input)) return "read_only";
-    if (input === "/apply" || input === "/cancel" || input.startsWith("/review cleanup") || input.startsWith("/review promote ") || input.startsWith("/review discard ")) {
-      return "mutation";
-    }
-    if (input.startsWith("/new ") || input.startsWith("/use ") || input.startsWith("/tool grow ")) {
-      return "state_change";
-    }
-    return "unknown";
-  }
-  if (input.startsWith("#")) {
-    return "unknown";
-  }
-  return "session_run";
-}
-
-function isReadOnlySlashCommand(input: string): boolean {
-  return input === "/help"
-    || input === "/whoami"
-    || input === "/status"
-    || input === "/sessions"
-    || input === "/jobs"
-    || input === "/pending"
-    || input.startsWith("/job ")
-    || input === "/review"
-    || input === "/review memory"
-    || input === "/review skill"
-    || input === "/review stats"
-    || input === "/review next"
-    || input.startsWith("/review show ")
-    || input.startsWith("/review conflicts ");
+function sourceToGatewayActor(source: GatewaySourceContext): GatewayActor {
+  return {
+    connector: source.connector ?? "telegram",
+    chatId: source.chatId,
+    chatType: source.chatType,
+    userId: source.userId,
+    username: source.username,
+    displayName: source.displayName ?? source.firstName
+  };
 }
 
 function isTelegramGroupType(chatType: string | undefined): boolean {
   return Boolean(chatType && chatType !== "private");
-}
-
-function formatTelegramGroupBlocked(source: GatewaySourceContext, reason: string): string {
-  return [
-    "[BLOCKED] Telegram group safety gate.",
-    reason,
-    `Chat id: ${source.chatId ?? "unknown"}`,
-    `Chat type: ${source.chatType ?? "unknown"}`,
-    `User id: ${source.userId ?? "unknown"}`,
-    "",
-    "Use /whoami in Telegram to confirm ids.",
-    "",
-    "Local setup:",
-    source.chatId ? `  cosia gateway telegram set chat-id ${source.chatId}` : "  cosia gateway telegram set chat-id <chat-id>",
-    source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>",
-    source.userId ? `  cosia gateway telegram set mutation-user-id ${source.userId}` : "  cosia gateway telegram set mutation-user-id <user-id>",
-    "  cosia gateway telegram set group-mode allowed-users"
-  ].join("\n");
-}
-
-function formatTelegramSlashOwnerBlocked(source: GatewaySourceContext, reason: string): string {
-  return [
-    "[BLOCKED] Telegram slash command owner gate.",
-    reason,
-    "Only configured Telegram owner user ids can run slash commands.",
-    `Chat id: ${source.chatId ?? "unknown"}`,
-    `Chat type: ${source.chatType ?? "unknown"}`,
-    `User id: ${source.userId ?? "unknown"}`,
-    "",
-    "Use /whoami in Telegram to confirm ids.",
-    "",
-    "Local setup:",
-    source.chatId ? `  cosia gateway telegram set chat-id ${source.chatId}` : "  cosia gateway telegram set chat-id <chat-id>",
-    source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>"
-  ].join("\n");
 }
 
 async function handleSlashCommand(options: GatewayMessageOptions & {
@@ -750,27 +664,11 @@ function formatTelegramCliToolGrowGuidance(input: string): string {
 }
 
 export function isGatewayWhoamiInput(input: string): boolean {
-  const normalized = input.trim().toLowerCase();
-  return normalized === "/whoami";
+  return isWhoamiInput(input);
 }
 
 export function formatGatewayWhoami(source: GatewaySourceContext): string {
-  const chatId = source.chatId ?? "unknown";
-  const userId = source.userId ?? "unknown";
-  return [
-    "Telegram identity",
-    `Chat id: ${chatId}`,
-    `Chat type: ${source.chatType ?? "private"}`,
-    `User id: ${userId}`,
-    source.username ? `Username: @${source.username}` : undefined,
-    source.firstName ? `Name: ${source.firstName}` : undefined,
-    "",
-    "Local setup hints:",
-    `  cosia gateway telegram set chat-id ${chatId}`,
-    source.userId ? `  cosia gateway telegram set user-id ${source.userId}` : "  cosia gateway telegram set user-id <user-id>",
-    source.userId ? `  cosia gateway telegram set mutation-user-id ${source.userId}` : "  cosia gateway telegram set mutation-user-id <user-id>",
-    "  cosia gateway telegram set group-mode allowed-users"
-  ].filter(Boolean).join("\n");
+  return formatGatewayActorWhoami(sourceToGatewayActor(source));
 }
 
 async function applyGatewayPending(options: GatewayMessageOptions & {
@@ -837,7 +735,9 @@ async function buildCatalogContext(options: GatewayMessageOptions & {
     previewScope: {
       chatId: options.chatId,
       sessionId: session.id
-    }
+    },
+    gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
+    gatewayRole: options.gatewayRole
   };
 }
 
