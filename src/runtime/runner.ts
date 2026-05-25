@@ -25,6 +25,8 @@ type RunOptions = {
   requireTools?: boolean;
   provider?: ModelProvider;
   providerTimeoutMs?: number;
+  providerTimeoutAfterToolMs?: number;
+  runDeadlineMs?: number;
   promptStaticBlocks?: PromptBlock[];
   refreshReferenceMemory?: boolean;
   refreshReferenceMemoryAfterRun?: boolean;
@@ -97,6 +99,25 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   if (!provider) {
     throw new Error(`Provider ${providerId} was not created.`);
   }
+  const runStartedAt = Date.now();
+  const providerForStep = (hasToolResult: boolean): ModelProvider => {
+    if (options.provider) return options.provider;
+    const timeoutMs = hasToolResult
+      ? options.providerTimeoutAfterToolMs ?? options.providerTimeoutMs
+      : options.providerTimeoutMs;
+    if (timeoutMs === options.providerTimeoutMs) {
+      return provider!;
+    }
+    return createProvider(providerId, workspaceRoot, {
+      policy,
+      timeoutMs
+    });
+  };
+  const assertRunDeadline = () => {
+    if (!options.runDeadlineMs) return;
+    if (Date.now() - runStartedAt <= options.runDeadlineMs) return;
+    throw new ProviderError("timeout", `Run timed out after ${options.runDeadlineMs}ms.`);
+  };
 
   const toolResults: string[] = [];
   const toolNames: ToolName[] = [];
@@ -109,6 +130,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   let toolCallCount = 0;
 
   for (let depth = 0; depth < maxModelAttempts; depth += 1) {
+    assertRunDeadline();
     const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
     const forceFinal = remainingToolCalls === 0;
     options.onEvent?.(`model step ${depth + 1}/${maxModelAttempts}`);
@@ -145,8 +167,9 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       status: "waiting_for_provider",
       currentStep: `model step ${depth + 1}/${maxModelAttempts}`
     });
-    const output = await complete(provider, prompt, session.id).catch((error: unknown) => {
-      throw new Error(formatProviderFailure(error, provider.id));
+    const stepProvider = providerForStep(toolResults.length > 0);
+    const output = await complete(stepProvider, prompt, session.id).catch((error: unknown) => {
+      throw new Error(formatProviderFailure(error, stepProvider.id));
     });
     lastStep = output.step;
     if (output.step.type === "final") {

@@ -5437,10 +5437,10 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    await waitForCondition(() => sent.some((message) => message.text.includes("[Fallback] LLM 최종 응답이 timeout")));
+    await waitForCondition(() => sent.some((message) => message.text.includes("[PARTIAL SUCCESS] 도구 조회는 성공했지만 LLM 최종 응답이 timeout")));
     expect(sent.at(-1)?.text).toContain("Memory pending:");
     const jobs = await new RunJobLedger(root).list({ includeTerminal: true });
-    expect(jobs.some((job) => job.status === "failed" && job.failureKind === "timeout" && job.finalOutputSummary?.includes("[Fallback]"))).toBe(true);
+    expect(jobs.some((job) => job.status === "failed" && job.failureKind === "timeout" && job.finalOutputSummary?.includes("[PARTIAL SUCCESS]"))).toBe(true);
   });
 
   it("repairs and resets stale Telegram gateway state without connector settings", async () => {

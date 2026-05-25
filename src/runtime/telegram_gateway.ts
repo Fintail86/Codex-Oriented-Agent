@@ -803,7 +803,7 @@ function formatTimeoutFallback(toolResultSummary: string): string {
   const parsed = parseReviewInboxToolResult(toolResultSummary);
   if (parsed) {
     return [
-      "[Fallback] LLM 최종 응답이 timeout되어, COSIA가 확보한 중간 결과만 요약합니다.",
+      "[PARTIAL SUCCESS] 도구 조회는 성공했지만 LLM 최종 응답이 timeout되어, COSIA가 확보한 중간 결과만 요약합니다.",
       "",
       "확인된 결과:",
       `- Memory pending: ${parsed.memoryPending}`,
@@ -812,7 +812,7 @@ function formatTimeoutFallback(toolResultSummary: string): string {
     ].join("\n");
   }
   return [
-    "[Fallback] LLM 최종 응답이 timeout되어, COSIA가 확보한 중간 결과만 요약합니다.",
+    "[PARTIAL SUCCESS] 도구 조회는 성공했지만 LLM 최종 응답이 timeout되어, COSIA가 확보한 중간 결과만 요약합니다.",
     "",
     toolResultSummary
   ].join("\n");

@@ -35,6 +35,9 @@ import type { PromptBlock } from "./prompt_builder.js";
 import type { RunProgressEvent } from "./runner.js";
 import type { SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./types.js";
 
+const gatewayToolAssistedProviderTimeoutMs = 300_000;
+const gatewayRunJobDeadlineMs = 420_000;
+
 export type GatewaySourceContext = {
   connector?: "telegram";
   chatId?: string;
@@ -138,6 +141,8 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
     prompt: input,
     providerId: state.providerId,
     sourceChannel: "gateway",
+    providerTimeoutAfterToolMs: options.source?.connector === "telegram" ? gatewayToolAssistedProviderTimeoutMs : undefined,
+    runDeadlineMs: options.source?.connector === "telegram" ? gatewayRunJobDeadlineMs : undefined,
     promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
     forceOverwriteApproval: options.source?.connector === "telegram",
     stopAfterOverwriteApprovalRequired: true,
