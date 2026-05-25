@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { approveOverwrite } from "./approval_gate.js";
 import { AgentManager } from "./agent_manager.js";
+import { withSessionLock } from "./gateway_locks.js";
 import { formatMemoryReviewSummary, MemoryManager } from "./memory_manager.js";
 import { formatProviderFailure, ProviderError } from "./model/provider_errors.js";
 import { createProvider, resolveProviderSelection } from "./model/provider_registry.js";
@@ -36,9 +37,17 @@ type RunOptions = {
   stopAfterCodexAmendmentRequired?: boolean;
   onToolGrowthRequested?: (request: ToolGrowthRequest) => Promise<void> | void;
   onToolGrowthDecision?: (decision: ToolGrowthDecision) => Promise<void> | void;
+  onProgress?: (event: RunProgressEvent) => Promise<void> | void;
   manualSkillIds?: string[];
   agentId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
+};
+
+export type RunProgressEvent = {
+  status: "running" | "waiting_for_provider" | "waiting_for_tool" | "waiting_for_approval";
+  currentStep: string;
+  toolName?: string;
+  toolResultSummary?: string;
 };
 
 export async function runSession(workspaceRoot: string, options: RunOptions): Promise<string> {
@@ -132,6 +141,10 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       estimatedTokens: promptResult.manifest.estimatedTokens,
       timestamp: promptResult.manifest.timestamp
     });
+    await options.onProgress?.({
+      status: "waiting_for_provider",
+      currentStep: `model step ${depth + 1}/${maxModelAttempts}`
+    });
     const output = await complete(provider, prompt, session.id).catch((error: unknown) => {
       throw new Error(formatProviderFailure(error, provider.id));
     });
@@ -198,6 +211,11 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       );
       continue;
     }
+    await options.onProgress?.({
+      status: "waiting_for_tool",
+      currentStep: `tool ${output.step.tool}`,
+      toolName: output.step.tool
+    });
     const result = await tools.execute(output.step.tool, output.step.args, {
       workspaceRoot,
       allowedTools: agent.allowedTools,
@@ -220,7 +238,14 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     toolCallCount += 1;
     options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
     toolNames.push(output.step.tool);
-    toolResults.push(`Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`);
+    const toolResultText = `Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`;
+    toolResults.push(toolResultText);
+    await options.onProgress?.({
+      status: overwriteApprovalRequired || codexAmendmentRequired ? "waiting_for_approval" : "running",
+      currentStep: `tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`,
+      toolName: output.step.tool,
+      toolResultSummary: toolResultText
+    });
     if (overwriteApprovalRequired && options.stopAfterOverwriteApprovalRequired) {
       finalContent = "File overwrite approval is pending. The requested file change has not been applied yet.";
       break;
@@ -235,9 +260,19 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
     throw new Error(`Run did not produce a final answer after ${maxToolCalls} tool calls. Last step: ${JSON.stringify(lastStep)}`);
   }
 
-  await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames, agent.id));
-  if (options.refreshReferenceMemoryAfterRun ?? options.refreshReferenceMemory ?? true) {
-    await memory.writeReferenceMemory(session, options.prompt, agent.id);
+  const writeFinalContext = async () => {
+    await sessions.appendContext(session.id, contextEntry(options.prompt, finalContent, toolNames, agent.id));
+    if (options.refreshReferenceMemoryAfterRun ?? options.refreshReferenceMemory ?? true) {
+      await memory.writeReferenceMemory(session, options.prompt, agent.id);
+    }
+  };
+  if (options.sourceChannel === "gateway") {
+    await withSessionLock(workspaceRoot, session.id, {
+      owner: `run:${runId}`,
+      ttlMs: 30_000
+    }, writeFinalContext);
+  } else {
+    await writeFinalContext();
   }
   return finalContent;
 }

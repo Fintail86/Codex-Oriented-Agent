@@ -18,6 +18,11 @@ import { formatGatewayWhoami, handleGatewayMessage, isGatewayWhoamiInput, type G
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
+import {
+  formatRunJobAccepted,
+  RunJobLedger,
+  type RunJobRecord
+} from "./run_jobs.js";
 
 export type TelegramTokenResolution = {
   token?: string;
@@ -136,6 +141,7 @@ export type TelegramMessageSender = {
 };
 
 const TELEGRAM_TYPING_REFRESH_MS = 4000;
+const activeTelegramSessionWorkers = new Set<string>();
 
 class TelegramApiClient {
   private readonly fetchImpl: FetchLike;
@@ -337,6 +343,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
       pid: process.pid,
       startedAt: new Date().toISOString()
     });
+    await new RunJobLedger(workspaceRoot).interruptActiveJobs("gateway_start_interrupted_previous_jobs");
     await appendTelegramLog(workspaceRoot, "start", { pid: process.pid });
     let state = await loadTelegramGatewayState(workspaceRoot);
     let consecutiveFailures = 0;
@@ -417,6 +424,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
       }
     }
   } finally {
+    await new RunJobLedger(workspaceRoot).interruptActiveJobs("gateway_stopped");
     await cleanup();
     await appendTelegramLog(workspaceRoot, "stop", {});
   }
@@ -460,7 +468,20 @@ export async function processTelegramUpdate(
         owner: options.owner,
         chatId,
         source,
-        now: options.now
+        now: options.now,
+        enqueueSessionRun: async (runInput, runState) => enqueueTelegramRunJob({
+          workspaceRoot,
+          policy,
+          client,
+          chatId,
+          input: runInput,
+          state,
+          chatState: runState,
+          providerId: runState.providerId ?? options.providerId,
+          owner: options.owner,
+          source,
+          now: options.now
+        })
       });
       chatState = result.state;
       for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
@@ -507,7 +528,20 @@ export async function processTelegramUpdate(
         owner: options.owner,
         chatId,
         source,
-        now: options.now
+        now: options.now,
+        enqueueSessionRun: async (runInput, runState) => enqueueTelegramRunJob({
+          workspaceRoot,
+          policy,
+          client,
+          chatId,
+          input: runInput,
+          state,
+          chatState: runState,
+          providerId: runState.providerId ?? options.providerId,
+          owner: options.owner,
+          source,
+          now: options.now
+        })
       });
       chatState = result.state;
       for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
@@ -523,6 +557,302 @@ export async function processTelegramUpdate(
       updatedAt: new Date().toISOString()
     };
   });
+}
+
+type EnqueueTelegramRunJobInput = {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  chatId: string;
+  input: string;
+  state: TelegramGatewayState;
+  chatState: GatewayChatState;
+  providerId: string;
+  owner: string;
+  source: GatewaySourceContext;
+  now?: () => number;
+};
+
+async function enqueueTelegramRunJob(input: EnqueueTelegramRunJobInput): Promise<{ output: string; state: GatewayChatState }> {
+  if (!input.chatState.activeSessionId) {
+    return {
+      output: "No active session. Use /sessions, /use <session-id>, or /new <goal>.",
+      state: input.chatState
+    };
+  }
+  const job = await new RunJobLedger(input.workspaceRoot).create({
+    sessionId: input.chatState.activeSessionId,
+    providerId: input.providerId,
+    request: input.input,
+    source: {
+      channel: "telegram",
+      chatId: input.chatId,
+      chatType: input.source.chatType,
+      userId: input.source.userId,
+      username: input.source.username,
+      firstName: input.source.firstName
+    }
+  });
+  startTelegramSessionWorker({
+    workspaceRoot: input.workspaceRoot,
+    policy: input.policy,
+    client: input.client,
+    state: input.state,
+    sessionId: job.sessionId,
+    fallbackProviderId: input.providerId,
+    owner: input.owner,
+    now: input.now
+  });
+  return {
+    output: formatRunJobAccepted(job),
+    state: input.chatState
+  };
+}
+
+function startTelegramSessionWorker(options: {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  state: TelegramGatewayState;
+  sessionId: string;
+  fallbackProviderId: string;
+  owner: string;
+  now?: () => number;
+}): void {
+  const key = `${options.workspaceRoot}:${options.sessionId}`;
+  if (activeTelegramSessionWorkers.has(key)) {
+    return;
+  }
+  activeTelegramSessionWorkers.add(key);
+  void processTelegramSessionQueue(options).finally(() => {
+    activeTelegramSessionWorkers.delete(key);
+  });
+}
+
+async function processTelegramSessionQueue(options: {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  state: TelegramGatewayState;
+  sessionId: string;
+  fallbackProviderId: string;
+  owner: string;
+  now?: () => number;
+}): Promise<void> {
+  const ledger = new RunJobLedger(options.workspaceRoot);
+  for (;;) {
+    const job = await ledger.nextQueuedForSession(options.sessionId);
+    if (!job) {
+      return;
+    }
+    await runTelegramJob({ ...options, job });
+  }
+}
+
+async function runTelegramJob(options: {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  state: TelegramGatewayState;
+  job: RunJobRecord;
+  fallbackProviderId: string;
+  owner: string;
+  now?: () => number;
+}): Promise<void> {
+  const ledger = new RunJobLedger(options.workspaceRoot);
+  const chatId = options.job.source.chatId;
+  const stopTyping = chatId ? startTelegramTyping(options.client, chatId) : () => {};
+  await ledger.update(options.job.id, {
+    status: "running",
+    currentStep: "starting"
+  });
+  try {
+    const providerId = options.job.providerId ?? options.fallbackProviderId;
+    const source: GatewaySourceContext = {
+      connector: "telegram",
+      chatId,
+      chatType: options.job.source.chatType ?? "private",
+      userId: options.job.source.userId,
+      username: options.job.source.username,
+      firstName: options.job.source.firstName
+    };
+    const chatState = latestTelegramChatState(options.state, options.job);
+    const result = await handleGatewayMessage({
+      workspaceRoot: options.workspaceRoot,
+      input: options.job.request,
+      state: chatState,
+      policy: options.policy,
+      providerId,
+      owner: options.owner,
+      chatId,
+      source,
+      now: options.now,
+      onRunProgress: async (event) => {
+        await ledger.update(options.job.id, {
+          status: event.status,
+          currentStep: event.currentStep,
+          lastToolResultSummary: event.toolResultSummary
+        });
+      }
+    });
+    const latest = await ledger.get(options.job.id);
+    if (latest?.cancelRequestedAt) {
+      await ledger.update(options.job.id, {
+        status: "cancelled",
+        currentStep: "cancelled after provider/tool completion"
+      });
+      return;
+    }
+    await persistTelegramChatState(options.workspaceRoot, options.state, chatId, result.state);
+    await ledger.update(options.job.id, {
+      status: "succeeded",
+      currentStep: "completed",
+      finalOutputSummary: result.output
+    });
+    if (chatId) {
+      for (const chunk of chunkTelegramMessage(result.output, options.policy.connectors.telegram.messageChunkChars)) {
+        await options.client.sendMessage(chatId, chunk, telegramReplyOptions(options.job.request, result.output));
+      }
+    }
+  } catch (error) {
+    const latest = await ledger.get(options.job.id);
+    if (latest?.cancelRequestedAt) {
+      await ledger.update(options.job.id, {
+        status: "cancelled",
+        currentStep: "cancelled after provider/tool failure"
+      });
+      return;
+    }
+    const message = (error as Error).message;
+    const fallback = isTimeoutFailure(message) && latest?.lastToolResultSummary
+      ? formatTimeoutFallback(latest.lastToolResultSummary)
+      : undefined;
+    await ledger.update(options.job.id, {
+      status: "failed",
+      currentStep: fallback ? "fallback summary sent" : "failed",
+      failureKind: classifyRunJobFailure(message),
+      errorSummary: message,
+      finalOutputSummary: fallback
+    });
+    if (chatId) {
+      const output = fallback ?? formatTelegramUpdateFailure(message);
+      for (const chunk of chunkTelegramMessage(output, options.policy.connectors.telegram.messageChunkChars)) {
+        await options.client.sendMessage(chatId, chunk);
+      }
+    }
+  } finally {
+    stopTyping();
+  }
+}
+
+function latestTelegramChatState(state: TelegramGatewayState, job: RunJobRecord): GatewayChatState {
+  const chatId = job.source.chatId;
+  const existing = chatId ? state.chats[chatId] : undefined;
+  return {
+    providerId: job.providerId ?? existing?.providerId,
+    ...existing,
+    activeSessionId: existing?.activeSessionId ?? job.sessionId
+  };
+}
+
+async function persistTelegramChatState(
+  workspaceRoot: string,
+  stateRef: TelegramGatewayState,
+  chatId: string | undefined,
+  chatState: GatewayChatState
+): Promise<void> {
+  if (!chatId) {
+    return;
+  }
+  const latest = await loadTelegramGatewayState(workspaceRoot);
+  const current = latest.chats[chatId] ?? stateRef.chats[chatId] ?? {};
+  const nextChat = {
+    ...current,
+    ...chatState,
+    activeSessionId: current.activeSessionId ?? chatState.activeSessionId,
+    updatedAt: new Date().toISOString()
+  };
+  const nextState = {
+    ...latest,
+    chats: {
+      ...latest.chats,
+      [chatId]: nextChat
+    },
+    updatedAt: new Date().toISOString()
+  };
+  stateRef.chats = {
+    ...stateRef.chats,
+    [chatId]: nextChat
+  };
+  stateRef.updatedAt = nextState.updatedAt;
+  await saveTelegramGatewayState(workspaceRoot, nextState);
+}
+
+function classifyRunJobFailure(message: string) {
+  if (isTimeoutFailure(message)) return "timeout" as const;
+  if (/tool/i.test(message)) return "tool_error" as const;
+  if (/provider/i.test(message)) return "provider_error" as const;
+  return "unknown" as const;
+}
+
+function isTimeoutFailure(message: string): boolean {
+  return /timeout|timed out/i.test(message);
+}
+
+function formatTimeoutFallback(toolResultSummary: string): string {
+  const parsed = parseReviewInboxToolResult(toolResultSummary);
+  if (parsed) {
+    return [
+      "[Fallback] LLM 최종 응답이 timeout되어, COSIA가 확보한 중간 결과만 요약합니다.",
+      "",
+      "확인된 결과:",
+      `- Memory pending: ${parsed.memoryPending}`,
+      `- Skill pending: ${parsed.skillPending}`,
+      ...parsed.items.map((item) => `- ${item.id} ${item.risk}: ${item.summary}`)
+    ].join("\n");
+  }
+  return [
+    "[Fallback] LLM 최종 응답이 timeout되어, COSIA가 확보한 중간 결과만 요약합니다.",
+    "",
+    toolResultSummary
+  ].join("\n");
+}
+
+function parseReviewInboxToolResult(toolResultSummary: string): {
+  memoryPending: number;
+  skillPending: number;
+  items: Array<{ id: string; risk: string; summary: string }>;
+} | undefined {
+  const okMarker = "\nOK: true\n";
+  const markerStart = toolResultSummary.indexOf(okMarker);
+  const resultText = markerStart >= 0
+    ? toolResultSummary.slice(markerStart + okMarker.length)
+    : toolResultSummary;
+  const start = resultText.indexOf("{");
+  if (start < 0) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(resultText.slice(start)) as {
+      memoryPending?: number;
+      skillPending?: number;
+      items?: Array<{ id?: string; risk?: string; summary?: string }>;
+    };
+    if (typeof parsed.memoryPending !== "number" || typeof parsed.skillPending !== "number") {
+      return undefined;
+    }
+    return {
+      memoryPending: parsed.memoryPending,
+      skillPending: parsed.skillPending,
+      items: (parsed.items ?? []).map((item) => ({
+        id: item.id ?? "unknown",
+        risk: item.risk ?? "unknown",
+        summary: item.summary ?? ""
+      }))
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export async function loadTelegramGatewayState(workspaceRoot: string): Promise<TelegramGatewayState> {

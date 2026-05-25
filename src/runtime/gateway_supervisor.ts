@@ -15,6 +15,7 @@ import {
 import type { FetchLike } from "./model/providers/openai_compatible_provider.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
+import { RunJobLedger } from "./run_jobs.js";
 import {
   checkTelegramGateway,
   inspectTelegramGatewayState,
@@ -198,6 +199,9 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const state = await loadTelegramGatewayState(workspaceRoot);
   const telegramStateInspection = await inspectTelegramGatewayState(workspaceRoot);
+  const runJobs = await new RunJobLedger(workspaceRoot).list({ includeTerminal: true });
+  const activeRunJobs = runJobs.filter((job) => !["succeeded", "failed", "cancelled", "interrupted"].includes(job.status));
+  const interruptedRunJobs = runJobs.filter((job) => job.status === "interrupted");
   const lock = await readGatewayProcessLock(workspaceRoot);
   const legacyTelegramLock = await readLegacyTelegramProcessLock(workspaceRoot);
   const stopRequest = await readGatewayStopRequest(workspaceRoot);
@@ -229,6 +233,8 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
         nextOffset: state.nextOffset,
         failureCount: state.failureCount,
         lastFailure: state.lastFailure,
+        activeRunJobs: activeRunJobs.length,
+        interruptedRunJobs: interruptedRunJobs.length,
         legacyProcessLock: Boolean(legacyTelegramLock),
         legacyLockStale,
         legacyLock: legacyTelegramLock
@@ -263,6 +269,8 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `    Next offset: ${state.nextOffset ?? "none"}`,
     `    Failure count: ${state.failureCount}`,
     state.lastFailure ? `    Last failure: ${state.lastFailure}` : undefined,
+    `    Active run jobs: ${activeRunJobs.length}`,
+    `    Interrupted run jobs: ${interruptedRunJobs.length}`,
     legacyTelegramLock ? `    Legacy lock: present${legacyLockStale ? " stale" : ""}` : undefined
   ].filter(Boolean).join("\n");
 }

@@ -10,13 +10,14 @@ import {
   type CommandCatalogContext,
   type PendingCommand
 } from "./runtime_command_executor.js";
-import { withSessionLock } from "./gateway_locks.js";
 import { MemoryManager } from "./memory_manager.js";
 import type { PolicyConfig } from "./policy_manager.js";
+import { formatRunJobCancel, formatRunJobDetail, formatRunJobList, RunJobLedger } from "./run_jobs.js";
 import { getStatusReport, formatStatusReport } from "./status_report.js";
 import { formatReviewInbox, formatReviewNext, formatReviewStats, ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
+import { withSessionLock } from "./gateway_locks.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolAcquisitionManager } from "./tool_acquisition.js";
 import {
@@ -31,6 +32,7 @@ import {
   type ToolGrowthRoutine
 } from "./tool_growth.js";
 import type { PromptBlock } from "./prompt_builder.js";
+import type { RunProgressEvent } from "./runner.js";
 import type { SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./types.js";
 
 export type GatewaySourceContext = {
@@ -65,6 +67,8 @@ export type GatewayMessageOptions = {
   chatId?: string;
   source?: GatewaySourceContext;
   now?: () => number;
+  enqueueSessionRun?: (input: string, state: GatewayChatState) => Promise<GatewayMessageResult>;
+  onRunProgress?: (event: RunProgressEvent) => Promise<void> | void;
 };
 
 export type GatewayMessageResult = {
@@ -113,13 +117,23 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     }
     return done(formatPlainApprovalNeedsApply(state.pendingCommand), state);
   }
+  if (options.enqueueSessionRun) {
+    return options.enqueueSessionRun(input, state);
+  }
+  return runGatewaySessionMessage({ ...options, input, state, now });
+}
+
+async function runGatewaySessionMessage(options: GatewayMessageOptions & {
+  input: string;
+  state: GatewayChatState;
+  now: () => number;
+}): Promise<GatewayMessageResult> {
+  const { input, state, now } = options;
   let pendingOverwrite: PendingCommand | undefined;
   let pendingCodexAmendment: PendingCommand | undefined;
   let pendingToolGrowthRequest: PendingToolGrowthRequest | undefined;
   let toolGrowthDecision: ToolGrowthDecision | undefined;
-  const output = await withSessionLock(options.workspaceRoot, state.activeSessionId, {
-    owner: options.owner
-  }, async () => runSession(options.workspaceRoot, {
+  const output = await runSession(options.workspaceRoot, {
     sessionId: state.activeSessionId!,
     prompt: input,
     providerId: state.providerId,
@@ -157,8 +171,9 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     onToolGrowthDecision: (decision) => {
       toolGrowthDecision = decision;
     },
+    onProgress: options.onRunProgress,
     onEvent: () => undefined
-  }));
+  });
   if (pendingCodexAmendment) {
     return done(pendingCodexAmendment.preview, touch({ ...state, pendingCommand: pendingCodexAmendment }));
   }
@@ -189,6 +204,9 @@ export function formatGatewayHelp(): string {
     "  /sessions             List sessions.",
     "  /use <session-id>     Select active session for this chat.",
     "  /new <goal>           Create a session with the default agent.",
+    "  /jobs                 Show active run jobs.",
+    "  /job <job-id>         Show a run job.",
+    "  /cancel <job-id>      Cancel a run job.",
     "  /review               Show memory/skill review inbox.",
     "  /review memory|skill  Filter review inbox.",
     "  /tool grow <request>  Start a guided reusable-tool routine.",
@@ -292,7 +310,9 @@ function isReadOnlySlashCommand(input: string): boolean {
     || input === "/whoami"
     || input === "/status"
     || input === "/sessions"
+    || input === "/jobs"
     || input === "/pending"
+    || input.startsWith("/job ")
     || input === "/review"
     || input === "/review memory"
     || input === "/review skill"
@@ -358,6 +378,25 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
   }
   if (input === "/sessions") {
     return done(formatGatewaySessions(await new SessionManager(options.workspaceRoot).listSessions(), state.activeSessionId), state);
+  }
+  if (input === "/jobs") {
+    const jobs = await new RunJobLedger(options.workspaceRoot).list({
+      chatId: options.chatId,
+      sessionId: state.activeSessionId,
+      includeTerminal: false
+    });
+    return done(formatRunJobList(jobs), state);
+  }
+  if (input.startsWith("/job ")) {
+    const jobId = input.slice("/job ".length).trim();
+    const job = await new RunJobLedger(options.workspaceRoot).get(jobId);
+    return done(job ? formatRunJobDetail(job) : `Run job not found: ${jobId}`, state);
+  }
+  if (input.startsWith("/cancel ")) {
+    const jobId = input.slice("/cancel ".length).trim();
+    const ledger = new RunJobLedger(options.workspaceRoot);
+    const job = await ledger.requestCancel(jobId);
+    return done(formatRunJobCancel(job), state);
   }
   if (input.startsWith("/use ")) {
     const sessionId = input.slice("/use ".length).trim();

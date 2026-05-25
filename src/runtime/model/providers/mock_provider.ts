@@ -1,4 +1,5 @@
 import { parseModelOutput } from "../model_provider.js";
+import { ProviderError } from "../provider_errors.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
 
 const toolResultPattern = /^Tool: ([a-zA-Z0-9_.-]+)/gm;
@@ -12,6 +13,9 @@ export class MockProvider implements ModelProvider {
 
   async complete(input: ModelInput): Promise<ModelOutput> {
     const normalizedPrompt = input.prompt.toLowerCase();
+    if (input.prompt.includes("[MOCK_SLOW_FINAL]")) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
     if (input.prompt.includes("# BEGIN PENDING TOOL GROWTH REQUEST")) {
       return parseModelOutput(JSON.stringify({
         type: "final",
@@ -67,6 +71,16 @@ export class MockProvider implements ModelProvider {
           summary: "Inspect pending memory candidates, risk, conflicts, and next actions without mutating files, approvals, memory, tools, policy, or connectors.",
           readOnly: true
         }
+      }));
+    }
+    if (input.prompt.includes("[MOCK_FINAL_TIMEOUT_AFTER_REVIEW_TOOL]") && input.prompt.includes("Tool: review_inbox_read")) {
+      throw new ProviderError("timeout", "Mock provider timed out after review_inbox_read.");
+    }
+    if (input.prompt.includes("[MOCK_FINAL_TIMEOUT_AFTER_REVIEW_TOOL]") && !input.prompt.includes("Tool: review_inbox_read")) {
+      return parseModelOutput(JSON.stringify({
+        type: "tool_call",
+        tool: "review_inbox_read",
+        args: { filter: "memory" }
       }));
     }
     if (normalizedPrompt.includes("call read_file on a relevant path before returning final") && !input.prompt.includes("Tool: read_file")) {

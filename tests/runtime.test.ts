@@ -38,6 +38,7 @@ import { recommendStartSession, sessionFromChoice } from "../src/runtime/start_f
 import { getStatusReport } from "../src/runtime/status_report.js";
 import { classifyRuntimeBoundaryChange, classifyWritePathBoundary } from "../src/runtime/system_boundary.js";
 import { codexTemplates } from "../src/runtime/templates.js";
+import { RunJobLedger } from "../src/runtime/run_jobs.js";
 import {
   checkTelegramGateway,
   formatTelegramCheck,
@@ -114,6 +115,15 @@ async function initializedWorkspace(): Promise<string> {
   return root;
 }
 
+async function waitForCondition(predicate: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await predicate()).toBe(true);
+}
+
 async function writeRuntimeLocal(root: string, value: unknown): Promise<void> {
   await mkdir(join(root, "config"), { recursive: true });
   await writeFile(runtimeLocalPath(root), `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -170,7 +180,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.51.0\"");
+    expect(policyJson).toContain("\"version\": \"0.52.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -1492,7 +1502,7 @@ describe("policy core", () => {
 
     const policyPath = join(root, "codex", "POLICY.json");
     const policy = JSON.parse(await readFile(policyPath, "utf8")) as Record<string, unknown>;
-    policy.version = "0.51.0-policy-amended";
+    policy.version = "0.52.0-policy-amended";
     const policyAmendment = await ledger.propose({
       targetPath: "codex/POLICY.json",
       proposedContent: `${JSON.stringify(policy, null, 2)}\n`,
@@ -1500,8 +1510,8 @@ describe("policy core", () => {
       sourceChannel: "cli"
     });
     await ledger.apply(policyAmendment.id);
-    expect(await readFile(policyPath, "utf8")).toContain("0.51.0-policy-amended");
-    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.51.0-policy-amended");
+    expect(await readFile(policyPath, "utf8")).toContain("0.52.0-policy-amended");
+    expect(await readFile(join(root, "codex", "POLICY.md"), "utf8")).toContain("0.52.0-policy-amended");
   });
 
   it("summarizes durable pending approvals and requires explicit top-level apply", async () => {
@@ -3980,7 +3990,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.51.0");
+    expect(emptyReport.version).toBe("0.52.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4667,6 +4677,71 @@ describe("status and listing", () => {
     expect(chunks[1]).toContain("[continued 2/");
   });
 
+  it("enqueues Telegram session runs and keeps job status commands responsive", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Async gateway job");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_SLOW_FINAL] hello"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
+    const jobId = sent.at(-1)?.text.match(/Job: (job_[a-f0-9]+)/)?.[1];
+    expect(jobId).toBeTruthy();
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "/jobs"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain(jobId);
+
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${session.id}.`)));
+    const job = await new RunJobLedger(root).get(jobId!);
+    expect(job?.status).toBe("succeeded");
+  });
+
   it("keeps Telegram groups read-only by default and requires user-level mutation authorization", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
@@ -4726,7 +4801,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.51.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.52.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
       ...state,
@@ -4816,7 +4891,9 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("[PREVIEW] File overwrite requires approval.");
+    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
+    await waitForCondition(() => sent.some((message) => message.text.includes("[PREVIEW] File overwrite requires approval.")));
+    state = await loadTelegramGatewayState(root);
     expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
 
     state = await processTelegramUpdate(root, allowedGroupPolicy, sender, state, {
@@ -4994,7 +5071,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.51.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.52.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
@@ -5117,7 +5194,9 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("Should I start the tool creation routine?");
+    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
+    await waitForCondition(() => sent.some((message) => message.text.includes("Should I start the tool creation routine?")));
+    state = await loadTelegramGatewayState(root);
     expect(state.chats["123"]?.pendingToolGrowthRequest?.capabilityName).toBe("memory_promotion_queue_read");
     expect(state.chats["123"]?.currentToolGrowthRoutineId).toBeUndefined();
 
@@ -5133,6 +5212,8 @@ describe("status and listing", () => {
       owner: "test"
     });
 
+    await waitForCondition(() => sent.some((message) => message.text.includes("Tool growth routine created:")));
+    state = await loadTelegramGatewayState(root);
     const routineId = state.chats["123"]?.currentToolGrowthRoutineId;
     expect(routineId).toMatch(/^grow_/);
     expect(state.chats["123"]?.pendingToolGrowthRequest).toBeUndefined();
@@ -5189,6 +5270,9 @@ describe("status and listing", () => {
       owner: "test"
     });
 
+    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
+    await waitForCondition(() => sent.some((message) => message.text.includes("[PREVIEW] File overwrite requires approval.")));
+    state = await loadTelegramGatewayState(root);
     expect(sent.at(-1)?.text).toContain("[PREVIEW] File overwrite requires approval.");
     expect(sent.at(-1)?.text).toContain("/apply");
     expect(state.chats["123"]?.pendingCommand?.commandId).toBe("write_file.overwrite");
@@ -5272,6 +5356,9 @@ describe("status and listing", () => {
       owner: "test"
     });
 
+    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
+    await waitForCondition(() => sent.some((message) => message.text.includes("[PREVIEW] Codex amendment requires approval.")));
+    state = await loadTelegramGatewayState(root);
     expect(sent.at(-1)?.text).toContain("[PREVIEW] Codex amendment requires approval.");
     expect(sent.at(-1)?.text).toContain("/apply");
     expect(state.chats["123"]?.pendingCommand?.commandId).toBe("codex.amendment.apply");
@@ -5304,6 +5391,56 @@ describe("status and listing", () => {
     expect(sent.at(-1)?.text).toContain("[SUCCESS] Codex amendment applied.");
     expect(state.chats["123"]?.pendingCommand).toBeUndefined();
     expect(await readFile(rulesPath, "utf8")).toBe("mock write");
+  });
+
+  it("sends deterministic Telegram fallback when final provider response times out after a tool result", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Fallback summary");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_FINAL_TIMEOUT_AFTER_REVIEW_TOOL] 메모리 리뷰 대상 있어?"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    await waitForCondition(() => sent.some((message) => message.text.includes("[Fallback] LLM 최종 응답이 timeout")));
+    expect(sent.at(-1)?.text).toContain("Memory pending:");
+    const jobs = await new RunJobLedger(root).list({ includeTerminal: true });
+    expect(jobs.some((job) => job.status === "failed" && job.failureKind === "timeout" && job.finalOutputSummary?.includes("[Fallback]"))).toBe(true);
   });
 
   it("repairs and resets stale Telegram gateway state without connector settings", async () => {
@@ -5503,9 +5640,11 @@ describe("status and listing", () => {
       }
     }
 
+    await waitForCondition(() => sent.join("\n").includes("will not retry forever"));
     const state = await loadTelegramGatewayState(root);
     expect(state.nextOffset).toBe(22);
-    expect(state.lastFailure).toContain("Unknown model provider");
+    const jobs = await new RunJobLedger(root).list({ includeTerminal: true });
+    expect(jobs.some((job) => job.status === "failed" && job.errorSummary?.includes("Unknown model provider"))).toBe(true);
     expect(sent.join("\n")).toContain("will not retry forever");
   });
 
