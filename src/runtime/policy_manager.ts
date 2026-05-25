@@ -215,7 +215,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.54.0",
+  version: "0.53.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -236,26 +236,6 @@ export const defaultPolicy: PolicyConfig = {
       enabled: true
     },
     review_inbox_read: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    runtime_status_read: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    run_jobs_read: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    tool_growth_status_read: {
-      permission: "read_only",
-      workspace: "inside_only",
-      enabled: true
-    },
-    pending_actions_read: {
       permission: "read_only",
       workspace: "inside_only",
       enabled: true

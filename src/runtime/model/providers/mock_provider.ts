@@ -83,20 +83,6 @@ export class MockProvider implements ModelProvider {
         args: { filter: "memory" }
       }));
     }
-    if (input.prompt.includes("[MOCK_RUN_JOBS_STATUS]") && !input.prompt.includes("Tool: run_jobs_read")) {
-      return parseModelOutput(JSON.stringify({
-        type: "tool_call",
-        tool: "run_jobs_read",
-        args: { scope: "current", includeTerminal: true }
-      }));
-    }
-    if (input.prompt.includes("[MOCK_TOOL_GROWTH_STATUS]") && !input.prompt.includes("Tool: tool_growth_status_read")) {
-      return parseModelOutput(JSON.stringify({
-        type: "tool_call",
-        tool: "tool_growth_status_read",
-        args: { scope: "current", advanced: false }
-      }));
-    }
     if (normalizedPrompt.includes("call read_file on a relevant path before returning final") && !input.prompt.includes("Tool: read_file")) {
       return parseModelOutput(JSON.stringify({
         type: "tool_call",
@@ -197,15 +183,6 @@ function mockToolArgs(tool: string, value: string): Record<string, unknown> {
       command: value || "echo COSIA shell preview",
       reason: "Mock shell preview request."
     };
-  }
-  if (tool === "runtime_status_read" || tool === "pending_actions_read") {
-    return {};
-  }
-  if (tool === "run_jobs_read") {
-    return { scope: "current", includeTerminal: true };
-  }
-  if (tool === "tool_growth_status_read") {
-    return { scope: "current" };
   }
   return { path: value };
 }
