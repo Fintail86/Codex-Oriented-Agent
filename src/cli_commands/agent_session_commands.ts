@@ -468,7 +468,7 @@ export function registerAgentSessionCommands(program: Command): void {
   session
     .command("debug")
     .argument("<session-id>")
-    .option("--part <part>", "Debug part: metadata, user-message, prompt, or all.", "metadata")
+    .option("--part <part>", "Debug part: metadata, user-message, prompt, provider-prompt, provider-response, or all.", "metadata")
     .option("--max-chars <n>", "Maximum chars for prompt/user-message output.", "4000")
     .description("Inspect the last-turn diagnostic debug files for a session.")
     .action(async (sessionId: string, options: { part: string; maxChars: string }) => {
@@ -555,8 +555,15 @@ export function registerAgentSessionCommands(program: Command): void {
 }
 
 function parseSessionDebugPart(value: string): LastTurnDebugPart {
-  if (value === "metadata" || value === "user-message" || value === "prompt" || value === "all") {
+  if (
+    value === "metadata"
+    || value === "user-message"
+    || value === "prompt"
+    || value === "provider-prompt"
+    || value === "provider-response"
+    || value === "all"
+  ) {
     return value;
   }
-  throw new Error("Invalid debug part. Use metadata, user-message, prompt, or all.");
+  throw new Error("Invalid debug part. Use metadata, user-message, prompt, provider-prompt, provider-response, or all.");
 }

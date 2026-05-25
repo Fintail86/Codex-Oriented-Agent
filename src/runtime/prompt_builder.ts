@@ -253,7 +253,13 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
   const blocks: PromptBlock[] = [
     {
       title: "RUNTIME OUTPUT CONTRACT",
-      content: outputContract(availableTools),
+      content: outputContract(),
+      required: true,
+      source: "runtime"
+    },
+    {
+      title: "ACTIVE TOOL STATE",
+      content: activeToolStateText(availableTools),
       required: true,
       source: "runtime"
     },
@@ -370,7 +376,7 @@ function renderBlocks(blocks: PromptBlock[]): string {
   return `${blocks.map((block) => `# BEGIN ${block.title}\n${block.content.trim()}\n# END ${block.title}`).join("\n\n")}\n`;
 }
 
-function outputContract(allowedTools: string[]): string {
+function outputContract(): string {
   return `Return only one valid JSON object. Do not wrap it in Markdown.
 
 When the request asks about implementation, files, CLI commands, package metadata, or current project state, inspect actual files before final. A good pattern is search_files first, then read_file on the most relevant path matches such as package.json, README.md, src/cli.ts, src/index.ts, or bin entrypoints.
@@ -383,14 +389,19 @@ Static prompt blocks such as AGENT STYLE, AGENT IDENTITY, AGENT LOCAL RULES, and
 
 If the user asks about COSIA runtime state that is not available through the current model tools, such as review inbox items, pending approvals, gateway process state, session lists, long-term memory queues, or provider profile status, do not guess and do not translate the request into a hidden command. Also do not inspect SQLite/runtime ledgers through raw file reads as a substitute for a runtime inspection tool. Say that the current active toolset cannot inspect that runtime surface, name the missing read-only capability, and ask whether to create a guided tool candidate for it. Suggested explicit paths are /tool grow <request> inside chat or cosia tool grow --request "<request>" in the CLI. Hash-prefixed commands are not part of the runtime command surface.
 
-For a tool call:
-{"type":"tool_call","tool":"read_file","args":{"path":"README.md","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
+For a tool call, choose exactly one tool listed in ACTIVE TOOL STATE:
+{"type":"tool_call","tool":"<active_tool_name>","args":{"path":"","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
-For a search tool call:
-{"type":"tool_call","tool":"search_files","args":{"path":"","content":"","query":"cosia","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
+For a tool call that needs a search query, keep unused args as empty strings:
+{"type":"tool_call","tool":"<active_search_tool_name>","args":{"path":"","content":"","query":"cosia","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
 For a final answer:
-{"type":"final","tool":"read_file","args":{"path":"","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"...","memoryCandidates":[],"skillCandidates":[]}
+{"type":"final","tool":"","args":{"path":"","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"...","memoryCandidates":[],"skillCandidates":[]}
+`;
+}
+
+function activeToolStateText(allowedTools: string[]): string {
+  return `# ACTIVE TOOL STATE
 
 Available tools for this run: ${allowedTools.join(", ") || "none"}
 Maximum tool loop depth: 5`;

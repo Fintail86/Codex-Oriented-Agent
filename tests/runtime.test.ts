@@ -349,12 +349,17 @@ describe("runtime setup", () => {
     await sessions.writeLastTurnDebug(session.id, {
       userMessage: "User asked for debug visibility.",
       prompt: `Prompt header\n${"x".repeat(80)}`,
+      providerPrompt: "Provider instructions\nProvider input",
       runId: "run_debug_1",
       modelStep: 2,
       promptChars: 94,
       estimatedTokens: 24,
       timestamp: "2026-05-24T00:00:00.000Z"
     });
+    await writeFile(
+      join(root, "sessions", session.id, "debug", "LAST_PROVIDER_RESPONSE.md"),
+      "# LAST PROVIDER RESPONSE\n\ncachedTokens: 1024\n"
+    );
 
     const record = await sessions.readLastTurnDebug(session.id);
     expect(record?.metadata).toMatchObject({
@@ -367,9 +372,13 @@ describe("runtime setup", () => {
     expect(formatLastTurnDebug(record!, { part: "user-message" })).toContain("User asked for debug visibility.");
     const promptOutput = formatLastTurnDebug(record!, { part: "prompt", maxChars: 30 });
     expect(promptOutput).toContain("[truncated: showing 30 of");
+    expect(formatLastTurnDebug(record!, { part: "provider-prompt" })).toContain("Provider instructions");
+    expect(formatLastTurnDebug(record!, { part: "provider-response" })).toContain("cachedTokens: 1024");
     const allOutput = formatLastTurnDebug(record!, { part: "all", maxChars: 30 });
     expect(allOutput).toContain("# Last user message");
     expect(allOutput).toContain("# Last prompt");
+    expect(allOutput).toContain("# Last provider prompt");
+    expect(allOutput).toContain("# Last provider response");
     expect(allOutput).toContain("[truncated: showing 30 of");
   });
 
@@ -1019,9 +1028,16 @@ describe("policy core", () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl: FetchLike = async (input, init) => {
       requests.push({ url: String(input), init });
-      return new Response(JSON.stringify({ output_text: "{\"type\":\"final\",\"content\":\"ok\"}" }), {
+      return new Response([
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"type\\\":\\\"final\\\",\\\"content\\\":\\\"ok\\\"}\"}",
+        "",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":40,\"total_tokens\":1240,\"prompt_tokens_details\":{\"cached_tokens\":1024}}}}",
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n"), {
         status: 200,
-        headers: { "content-type": "application/json" }
+        headers: { "content-type": "text/event-stream" }
       });
     };
     const provider = createProvider("codex", root, {
@@ -1032,9 +1048,279 @@ describe("policy core", () => {
     expect(result.raw).toContain("\"content\":\"ok\"");
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toContain("/codex/responses");
-    expect((requests[0].init?.headers as Record<string, string>).authorization).toBe("Bearer access-secret");
+    const headers = requests[0].init?.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer access-secret");
+    expect(headers.accept).toBe("text/event-stream");
+    expect(headers["OpenAI-Beta"]).toBe("responses=v1");
     expect((requests[0].init?.headers as Record<string, string>)["chatgpt-account-id"]).toBe("acct-test");
-    expect(String(requests[0].init?.body)).toContain("Return exactly one COSIA AgentStep JSON object");
+    expect(headers.session_id).toBe("session-test");
+    const body = JSON.parse(String(requests[0].init?.body)) as Record<string, unknown>;
+    expect(body.model).toBe("gpt-5.5");
+    expect(body.stream).toBe(true);
+    expect(body.store).toBe(false);
+    expect(String(body.prompt_cache_key)).toMatch(/^cosia:openai-codex:[a-f0-9]{16}$/);
+    expect(String(body.instructions)).toContain("Return exactly one AgentStep JSON object");
+    const providerResponseDebug = await readFile(join(root, "sessions", "session-test", "debug", "LAST_PROVIDER_RESPONSE.md"), "utf8");
+    expect(providerResponseDebug).toContain("# LAST PROVIDER RESPONSE");
+    expect(providerResponseDebug).toContain("\"cachedTokens\": 1024");
+    expect(providerResponseDebug).toContain("\"prompt_tokens_details\"");
+    expect(providerResponseDebug).not.toContain("access-secret");
+  });
+
+  it("includes safe request diagnostics when openai-codex backend returns an HTML 403", async () => {
+    const root = await initializedWorkspace();
+    await addProviderProfile(root, "codex", {
+      providerId: "openai-codex",
+      oauth: true
+    });
+    await useProviderProfile(root, "codex");
+    await savePrivateSecrets(root, {
+      version: 1,
+      providers: {
+        codex: {
+          oauth: {
+            accessToken: "expired-access-secret",
+            refreshToken: "refresh-secret",
+            expiresAt: "2000-01-01T00:00:00.000Z",
+            tokenType: "Bearer",
+            scope: "test",
+            accountId: "acct-test",
+            providerId: "openai-codex",
+            source: "cosia-owned-oauth"
+          }
+        }
+      },
+      connectors: {}
+    });
+    const fetchImpl: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.includes("/oauth/token")) {
+        return new Response(JSON.stringify({
+          access_token: "refreshed-access-secret",
+          refresh_token: "refresh-secret",
+          expires_in: 3600,
+          token_type: "Bearer",
+          scope: "test"
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return new Response("<html>blocked</html>", {
+        status: 403,
+        headers: {
+          "content-type": "text/html",
+          "cf-ray": "cf-test",
+          "x-oai-request-id": "req-test"
+        }
+      });
+    };
+    const provider = createProvider("codex", root, {
+      policy: await new PolicyManager(root).loadPolicy(),
+      fetchImpl
+    });
+    let error: unknown;
+    try {
+      await provider.complete({ sessionId: "session-test", prompt: "hello" });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ProviderError);
+    const providerError = error as ProviderError;
+    expect(providerError.reason).toBe("auth_failed");
+    expect(providerError.preview).toContain("status: 403");
+    expect(providerError.preview).toContain("contentType: text/html");
+    expect(providerError.preview).toContain("xOaiRequestId: req-test");
+    expect(providerError.preview).toContain("cfRay: cf-test");
+    expect(providerError.preview).toContain("endpointFamily: chatgpt_backend");
+    expect(providerError.preview).toContain("hasAccountId: yes");
+    expect(providerError.preview).toContain("bodyKeys:");
+    expect(providerError.preview).toContain("inputIsArray: yes");
+    expect(providerError.preview).toContain("instructionsLength:");
+    expect(providerError.preview).toContain("store: false");
+    expect(providerError.preview).toContain("stream: true");
+    expect(providerError.preview).toContain("unsupportedKeys: none");
+    expect(providerError.preview).not.toContain("refreshed-access-secret");
+    expect(providerError.preview).not.toContain("refresh-secret");
+  });
+
+  it("normalizes COSIA prompt sections into Codex instructions and input messages", async () => {
+    const root = await initializedWorkspace();
+    await addProviderProfile(root, "codex", {
+      providerId: "openai-codex",
+      oauth: true
+    });
+    await useProviderProfile(root, "codex");
+    await savePrivateSecrets(root, {
+      version: 1,
+      providers: {
+        codex: {
+          oauth: {
+            accessToken: "access-secret",
+            refreshToken: "refresh-secret",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            tokenType: "Bearer",
+            scope: "test",
+            accountId: "acct-test",
+            providerId: "openai-codex",
+            source: "cosia-owned-oauth"
+          }
+        }
+      },
+      connectors: {}
+    });
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      requests.push({ url: String(input), init });
+      return new Response([
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"type\\\":\\\"final\\\",\\\"content\\\":\\\"ok\\\"}\"}",
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n"), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    };
+    const provider = createProvider("codex", root, {
+      policy: await new PolicyManager(root).loadPolicy(),
+      fetchImpl
+    });
+    const prompt = [
+      "# BEGIN codex/SECURITY.md",
+      "RAW SECURITY LAW SHOULD NOT BE SENT VERBATIM",
+      "# END codex/SECURITY.md",
+      "",
+      "# BEGIN AGENT STYLE",
+      "Speak warmly.",
+      "# END AGENT STYLE",
+      "",
+      "# BEGIN sessions/session-test/SESSION_RULES.md",
+      "# SESSION RULES",
+      "",
+      "Prefer concise answers in this session.",
+      "# END sessions/session-test/SESSION_RULES.md",
+      "",
+      "# BEGIN sessions/session-test/CONTEXT_MEMORY.md",
+      "Prior context.",
+      "# END sessions/session-test/CONTEXT_MEMORY.md",
+      "",
+      "# BEGIN RUNTIME OUTPUT CONTRACT",
+      "Return only JSON.",
+      "# END RUNTIME OUTPUT CONTRACT",
+      "",
+      "# BEGIN ACTIVE TOOL STATE",
+      "Available tools for this run: read_file, write_file, search_files",
+      "Maximum tool loop depth: 5",
+      "# END ACTIVE TOOL STATE",
+      "",
+      "# BEGIN REQUIRE-TOOLS MODE",
+      "This run is in require-tools mode.",
+      "# END REQUIRE-TOOLS MODE",
+      "",
+      "# BEGIN FILE-READ REQUIREMENT",
+      "The current request asks to inspect actual files.",
+      "# END FILE-READ REQUIREMENT",
+      "",
+      "# BEGIN TOOL LOOP CONTROL",
+      "Remaining executable tool calls: 5.",
+      "# END TOOL LOOP CONTROL",
+      "",
+      "# BEGIN CURRENT USER REQUEST",
+      "방금 맥락을 보고 Say ok.",
+      "# END CURRENT USER REQUEST"
+    ].join("\n");
+    const result = await provider.complete({ sessionId: "session-test", prompt });
+    expect(result.raw).toContain("\"content\":\"ok\"");
+    const body = JSON.parse(String(requests[0].init?.body)) as { instructions: string; input: Array<{ content: Array<{ text: string }> }> };
+    expect(body.instructions).toContain("codex/SECURITY.md");
+    expect(body.instructions).toContain("RAW SECURITY LAW SHOULD NOT BE SENT VERBATIM");
+    expect(body.instructions).toContain("Speak warmly.");
+    expect(body.instructions).toContain("Return only JSON.");
+    expect(body.instructions).not.toContain("SESSION_RULES.md");
+    expect(body.instructions).not.toContain("Prefer concise answers in this session.");
+    expect(body.instructions).not.toContain("Available tools for this run");
+    expect(body.instructions).not.toContain("This run is in require-tools mode");
+    expect(body.instructions).not.toContain("The current request asks to inspect actual files.");
+    expect(body.instructions).not.toContain("Remaining executable tool calls");
+    expect(body.input).toHaveLength(2);
+    expect(body.input[0].content[0].text).toContain("Prefer concise answers in this session.");
+    expect(body.input[0].content[0].text).toContain("Prior context.");
+    expect(body.input[0].content[0].text).toContain("Available tools for this run: read_file, write_file, search_files");
+    expect(body.input[0].content[0].text).toContain("This run is in require-tools mode.");
+    expect(body.input[0].content[0].text).toContain("The current request asks to inspect actual files.");
+    expect(body.input[0].content[0].text).toContain("Remaining executable tool calls: 5.");
+    expect(body.input[1].content[0].text).toBe("방금 맥락을 보고 Say ok.");
+    const providerPromptDebug = await readFile(join(root, "sessions", "session-test", "debug", "LAST_PROVIDER_PROMPT.md"), "utf8");
+    expect(providerPromptDebug).toContain("# LAST PROVIDER PROMPT");
+    expect(providerPromptDebug).toContain("cosia:openai-codex:");
+    expect(providerPromptDebug).toContain("## Instructions");
+    expect(providerPromptDebug).toContain("RAW SECURITY LAW SHOULD NOT BE SENT VERBATIM");
+    expect(providerPromptDebug).toContain("## Input Messages");
+    expect(providerPromptDebug).toContain("Prior context.");
+    expect(providerPromptDebug).not.toContain("access-secret");
+  });
+
+  it("keeps session context as input for simple openai-codex requests", async () => {
+    const root = await initializedWorkspace();
+    await addProviderProfile(root, "codex", {
+      providerId: "openai-codex",
+      oauth: true
+    });
+    await useProviderProfile(root, "codex");
+    await savePrivateSecrets(root, {
+      version: 1,
+      providers: {
+        codex: {
+          oauth: {
+            accessToken: "access-secret",
+            refreshToken: "refresh-secret",
+            expiresAt: "2099-01-01T00:00:00.000Z",
+            tokenType: "Bearer",
+            scope: "test",
+            accountId: "acct-test",
+            providerId: "openai-codex",
+            source: "cosia-owned-oauth"
+          }
+        }
+      },
+      connectors: {}
+    });
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      requests.push({ url: String(input), init });
+      return new Response([
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"type\\\":\\\"final\\\",\\\"content\\\":\\\"ok\\\"}\"}",
+        "",
+        "data: [DONE]",
+        ""
+      ].join("\n"), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      });
+    };
+    const provider = createProvider("codex", root, {
+      policy: await new PolicyManager(root).loadPolicy(),
+      fetchImpl
+    });
+    const prompt = [
+      "# BEGIN sessions/session-test/CONTEXT_MEMORY.md",
+      "cosia tool grow test grow_abc --yes",
+      "Provider codex failed HTTP 403.",
+      "Friendly prior chat.",
+      "# END sessions/session-test/CONTEXT_MEMORY.md",
+      "",
+      "# BEGIN CURRENT USER REQUEST",
+      "쿠미?",
+      "# END CURRENT USER REQUEST"
+    ].join("\n");
+    await provider.complete({ sessionId: "session-test", prompt });
+    const body = JSON.parse(String(requests[0].init?.body)) as { input: Array<{ content: Array<{ text: string }> }> };
+    expect(body.input).toHaveLength(2);
+    expect(body.input[0].content[0].text).toContain("cosia tool grow test grow_abc --yes");
+    expect(body.input[0].content[0].text).toContain("Provider codex failed HTTP 403.");
+    expect(body.input[0].content[0].text).toContain("Friendly prior chat.");
+    expect(body.input[1].content[0].text).toBe("쿠미?");
   });
 
   it("validates unknown bundled tool runtime config and removes legacy dedicated policy tools", async () => {
@@ -3024,6 +3310,10 @@ describe("model parsing and run loop", () => {
   it("parses final and tool_call AgentStep JSON", () => {
     expect(parseModelOutput('{"type":"final","content":"done","memoryCandidates":[]}').step.type).toBe("final");
     expect(parseModelOutput('```json\n{"type":"tool_call","tool":"read_file","args":{"path":"README.md"}}\n```').step.type).toBe("tool_call");
+    expect(parseModelOutput('{"type":"final","content":"done"}{"type":"final","content":"duplicate"}').step).toMatchObject({
+      type: "final",
+      content: "done"
+    });
     expect(() => parseModelOutput('{"type":"final"}')).toThrow();
   });
 

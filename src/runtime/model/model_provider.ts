@@ -12,10 +12,6 @@ export function parseModelOutput(raw: string): ModelOutput {
 
 export function extractJsonObject(text: string): string {
   const trimmed = text.trim();
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return trimmed;
-  }
-
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced?.[1]) {
     return extractJsonObject(fenced[1]);

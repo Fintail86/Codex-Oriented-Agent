@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { arch as osArch, platform as osPlatform, release as osRelease } from "node:os";
+import { join } from "node:path";
 import { completeWithStructuredRetry } from "../model_provider.js";
 import { previewText, ProviderError, providerFailureHint } from "../provider_errors.js";
 import {
@@ -8,21 +10,58 @@ import {
   setProviderOAuthSecret,
   type PrivateSecrets
 } from "../../private_config.js";
+import { writeText } from "../../fs_utils.js";
 import type { AuthStatus, ModelInput, ModelOutput, ModelProvider } from "../../types.js";
 import type { FetchLike } from "./openai_compatible_provider.js";
 
 type JsonObject = Record<string, unknown>;
 type OAuthSecret = NonNullable<PrivateSecrets["providers"][string]["oauth"]>;
+type CodexResponseResult = {
+  response: Response;
+  diagnostics: CodexRequestDiagnostics;
+  sessionId: string;
+  url: string;
+};
+
+type CodexRequestDiagnostics = {
+  endpointFamily: string;
+  urlPath: string;
+  hasAccountId: boolean;
+  model: string;
+  openaiBeta: string;
+  bodyKeys: string[];
+  inputIsArray: boolean;
+  instructionsLength: number;
+  store: unknown;
+  stream: unknown;
+  unsupportedKeys: string[];
+};
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 const DEFAULT_ENDPOINT_PATH = "/codex/responses";
-const DEFAULT_MODEL = "openai/gpt-5.5";
+const DEFAULT_MODEL = "gpt-5.5";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_SCOPE = "openid profile email offline_access";
 const DEFAULT_ORIGINATOR = "pi";
+const DEFAULT_OPENAI_BETA = "responses=v1";
 const DEFAULT_OAUTH_PORT = 1455;
 const TOKEN_REFRESH_SKEW_MS = 60_000;
 const POWERSHELL_HTTP_STATUS_MARKER = "__COSIA_HTTP_STATUS__:";
+const CODEX_ALLOWED_BODY_KEYS = new Set([
+  "model",
+  "instructions",
+  "input",
+  "store",
+  "stream",
+  "text",
+  "include",
+  "prompt_cache_key",
+  "tool_choice",
+  "parallel_tool_calls",
+  "tools",
+  "reasoning",
+  "temperature"
+]);
 
 export type OpenAICodexProviderOptions = {
   id?: string;
@@ -83,60 +122,57 @@ export class OpenAICodexProvider implements ModelProvider {
     return completeWithStructuredRetry(
       input,
       this.options.structuredRetryCount,
-      (prompt) => this.completeOnce(prompt)
+      (prompt) => this.completeOnce(prompt, input.sessionId)
     );
   }
 
-  private async completeOnce(prompt: string): Promise<string> {
+  private async completeOnce(prompt: string, sessionId: string): Promise<string> {
     enforcePromptLimit(prompt, this.options.maxPromptChars, this.id);
     const firstToken = await this.validAccessToken();
-    const first = await this.sendCodexRequest(prompt, firstToken);
-    if (first.status === 401 || first.status === 403) {
+    const first = await this.sendCodexRequest(prompt, sessionId, firstToken);
+    if (first.response.status === 401 || first.response.status === 403) {
       const refreshed = await this.refreshOAuthToken(firstToken.secret);
-      return this.sendCodexRequest(prompt, refreshed).then((response) => this.responseTextOrThrow(response));
+      return this.sendCodexRequest(prompt, sessionId, refreshed).then((response) => this.responseTextOrThrow(response));
     }
     return this.responseTextOrThrow(first);
   }
 
   private async sendCodexRequest(
     prompt: string,
+    sessionId: string,
     token: { accessToken: string; secret: OAuthSecret }
-  ): Promise<Response> {
-    const body = JSON.stringify({
-      model: this.options.model ?? DEFAULT_MODEL,
-      input: [
-        {
-          type: "message",
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: boundaryPrompt(prompt)
-            }
-          ]
-        }
-      ],
-      stream: false
+  ): Promise<CodexResponseResult> {
+    const bodyObject = codexRequestBody(prompt, this.options.model ?? DEFAULT_MODEL, sessionId);
+    const body = JSON.stringify(bodyObject);
+    const headers = codexRequestHeaders(token, sessionId);
+    const url = this.endpointUrl();
+    const diagnostics = codexRequestDiagnostics({
+      url,
+      headers,
+      body: bodyObject,
+      accountId: token.secret.accountId
     });
-    const headers = codexRequestHeaders(token);
+    await writeProviderPromptDebug(this.options.workspaceRoot, sessionId, bodyObject, url, diagnostics);
     if (this.shouldUseNativeTransport()) {
-      return sendWithPowerShellNativeTransport({
-        url: this.endpointUrl(),
+      const response = await sendWithPowerShellNativeTransport({
+        url,
         headers,
         body,
         timeoutMs: this.options.timeoutMs,
         providerId: this.id
       });
+      return { response, diagnostics, sessionId, url };
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs);
     try {
-      return await this.fetchImpl(this.endpointUrl(), {
+      const response = await this.fetchImpl(url, {
         method: "POST",
         headers,
         body,
         signal: controller.signal
       });
+      return { response, diagnostics, sessionId, url };
     } catch (error) {
       if (controller.signal.aborted || (error as Error).name === "AbortError") {
         throw new ProviderError("timeout", `Provider timed out after ${this.options.timeoutMs}ms.`, {
@@ -153,19 +189,44 @@ export class OpenAICodexProvider implements ModelProvider {
     }
   }
 
-  private async responseTextOrThrow(response: Response): Promise<string> {
+  private async responseTextOrThrow(result: CodexResponseResult): Promise<string> {
+    const { response } = result;
     if (!response.ok) {
-      throw await this.httpError(response);
+      throw await this.httpError(result);
+    }
+    const raw = await response.text();
+    const contentType = response.headers.get("content-type") ?? "";
+    if (looksLikeEventStream(contentType, raw)) {
+      const streamed = extractProviderContentFromSse(raw);
+      await writeProviderResponseDebug(this.options.workspaceRoot, result, raw, {
+        contentType,
+        usage: streamed.usage,
+        streamed: true
+      });
+      if (streamed.error) {
+        throw new ProviderError("malformed_response", `OpenAI Codex stream failed: ${streamed.error}`, {
+          preview: previewText(raw)
+        });
+      }
+      if (streamed.content) {
+        return streamed.content;
+      }
     }
     let json: unknown;
     try {
-      json = await response.json();
+      json = JSON.parse(raw);
     } catch (error) {
-      throw new ProviderError("malformed_response", `Provider response was not JSON: ${(error as Error).message}`, {
+      throw new ProviderError("malformed_response", `Provider response was not JSON or SSE: ${(error as Error).message}`, {
+        preview: previewText(raw),
         cause: error
       });
     }
     const content = extractProviderContent(json);
+    await writeProviderResponseDebug(this.options.workspaceRoot, result, raw, {
+      contentType,
+      usage: isObject(json) ? json.usage : undefined,
+      streamed: false
+    });
     if (!content) {
       throw new ProviderError("malformed_response", "OpenAI Codex response did not contain text content.", {
         preview: previewText(JSON.stringify(json))
@@ -191,7 +252,7 @@ export class OpenAICodexProvider implements ModelProvider {
     if (transport === "native" || transport === "powershell") {
       return process.platform === "win32";
     }
-    return process.platform === "win32" && this.endpointUrl().startsWith("https://chatgpt.com/");
+    return false;
   }
 
   private async validAccessToken(): Promise<{ accessToken: string; secret: OAuthSecret }> {
@@ -202,7 +263,8 @@ export class OpenAICodexProvider implements ModelProvider {
       });
     }
     if (secret.accessToken && !isExpired(secret.expiresAt)) {
-      return { accessToken: secret.accessToken, secret };
+      const normalized = await this.normalizeStoredOAuthSecret(secret);
+      return { accessToken: normalized.accessToken!, secret: normalized };
     }
     if (!secret.refreshToken) {
       throw new ProviderError("auth_failed", `OpenAI Codex OAuth token is expired for provider profile ${this.options.profileName}.`, {
@@ -210,6 +272,19 @@ export class OpenAICodexProvider implements ModelProvider {
       });
     }
     return this.refreshOAuthToken(secret);
+  }
+
+  private async normalizeStoredOAuthSecret(secret: OAuthSecret): Promise<OAuthSecret> {
+    if (!secret.accessToken) {
+      return secret;
+    }
+    const accountId = accountIdFromAccessToken(secret.accessToken, secret.accountId);
+    if (!accountId || accountId === secret.accountId) {
+      return secret;
+    }
+    const normalized = { ...secret, accountId };
+    await setProviderOAuthSecret(this.options.workspaceRoot, this.options.profileName, normalized);
+    return normalized;
   }
 
   private async refreshOAuthToken(secret: OAuthSecret): Promise<{ accessToken: string; secret: OAuthSecret }> {
@@ -237,25 +312,31 @@ export class OpenAICodexProvider implements ModelProvider {
     return { accessToken: next.accessToken, secret: next };
   }
 
-  private async httpError(response: Response): Promise<ProviderError> {
-    const body = previewText(await response.text().catch(() => ""));
+  private async httpError(result: CodexResponseResult): Promise<ProviderError> {
+    const { response, diagnostics } = result;
+    const body = previewText(await response.text().catch(() => ""), 200);
+    await writeProviderResponseDebug(this.options.workspaceRoot, result, body, {
+      contentType: response.headers.get("content-type") ?? "",
+      streamed: false
+    });
+    const diagnosticPreview = formatCodexFailureDiagnostics(response, diagnostics, body);
     if (response.status === 401 || response.status === 403) {
       return new ProviderError("auth_failed", `OpenAI Codex returned HTTP ${response.status}.`, {
         statusCode: response.status,
-        preview: body,
-        hint: openAICodexAuthFailureHint(response.status, body, this.options.profileName)
+        preview: diagnosticPreview,
+        hint: openAICodexAuthFailureHint(response.status, diagnosticPreview, this.options.profileName)
       });
     }
     if (response.status === 429) {
       return new ProviderError("rate_limited", "OpenAI Codex returned HTTP 429.", {
         statusCode: response.status,
-        preview: body,
+        preview: diagnosticPreview,
         hint: providerFailureHint("rate_limited", this.id)
       });
     }
     return new ProviderError("http_error", `OpenAI Codex returned HTTP ${response.status}.`, {
       statusCode: response.status,
-      preview: body,
+      preview: diagnosticPreview,
       hint: providerFailureHint("http_error", this.id)
     });
   }
@@ -452,19 +533,7 @@ function buildOAuthSecret(
   const tokenType = typeof token.token_type === "string" ? token.token_type : "Bearer";
   const scope = typeof token.scope === "string" ? token.scope : fallbacks.fallbackScope ?? oauthScope();
   const expiresAt = expiresAtFromToken(token);
-  const account = accessToken ? jwtPayload(accessToken) : {};
-  const accountId = firstString(
-    account.chatgpt_account_id,
-    account.account_id,
-    account.sub,
-    account["https://api.openai.com/auth"] && isObject(account["https://api.openai.com/auth"])
-      ? firstString(
-        account["https://api.openai.com/auth"].chatgpt_account_id,
-        account["https://api.openai.com/auth"].account_id
-      )
-      : undefined,
-    fallbacks.fallbackAccountId
-  );
+  const accountId = accessToken ? accountIdFromAccessToken(accessToken, fallbacks.fallbackAccountId) : fallbacks.fallbackAccountId;
   return {
     ...(accessToken ? { accessToken } : {}),
     ...(refreshToken ? { refreshToken } : {}),
@@ -475,6 +544,22 @@ function buildOAuthSecret(
     providerId: "openai-codex",
     source: "cosia-owned-oauth"
   };
+}
+
+function accountIdFromAccessToken(accessToken: string, fallbackAccountId?: string): string | undefined {
+  const account = jwtPayload(accessToken);
+  const authClaim = account["https://api.openai.com/auth"];
+  return firstString(
+    authClaim && isObject(authClaim)
+      ? firstString(
+        authClaim.chatgpt_account_id,
+        authClaim.account_id
+      )
+      : undefined,
+    account.chatgpt_account_id,
+    account.account_id,
+    fallbackAccountId && !fallbackAccountId.startsWith("auth0|") ? fallbackAccountId : undefined
+  );
 }
 
 function expiresAtFromToken(token: JsonObject): string | undefined {
@@ -517,20 +602,457 @@ function extractProviderContent(json: unknown): string | undefined {
   return collected.join("").trim() || undefined;
 }
 
-function codexRequestHeaders(token: { accessToken: string; secret: OAuthSecret }): Record<string, string> {
+function looksLikeEventStream(contentType: string, raw: string): boolean {
+  return contentType.toLowerCase().includes("text/event-stream")
+    || raw.trimStart().startsWith("event:")
+    || raw.trimStart().startsWith("data:")
+    || raw.includes("\ndata:");
+}
+
+function extractProviderContentFromSse(raw: string): { content?: string; error?: string; usage?: unknown } {
+  const deltas: string[] = [];
+  const completedCandidates: string[] = [];
+  let usage: unknown;
+  for (const event of parseSseJsonEvents(raw)) {
+    const type = typeof event.type === "string" ? event.type : "";
+    if (type === "error") {
+      return { error: firstString(event.message, event.code, JSON.stringify(event)) };
+    }
+    if (type === "response.failed") {
+      const message = isObject(event.response) && isObject(event.response.error)
+        ? firstString(event.response.error.message, event.response.error.code)
+        : undefined;
+      return { error: message ?? "response.failed" };
+    }
+    if (type.includes("output_text") && type.endsWith(".delta") && typeof event.delta === "string") {
+      deltas.push(event.delta);
+      continue;
+    }
+    if (typeof event.text === "string" && type.includes("output_text")) {
+      deltas.push(event.text);
+      continue;
+    }
+    if ((type === "response.completed" || type === "response.done") && event.response) {
+      if (isObject(event.response) && event.response.usage !== undefined) {
+        usage = event.response.usage;
+      }
+      const content = extractProviderContent(event.response);
+      if (content) {
+        completedCandidates.push(content);
+      }
+    }
+  }
+  const streamed = deltas.join("").trim();
+  if (streamed) {
+    return { content: streamed, usage };
+  }
+  const completed = completedCandidates.join("").trim();
+  return completed ? { content: completed, usage } : { usage };
+}
+
+function parseSseJsonEvents(raw: string): JsonObject[] {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const chunks = normalized.split(/\n\n+/);
+  const events: JsonObject[] = [];
+  for (const chunk of chunks) {
+    const data = chunk
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice("data:".length).trim())
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      if (isObject(parsed)) {
+        events.push(parsed);
+      }
+    } catch {
+      // Ignore malformed event fragments and let the caller fail if no content is collected.
+    }
+  }
+  return events;
+}
+
+function codexRequestBody(prompt: string, model: string, sessionId: string): JsonObject {
+  const parts = normalizePromptForCodex(prompt);
+  const promptCacheKey = codexPromptCacheKey(parts.instructions);
+  return {
+    model: normalizeCodexModelId(model),
+    store: false,
+    stream: true,
+    instructions: parts.instructions,
+    input: parts.input,
+    text: { verbosity: "medium" },
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: promptCacheKey,
+    tool_choice: "auto",
+    parallel_tool_calls: true
+  };
+}
+
+function normalizePromptForCodex(prompt: string): { instructions: string; input: JsonObject[] } {
+  const sections = parsePromptSections(prompt);
+  if (!sections.length) {
+    return {
+      instructions: codexInstructions(),
+      input: [responsesUserMessage(prompt)]
+    };
+  }
+
+  const currentRequest = sectionContent(sections, "CURRENT USER REQUEST") ?? "";
+  const instructionBlocks = [
+    codexInstructions(),
+    ...sections
+      .filter(isInstructionSection)
+      .map((section) => formatPromptSection(section.title, section.content))
+  ].filter(Boolean);
+
+  const contextBlocks = sections
+    .filter((section) => !isInstructionSection(section) && section.title !== "CURRENT USER REQUEST")
+    .map((section) => formatPromptSection(section.title, section.content))
+    .filter(Boolean);
+
+  return {
+    instructions: instructionBlocks.join("\n\n"),
+    input: [
+      ...(contextBlocks.length ? [responsesUserMessage(`# COSIA prompt context\n\n${contextBlocks.join("\n\n")}`)] : []),
+      responsesUserMessage(currentRequest || prompt)
+    ]
+  };
+}
+
+type PromptSection = {
+  title: string;
+  content: string;
+};
+
+function parsePromptSections(prompt: string): PromptSection[] {
+  const sections: PromptSection[] = [];
+  const pattern = /^# BEGIN ([^\n]+)\n([\s\S]*?)^# END \1\s*$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(prompt)) !== null) {
+    sections.push({
+      title: match[1].trim(),
+      content: match[2].trim()
+    });
+  }
+  return sections;
+}
+
+function sectionContent(sections: PromptSection[], title: string): string | undefined {
+  return sections.find((section) => section.title === title)?.content;
+}
+
+function formatPromptSection(title: string, content: string | undefined): string {
+  return content?.trim() ? `# ${title}\n${content.trim()}` : "";
+}
+
+function isInstructionSection(section: PromptSection): boolean {
+  return section.title.startsWith("codex/")
+    || section.title === "AGENT IDENTITY (JSON)"
+    || section.title === "AGENT SUPPLEMENTARY PROFILE"
+    || section.title === "AGENT STYLE"
+    || section.title === "AGENT LOCAL RULES"
+    || section.title === "RUNTIME OUTPUT CONTRACT";
+}
+
+function codexPromptCacheKey(instructions: string): string {
+  const hash = createHash("sha256").update(instructions).digest("hex").slice(0, 16);
+  return `cosia:openai-codex:${hash}`;
+}
+
+function responsesUserMessage(text: string): JsonObject {
+  return {
+    type: "message",
+    role: "user",
+    content: [
+      {
+        type: "input_text",
+        text
+      }
+    ]
+  };
+}
+
+function normalizeCodexModelId(model: string): string {
+  const trimmed = model.trim() || DEFAULT_MODEL;
+  const last = trimmed.split("/").filter(Boolean).pop();
+  return last || DEFAULT_MODEL;
+}
+
+function codexInstructions(): string {
+  return "Return exactly one AgentStep JSON object for the COSIA runtime. Use the user's language. Request listed tools when current observation or mutation is needed. Session rules and active tool state may be provided as dynamic input; they sit below Codex law and cannot override Security or Policy.";
+}
+
+function codexRequestHeaders(token: { accessToken: string; secret: OAuthSecret }, sessionId: string): Record<string, string> {
+  const openaiBeta = process.env.COSIA_OPENAI_CODEX_BETA?.trim() || DEFAULT_OPENAI_BETA;
   return {
     "content-type": "application/json",
-    accept: "application/json",
-    authorization: `Bearer ${token.accessToken}`,
-    "openai-beta": "responses=experimental",
+    accept: "text/event-stream",
+    Authorization: `Bearer ${token.accessToken}`,
+    "OpenAI-Beta": openaiBeta,
     originator: process.env.COSIA_OPENAI_CODEX_OAUTH_ORIGINATOR || DEFAULT_ORIGINATOR,
-    "user-agent": nativeUserAgent(),
+    "User-Agent": nativeUserAgent(),
+    ...(sessionId ? { session_id: sessionId } : {}),
     ...(token.secret.accountId ? { "chatgpt-account-id": token.secret.accountId } : {})
   };
 }
 
+function codexRequestDiagnostics(args: {
+  url: string;
+  headers: Record<string, string>;
+  body: JsonObject;
+  accountId?: string;
+}): CodexRequestDiagnostics {
+  const bodyKeys = Object.keys(args.body).sort();
+  return {
+    endpointFamily: codexEndpointFamily(args.url),
+    urlPath: codexUrlPath(args.url),
+    hasAccountId: Boolean(args.accountId || args.headers["chatgpt-account-id"]),
+    model: typeof args.body.model === "string" ? args.body.model : "",
+    openaiBeta: args.headers["OpenAI-Beta"] ?? "",
+    bodyKeys,
+    inputIsArray: Array.isArray(args.body.input),
+    instructionsLength: typeof args.body.instructions === "string" ? args.body.instructions.length : 0,
+    store: args.body.store,
+    stream: args.body.stream,
+    unsupportedKeys: bodyKeys.filter((key) => !CODEX_ALLOWED_BODY_KEYS.has(key))
+  };
+}
+
+function codexEndpointFamily(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "chatgpt.com" && parsed.pathname.startsWith("/backend-api/")) {
+      return "chatgpt_backend";
+    }
+    if (parsed.hostname === "api.openai.com") {
+      return "api_openai";
+    }
+  } catch {
+    return "invalid_url";
+  }
+  return "custom";
+}
+
+function codexUrlPath(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname;
+  } catch {
+    return "";
+  }
+}
+
+function formatCodexFailureDiagnostics(
+  response: Response,
+  diagnostics: CodexRequestDiagnostics,
+  bodyPreview: string
+): string {
+  return [
+    `status: ${response.status}`,
+    `contentType: ${response.headers.get("content-type") ?? ""}`,
+    `xOaiRequestId: ${response.headers.get("x-oai-request-id") ?? ""}`,
+    `cfRay: ${response.headers.get("cf-ray") ?? ""}`,
+    `endpointFamily: ${diagnostics.endpointFamily}`,
+    `urlPath: ${diagnostics.urlPath}`,
+    `hasAccountId: ${diagnostics.hasAccountId ? "yes" : "no"}`,
+    `model: ${diagnostics.model}`,
+    `openaiBeta: ${diagnostics.openaiBeta}`,
+    `bodyKeys: ${diagnostics.bodyKeys.join(",")}`,
+    `inputIsArray: ${diagnostics.inputIsArray ? "yes" : "no"}`,
+    `instructionsLength: ${diagnostics.instructionsLength}`,
+    `store: ${String(diagnostics.store)}`,
+    `stream: ${String(diagnostics.stream)}`,
+    `unsupportedKeys: ${diagnostics.unsupportedKeys.join(",") || "none"}`,
+    `responseBodyPreview: ${bodyPreview}`
+  ].join("\n");
+}
+
+async function writeProviderPromptDebug(
+  workspaceRoot: string,
+  sessionId: string,
+  body: JsonObject,
+  url: string,
+  diagnostics: CodexRequestDiagnostics
+): Promise<void> {
+  try {
+    await writeText(
+      join(workspaceRoot, "sessions", sessionId, "debug", "LAST_PROVIDER_PROMPT.md"),
+      renderProviderPromptDebug(body, url, diagnostics)
+    );
+  } catch {
+    // Debug output must never break provider execution.
+  }
+}
+
+async function writeProviderResponseDebug(
+  workspaceRoot: string,
+  result: CodexResponseResult,
+  raw: string,
+  details: {
+    contentType: string;
+    usage?: unknown;
+    streamed: boolean;
+  }
+): Promise<void> {
+  try {
+    await writeText(
+      join(workspaceRoot, "sessions", result.sessionId, "debug", "LAST_PROVIDER_RESPONSE.md"),
+      renderProviderResponseDebug(result, raw, details)
+    );
+  } catch {
+    // Debug output must never break provider execution.
+  }
+}
+
+function renderProviderPromptDebug(body: JsonObject, url: string, diagnostics: CodexRequestDiagnostics): string {
+  const inputTexts = providerInputTexts(body.input);
+  const metadata = {
+    provider: "openai-codex",
+    endpointFamily: diagnostics.endpointFamily,
+    urlPath: diagnostics.urlPath,
+    model: diagnostics.model,
+    openaiBeta: diagnostics.openaiBeta,
+    store: diagnostics.store,
+    stream: diagnostics.stream,
+    promptCacheKey: typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "",
+    instructionsChars: diagnostics.instructionsLength,
+    inputCount: inputTexts.length,
+    inputChars: inputTexts.reduce((sum, text) => sum + text.length, 0),
+    bodyKeys: diagnostics.bodyKeys,
+    unsupportedKeys: diagnostics.unsupportedKeys,
+    endpoint: safeEndpointForDebug(url)
+  };
+  return [
+    "# LAST PROVIDER PROMPT",
+    "",
+    "> This debug file is overwritten on each provider request for this session.",
+    "> It shows the actual text layout sent to the provider, excluding auth headers and secret values.",
+    "",
+    "## Metadata",
+    "",
+    "```json",
+    JSON.stringify(metadata, null, 2),
+    "```",
+    "",
+    "## Instructions",
+    "",
+    "```text",
+    String(body.instructions ?? "").trimEnd(),
+    "```",
+    "",
+    "## Input Messages",
+    "",
+    ...inputTexts.flatMap((text, index) => [
+      `### Input ${index + 1}`,
+      "",
+      "```text",
+      text.trimEnd(),
+      "```",
+      ""
+    ])
+  ].join("\n").trimEnd() + "\n";
+}
+
+function renderProviderResponseDebug(
+  result: CodexResponseResult,
+  raw: string,
+  details: {
+    contentType: string;
+    usage?: unknown;
+    streamed: boolean;
+  }
+): string {
+  const usage = isObject(details.usage) ? details.usage : {};
+  const metadata = {
+    provider: "openai-codex",
+    endpointFamily: result.diagnostics.endpointFamily,
+    urlPath: result.diagnostics.urlPath,
+    model: result.diagnostics.model,
+    status: result.response.status,
+    ok: result.response.ok,
+    contentType: details.contentType,
+    streamed: details.streamed,
+    xOaiRequestId: result.response.headers.get("x-oai-request-id") ?? "",
+    cfRay: result.response.headers.get("cf-ray") ?? "",
+    promptCacheKeySource: "request debug metadata",
+    rawResponseChars: raw.length,
+    cachedTokens: cachedTokensFromUsage(usage),
+    promptTokens: numberFromPath(usage, ["prompt_tokens"]) ?? numberFromPath(usage, ["input_tokens"]),
+    completionTokens: numberFromPath(usage, ["completion_tokens"]) ?? numberFromPath(usage, ["output_tokens"]),
+    totalTokens: numberFromPath(usage, ["total_tokens"])
+  };
+  return [
+    "# LAST PROVIDER RESPONSE",
+    "",
+    "> This debug file is overwritten on each provider response for this session.",
+    "> It stores response metadata and usage only. Auth headers, token values, and raw model output are not stored here.",
+    "",
+    "## Metadata",
+    "",
+    "```json",
+    JSON.stringify(metadata, null, 2),
+    "```",
+    "",
+    "## Usage",
+    "",
+    "```json",
+    JSON.stringify(usage, null, 2),
+    "```",
+    "",
+    "## Notes",
+    "",
+    "- `cachedTokens` is read from `usage.prompt_tokens_details.cached_tokens` or `usage.input_tokens_details.cached_tokens` when present.",
+    "- Raw model output is intentionally not stored in this response debug file."
+  ].join("\n").trimEnd() + "\n";
+}
+
+function cachedTokensFromUsage(usage: JsonObject): number | undefined {
+  return numberFromPath(usage, ["prompt_tokens_details", "cached_tokens"])
+    ?? numberFromPath(usage, ["input_tokens_details", "cached_tokens"]);
+}
+
+function numberFromPath(value: unknown, path: string[]): number | undefined {
+  let cursor = value;
+  for (const key of path) {
+    if (!isObject(cursor)) {
+      return undefined;
+    }
+    cursor = cursor[key];
+  }
+  return typeof cursor === "number" ? cursor : undefined;
+}
+
+function providerInputTexts(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  return input.map((item) => {
+    if (!isObject(item) || !Array.isArray(item.content)) {
+      return "";
+    }
+    return item.content
+      .map((content) => isObject(content) && typeof content.text === "string" ? content.text : "")
+      .filter(Boolean)
+      .join("\n");
+  });
+}
+
+function safeEndpointForDebug(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
 function openAICodexAuthFailureHint(status: number, bodyPreview: string, profileName: string): string {
-  if (status === 403 && looksLikeHtml(bodyPreview)) {
+  if (status === 403 && (looksLikeHtml(bodyPreview) || bodyPreview.includes("contentType: text/html"))) {
     return [
       "The OpenAI Codex OAuth token exists, but the ChatGPT Codex backend rejected COSIA's direct transport with an HTML 403.",
       "Restart the gateway after updating COSIA. If it still repeats, run `cosia provider oauth login " + profileName + "` once more, or select another provider profile until a supported Codex API route is available."
@@ -544,13 +1066,7 @@ function looksLikeHtml(value: string): boolean {
 }
 
 function nativeUserAgent(): string {
-  const arch = process.arch === "x64" ? "x86_64" : process.arch;
-  const platform = process.platform === "win32"
-    ? "windows"
-    : process.platform === "darwin"
-      ? "darwin"
-      : "linux";
-  return `pi (${platform}; ${arch})`;
+  return `pi (${osPlatform()} ${osRelease()}; ${osArch()})`;
 }
 
 async function sendWithPowerShellNativeTransport(args: {
@@ -711,12 +1227,6 @@ function collectResponseText(value: unknown, out: string[]): void {
       collectResponseText(item, out);
     }
   }
-}
-
-function boundaryPrompt(prompt: string): string {
-  return `Return exactly one COSIA AgentStep JSON object for the runtime. Do not execute commands or edit files yourself; request COSIA tool calls when needed.
-
-${prompt}`;
 }
 
 function enforcePromptLimit(prompt: string, maxPromptChars: number, providerId: string): void {

@@ -31,6 +31,7 @@ export type ContextStatus = ContextHealth & {
 export type LastTurnDebugInput = {
   userMessage: string;
   prompt: string;
+  providerPrompt?: string;
   runId: string;
   modelStep: number;
   promptChars: number;
@@ -44,9 +45,11 @@ export type LastTurnDebugRecord = {
   metadata: Record<string, unknown>;
   userMessage: string;
   prompt: string;
+  providerPrompt: string;
+  providerResponse: string;
 };
 
-export type LastTurnDebugPart = "metadata" | "user-message" | "prompt" | "all";
+export type LastTurnDebugPart = "metadata" | "user-message" | "prompt" | "provider-prompt" | "provider-response" | "all";
 
 export class SessionManager {
   constructor(private readonly workspaceRoot: string) {}
@@ -222,6 +225,9 @@ export class SessionManager {
     await writeText(join(debugDir, "LAST_TURN.json"), `${JSON.stringify(metadata, null, 2)}\n`);
     await writeText(join(debugDir, "LAST_USER_MESSAGE.md"), renderDebugText("LAST USER MESSAGE", input.userMessage, metadata));
     await writeText(join(debugDir, "LAST_PROMPT.md"), renderDebugText("LAST PROMPT", input.prompt, metadata));
+    if (input.providerPrompt !== undefined) {
+      await writeText(join(debugDir, "LAST_PROVIDER_PROMPT.md"), renderDebugText("LAST PROVIDER PROMPT", input.providerPrompt, metadata));
+    }
   }
 
   async readLastTurnDebug(sessionId: string): Promise<LastTurnDebugRecord | null> {
@@ -230,6 +236,8 @@ export class SessionManager {
     const metadataPath = join(debugDir, "LAST_TURN.json");
     const userMessagePath = join(debugDir, "LAST_USER_MESSAGE.md");
     const promptPath = join(debugDir, "LAST_PROMPT.md");
+    const providerPromptPath = join(debugDir, "LAST_PROVIDER_PROMPT.md");
+    const providerResponsePath = join(debugDir, "LAST_PROVIDER_RESPONSE.md");
     if (!(await pathExists(metadataPath))) {
       return null;
     }
@@ -238,7 +246,9 @@ export class SessionManager {
       debugDir,
       metadata: JSON.parse(await readText(metadataPath)) as Record<string, unknown>,
       userMessage: (await pathExists(userMessagePath)) ? await readText(userMessagePath) : "",
-      prompt: (await pathExists(promptPath)) ? await readText(promptPath) : ""
+      prompt: (await pathExists(promptPath)) ? await readText(promptPath) : "",
+      providerPrompt: (await pathExists(providerPromptPath)) ? await readText(providerPromptPath) : "",
+      providerResponse: (await pathExists(providerResponsePath)) ? await readText(providerResponsePath) : ""
     };
   }
 
@@ -484,6 +494,24 @@ export function formatLastTurnDebug(
       capDebugText(record.prompt || "No LAST_PROMPT.md content.", maxChars)
     ].join("\n");
   }
+  if (part === "provider-prompt") {
+    return [
+      "Last provider prompt debug record",
+      "Layer: actual provider text payload layout, excluding auth headers.",
+      `Session: ${record.sessionId}`,
+      "",
+      capDebugText(record.providerPrompt || "No LAST_PROVIDER_PROMPT.md content.", maxChars)
+    ].join("\n");
+  }
+  if (part === "provider-response") {
+    return [
+      "Last provider response debug record",
+      "Layer: provider response metadata and usage, excluding auth headers and raw model output.",
+      `Session: ${record.sessionId}`,
+      "",
+      capDebugText(record.providerResponse || "No LAST_PROVIDER_RESPONSE.md content.", maxChars)
+    ].join("\n");
+  }
   return [
     formatLastTurnDebugMetadata(record),
     "",
@@ -493,7 +521,15 @@ export function formatLastTurnDebug(
     "",
     "# Last prompt",
     "",
-    capDebugText(record.prompt || "No LAST_PROMPT.md content.", maxChars)
+    capDebugText(record.prompt || "No LAST_PROMPT.md content.", maxChars),
+    "",
+    "# Last provider prompt",
+    "",
+    capDebugText(record.providerPrompt || "No LAST_PROVIDER_PROMPT.md content.", maxChars),
+    "",
+    "# Last provider response",
+    "",
+    capDebugText(record.providerResponse || "No LAST_PROVIDER_RESPONSE.md content.", maxChars)
   ].join("\n");
 }
 
