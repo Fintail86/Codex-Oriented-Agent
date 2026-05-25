@@ -41,7 +41,7 @@ import {
 } from "./tool_growth.js";
 import type { PromptBlock } from "./prompt_builder.js";
 import type { RunProgressEvent } from "./runner.js";
-import type { SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./types.js";
+import type { GatewayRuntimeSnapshot, SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./types.js";
 
 const gatewayToolAssistedProviderTimeoutMs = 300_000;
 const gatewayRunJobDeadlineMs = 420_000;
@@ -151,6 +151,7 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
     sourceChannel: "gateway",
     gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
     gatewayRole: options.gatewayRole,
+    gatewayRuntime: gatewayRuntimeSnapshot(options, state),
     providerTimeoutAfterToolMs: options.source?.connector === "telegram" ? gatewayToolAssistedProviderTimeoutMs : undefined,
     runDeadlineMs: options.source?.connector === "telegram" ? gatewayRunJobDeadlineMs : undefined,
     promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
@@ -590,6 +591,29 @@ function pendingToolGrowthPromptBlock(pending: PendingToolGrowthRequest): Prompt
       "Interpret the current user message semantically and set toolGrowthDecision accordingly.",
       "Do not require slash commands for this natural-language decision."
     ].filter(Boolean).join("\n")
+  };
+}
+
+function gatewayRuntimeSnapshot(options: GatewayMessageOptions, state: GatewayChatState): GatewayRuntimeSnapshot {
+  return {
+    activeSessionId: state.activeSessionId,
+    providerId: state.providerId ?? options.providerId,
+    currentToolGrowthRoutineId: state.currentToolGrowthRoutineId,
+    pendingCommand: state.pendingCommand ? {
+      id: state.pendingCommand.id,
+      commandId: state.pendingCommand.commandId,
+      safety: state.pendingCommand.safety,
+      createdAt: state.pendingCommand.createdAt,
+      expiresAt: state.pendingCommand.expiresAt,
+      scope: state.pendingCommand.scope
+    } : undefined,
+    pendingToolGrowthRequest: state.pendingToolGrowthRequest ? {
+      request: state.pendingToolGrowthRequest.request,
+      capabilityName: state.pendingToolGrowthRequest.capabilityName,
+      summary: state.pendingToolGrowthRequest.summary,
+      readOnly: state.pendingToolGrowthRequest.readOnly,
+      createdAt: state.pendingToolGrowthRequest.createdAt
+    } : undefined
   };
 }
 

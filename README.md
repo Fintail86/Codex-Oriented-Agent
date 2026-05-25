@@ -1,4 +1,4 @@
-# COSIA v0.53.0
+# COSIA v0.54.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.53.0 adds connector-neutral Gateway role authorization: unknown users are blocked before LLM calls, one global master is bootstrapped locally, guest/admin roles are chat-scoped, and external tool access is checked by deterministic runtime gates.
+v0.54.0 adds model-facing read-only runtime inspector tools so agents can check COSIA state without guessing, hidden command translation, or mutation.
 
 ## Requirements
 
@@ -731,7 +731,7 @@ cosia tool activate <candidate-id> --agent <agent-id> --yes
 cosia tool blueprint list
 ```
 
-`cosia tool list` shows active catalog tools. The initial model-facing surface is intentionally small: `read_file`, `write_file`, `search_files`, and `shell_request`.
+`cosia tool list` shows active catalog tools. The initial model-facing surface is intentionally small: workspace file tools, `review_inbox_read`, read-only runtime inspector tools, and `shell_request`.
 
 Git, NPM, Python, Bun, and similar concrete tools are not default active tools or default blueprints. Workspace entries and structured files are generic facts first. Capability planning turns user requests plus facts into proposals before any shell command is suggested.
 
@@ -760,6 +760,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 ## Roadmap
 
 - v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
+- v0.54.0: Model-facing read-only runtime inspector tools let agents inspect jobs, pending actions, tool-growth routines, and runtime status without mutation.
 - v0.53.0: Gateway role authorization moves Telegram user permissions into connector-neutral runtime gates with one global master, chat-scoped guest/admin bindings, and tool-level external access checks.
 - v0.52.0: Telegram/Gateway run jobs enqueue long provider/tool loops so control commands stay responsive while work continues in the background.
 - v0.51.0: Delegation boundary aligned so routine workspace-local work is delegated under Policy while Codex self-amendment and system-level boundary changes remain final-approval gated.

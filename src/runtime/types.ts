@@ -264,11 +264,36 @@ export type ToolContext = {
   sourceChannel?: "cli" | "repl" | "gateway";
   gatewayActor?: GatewayActor;
   gatewayRole?: GatewayRole;
+  gatewayRuntime?: GatewayRuntimeSnapshot;
   forceOverwriteApproval?: boolean;
   approveOverwrite?: (filePath: string, request?: OverwriteApprovalRequest) => Promise<boolean>;
   onOverwriteApprovalRequired?: (request: OverwriteApprovalRequest) => Promise<void> | void;
   onCodexAmendmentRequired?: (request: CodexAmendmentApprovalRequest) => Promise<string | void> | string | void;
   policyAudit?: (event: PolicyAuditEventInput) => Promise<void>;
+};
+
+export type GatewayRuntimeSnapshot = {
+  activeSessionId?: string;
+  providerId?: string;
+  currentToolGrowthRoutineId?: string;
+  pendingCommand?: {
+    id: string;
+    commandId: string;
+    safety: string;
+    createdAt: string;
+    expiresAt: string;
+    scope?: {
+      chatId?: string;
+      sessionId?: string;
+    };
+  };
+  pendingToolGrowthRequest?: {
+    request: string;
+    capabilityName?: string;
+    summary?: string;
+    readOnly?: boolean;
+    createdAt: string;
+  };
 };
 
 export type OverwriteApprovalRequest = {

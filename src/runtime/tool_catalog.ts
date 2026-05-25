@@ -88,6 +88,66 @@ export const toolCatalog = {
     },
     description: "Read pending COSIA memory and skill review inbox items without mutating them."
   },
+  runtime_status_read: {
+    id: "runtime_status_read",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
+    description: "Read a sanitized compact COSIA runtime status summary without mutating state."
+  },
+  run_jobs_read: {
+    id: "run_jobs_read",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
+    description: "Read sanitized COSIA run job status for the current gateway/session scope."
+  },
+  tool_growth_status_read: {
+    id: "tool_growth_status_read",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
+    description: "Read sanitized tool growth routine status and next actions without mutating routines."
+  },
+  pending_actions_read: {
+    id: "pending_actions_read",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
+    description: "Read sanitized pending approval and action summaries without applying or cancelling them."
+  },
   shell_request: {
     id: "shell_request",
     category: "core",

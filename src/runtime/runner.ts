@@ -15,7 +15,7 @@ import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
 import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
-import type { AgentStep, CodexAmendmentApprovalRequest, ModelProvider, OverwriteApprovalRequest, ToolGrowthDecision, ToolGrowthRequest, ToolName } from "./types.js";
+import type { AgentStep, CodexAmendmentApprovalRequest, GatewayRuntimeSnapshot, ModelProvider, OverwriteApprovalRequest, ToolGrowthDecision, ToolGrowthRequest, ToolName } from "./types.js";
 import type { MemoryReviewSummary } from "./memory_manager.js";
 
 type RunOptions = {
@@ -46,6 +46,7 @@ type RunOptions = {
   sourceChannel?: "cli" | "repl" | "gateway";
   gatewayActor?: GatewayActor;
   gatewayRole?: GatewayRole;
+  gatewayRuntime?: GatewayRuntimeSnapshot;
 };
 
 export type RunProgressEvent = {
@@ -251,6 +252,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       sourceChannel: options.sourceChannel ?? "cli",
       gatewayActor: options.gatewayActor,
       gatewayRole: options.gatewayRole,
+      gatewayRuntime: options.gatewayRuntime,
       forceOverwriteApproval: options.forceOverwriteApproval,
       approveOverwrite: options.approveOverwriteFiles ? approveOverwrite : async () => false,
       onOverwriteApprovalRequired: async (request) => {

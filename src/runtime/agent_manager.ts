@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ensureDir, pathExists, readText, writeTextIfMissing } from "./fs_utils.js";
 import {
@@ -59,7 +59,7 @@ export class AgentManager {
       await writeTextIfMissing(join(agentDir, fileName), content);
     }
     const manifest = template === "cosia" ? cosiaManifest(agentId) : architectManifest(agentId);
-    await writeFile(join(agentDir, "manifest.json"), `${JSON.stringify(serializeAgentManifest(manifest), null, 2)}\n`, "utf8");
+    await writeAgentManifestSafely(join(agentDir, "manifest.json"), manifest);
     return manifest;
   }
 
@@ -95,7 +95,7 @@ export class AgentManager {
     for (const [fileName, content] of Object.entries(files)) {
       await writeTextIfMissing(join(agentDir, fileName), content);
     }
-    await writeFile(join(agentDir, "manifest.json"), `${JSON.stringify(serializeAgentManifest(agentManifestSchema.parse(manifest)), null, 2)}\n`, "utf8");
+    await writeAgentManifestSafely(join(agentDir, "manifest.json"), agentManifestSchema.parse(manifest));
     return manifest;
   }
 
@@ -115,7 +115,7 @@ export class AgentManager {
       !("blockedSkills" in parsed) ||
       !("skillWeights" in parsed)
     ) {
-      await writeFile(manifestPath, `${JSON.stringify(serializeAgentManifest(repaired), null, 2)}\n`, "utf8");
+      await writeAgentManifestSafely(manifestPath, repaired);
     }
     return repaired;
   }
@@ -273,6 +273,7 @@ function serializeAgentManifest(manifest: AgentManifest): Record<string, unknown
 }
 
 function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknown>): AgentManifest {
+  const latestToolCatalogMigrationVersion = 2;
   const isArchitect = manifest.name === "Architect Agent";
   const isCosia = manifest.name === "COSIA Agent" || manifest.id === defaultCosiaAgentId;
   const template = isArchitect
@@ -284,9 +285,9 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
     ? raw.toolCatalogMigrationVersion
     : 0;
   const nextToolCatalogMigrationVersion = template
-    ? Math.max(toolCatalogMigrationVersion, 1)
+    ? Math.max(toolCatalogMigrationVersion, latestToolCatalogMigrationVersion)
     : toolCatalogMigrationVersion;
-  const allowedTools = template && toolCatalogMigrationVersion < 1
+  const allowedTools = template && toolCatalogMigrationVersion < latestToolCatalogMigrationVersion
     ? migrateSafeDefaultReadOnlyTools(manifest.allowedTools)
     : manifest.allowedTools;
   const preferredSkills = manifest.preferredSkills ?? [];
@@ -320,6 +321,12 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
 function migrateSafeDefaultReadOnlyTools(allowedTools: string[]): string[] {
   const safeDefaultTools = defaultAgentToolIds.filter((toolId) => toolCatalog[toolId].permission === "read_only");
   return [...new Set([...allowedTools, ...safeDefaultTools])];
+}
+
+async function writeAgentManifestSafely(path: string, manifest: AgentManifest): Promise<void> {
+  const tempPath = `${path}.tmp-${Date.now()}`;
+  await writeFile(tempPath, `${JSON.stringify(serializeAgentManifest(manifest), null, 2)}\n`, "utf8");
+  await rename(tempPath, path);
 }
 
 function renderCustomAgentFiles(manifest: AgentManifest): Record<string, string> {

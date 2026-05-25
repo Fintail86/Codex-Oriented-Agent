@@ -11,6 +11,12 @@ import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
 import { ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
+import {
+  executePendingActionsRead,
+  executeRunJobsRead,
+  executeRuntimeStatusRead,
+  executeToolGrowthStatusRead
+} from "./runtime_inspector_tools.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
 import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
 import { executeCommandAdapterPlan, getActiveToolRecord, recordActiveToolExecution, type CommandAdapterPlan } from "./tool_acquisition.js";
@@ -89,6 +95,10 @@ export class ToolRegistry {
       const inbox = await new ReviewInboxService(ctx.workspaceRoot).list((parsed.filter ?? "all") as ReviewFilter);
       return { ok: true, content: formatReviewInboxReadResult(inbox) };
     });
+    this.registerCatalogTool("runtime_status_read", executeRuntimeStatusRead);
+    this.registerCatalogTool("run_jobs_read", executeRunJobsRead);
+    this.registerCatalogTool("tool_growth_status_read", executeToolGrowthStatusRead);
+    this.registerCatalogTool("pending_actions_read", executePendingActionsRead);
     this.registerCatalogTool("shell_request", async (args, ctx) => {
       const parsed = shellRequestArgs.parse(args);
       const approval = new ShellApprovalLedger(ctx.workspaceRoot).create({

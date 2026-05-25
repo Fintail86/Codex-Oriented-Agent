@@ -99,7 +99,7 @@ export function architectManifest(agentId: string): AgentManifest {
       "구현 계획"
     ],
     allowedTools: [...architectAllowedTools],
-    toolCatalogMigrationVersion: 1,
+    toolCatalogMigrationVersion: 2,
     preferredSkills: [],
     blockedSkills: [],
     skillWeights: {},
@@ -147,7 +147,7 @@ export function cosiaManifest(agentId: string): AgentManifest {
       "에이전트"
     ],
     allowedTools: [...cosiaAllowedTools],
-    toolCatalogMigrationVersion: 1,
+    toolCatalogMigrationVersion: 2,
     preferredSkills: [],
     blockedSkills: [],
     skillWeights: {},
