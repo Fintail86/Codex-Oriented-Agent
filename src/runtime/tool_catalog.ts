@@ -57,6 +57,17 @@ export const toolCatalog = {
     exposure: "model",
     description: "Search workspace files by path or content."
   },
+  review_inbox_read: {
+    id: "review_inbox_read",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    description: "Read pending COSIA memory and skill review inbox items without mutating them."
+  },
   shell_request: {
     id: "shell_request",
     category: "core",

@@ -19,6 +19,11 @@
       "workspace": "inside_only",
       "enabled": true
     },
+    "review_inbox_read": {
+      "permission": "read_only",
+      "workspace": "inside_only",
+      "enabled": true
+    },
     "shell_request": {
       "permission": "shell_request",
       "workspace": "inside_only",

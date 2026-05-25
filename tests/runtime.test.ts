@@ -160,6 +160,7 @@ describe("runtime setup", () => {
       "read_file",
       "write_file",
       "search_files",
+      "review_inbox_read",
       "shell_request"
     ]));
     expect(session.id).toMatch(/^session_\d{8}_001$/);
@@ -243,13 +244,19 @@ describe("runtime setup", () => {
     expect(prompt).toContain("Static prompt blocks such as AGENT STYLE");
     expect(prompt).toContain("prompt-loaded context snapshots");
     expect(prompt).toContain("current active toolset cannot inspect that runtime surface");
-    expect(prompt).toContain("/tool grow <request>");
+    expect(prompt).toContain("ask for permission to start the guided tool-growth routine");
+    expect(prompt).toContain("Should I start the tool creation routine?");
+    expect(prompt).toContain("Do not tell the user to run a slash or CLI command");
     expect(prompt).toContain("Hash-prefixed commands are not part of the runtime command surface");
 
     const policy = await new PolicyManager(root).loadPolicy();
     policy.disabledPermissions = [...policy.disabledPermissions, "shell_request"];
     const shellRequestDisabledPrompt = await buildPrompt({ workspaceRoot: root, agent, session, userPrompt: "Hello", policy });
-    expect(shellRequestDisabledPrompt).toContain("Available tools for this run: read_file, write_file, search_files");
+    const activeToolsLine = shellRequestDisabledPrompt
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("Available tools for this run:")) ?? "";
+    expect(activeToolsLine).toContain("review_inbox_read");
+    expect(activeToolsLine).not.toContain("shell_request");
     expect(shellRequestDisabledPrompt).toContain("read_file");
   });
 
@@ -4099,6 +4106,44 @@ describe("status and listing", () => {
     expect((await review.resolve(skillCandidate.id.slice(0, 8))).id).toBe(skillCandidate.id);
   });
 
+  it("exposes review_inbox_read as a read-only model tool", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Read review inbox");
+    const memory = new MemoryManager(root);
+    const [candidate] = await memory.appendCandidates([{
+      tier: "session",
+      ownerId: session.id,
+      kind: "note",
+      content: "Remember that review inbox read is a runtime inspection tool.",
+      importance: 2,
+      confidence: 0.8
+    }], session, "run-review-read", "cosia-agent");
+
+    const result = await new ToolRegistry().execute("review_inbox_read", { filter: "memory" }, {
+      workspaceRoot: root,
+      allowedTools: ["review_inbox_read"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      runId: "run-review-read",
+      sourceChannel: "cli"
+    });
+
+    expect(result.ok).toBe(true);
+    const parsed = JSON.parse(result.content) as {
+      totalPending: number;
+      memoryPending: number;
+      skillPending: number;
+      items: Array<{ type: string; id: string; summary: string }>;
+    };
+    expect(parsed).toMatchObject({ totalPending: 1, memoryPending: 1, skillPending: 0 });
+    expect(parsed.items[0]).toMatchObject({
+      type: "memory",
+      id: candidate.id.slice(0, 8)
+    });
+    expect((await memory.getCandidate(candidate.id)).record?.status).toBe("pending");
+  });
+
   it("previews and applies bulk discard for conflicted memory candidates", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
@@ -4545,10 +4590,10 @@ describe("status and listing", () => {
         }
       }
     };
-    const sent: Array<{ chatId: string; text: string }> = [];
+    const sent: Array<{ chatId: string; text: string; options?: { replyMarkup?: unknown } }> = [];
     const sender = {
-      sendMessage: async (chatId: string, text: string) => {
-        sent.push({ chatId, text });
+      sendMessage: async (chatId: string, text: string, options?: { replyMarkup?: unknown }) => {
+        sent.push({ chatId, text, options });
       }
     };
     let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
@@ -5028,6 +5073,74 @@ describe("status and listing", () => {
     expect(sent.at(-1)?.text).toContain(`/tool grow test ${routineId} --yes`);
   });
 
+  it("starts pending tool growth request from natural-language approval in Telegram", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Pending tool growth approval");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          activeSessionId: session.id,
+          providerId: "mock"
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_TOOL_GROWTH_REQUEST] 메모리 승격 대상이 있는지 확인해볼래?"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain("Should I start the tool creation routine?");
+    expect(state.chats["123"]?.pendingToolGrowthRequest?.capabilityName).toBe("memory_promotion_queue_read");
+    expect(state.chats["123"]?.currentToolGrowthRoutineId).toBeUndefined();
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "ㅇㅇ 시작해"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    const routineId = state.chats["123"]?.currentToolGrowthRoutineId;
+    expect(routineId).toMatch(/^grow_/);
+    expect(state.chats["123"]?.pendingToolGrowthRequest).toBeUndefined();
+    expect(sent.at(-1)?.text).toContain("좋아. 방금 제안한 도구 생성 루틴을 시작할게.");
+    expect(sent.at(-1)?.text).toContain(`Tool growth routine created: ${routineId}`);
+    expect(sent.at(-1)?.text).toContain("read-only memory promotion queue inspector");
+  });
+
   it("turns Telegram write_file overwrite denials into explicit pending apply previews", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
@@ -5491,13 +5604,17 @@ describe("status and listing", () => {
     })}\n`, "utf8");
     expect(await stopGateway(root)).toMatchObject({
       staleLock: true,
-      requested: false
+      staleLockRemoved: true,
+      requested: false,
+      stopped: true,
+      alreadyStopped: true
     });
     expect(await pathExists(gatewayStopRequestPath(root))).toBe(false);
-    expect(await unlockStaleGateway(root, { staleOnly: true })).toMatchObject({
-      removed: true
-    });
     expect(await pathExists(gatewayProcessLockPath(root))).toBe(false);
+    expect(await unlockStaleGateway(root, { staleOnly: true })).toMatchObject({
+      removed: false,
+      reason: "no process lock"
+    });
   });
 
   it("starts the gateway with the active provider profile and private Telegram token", async () => {

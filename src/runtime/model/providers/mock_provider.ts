@@ -12,6 +12,19 @@ export class MockProvider implements ModelProvider {
 
   async complete(input: ModelInput): Promise<ModelOutput> {
     const normalizedPrompt = input.prompt.toLowerCase();
+    if (input.prompt.includes("# BEGIN PENDING TOOL GROWTH REQUEST")) {
+      return parseModelOutput(JSON.stringify({
+        type: "final",
+        content: "좋아. 방금 제안한 도구 생성 루틴을 시작할게.",
+        memoryCandidates: [],
+        skillCandidates: [],
+        toolGrowthRequest: null,
+        toolGrowthDecision: {
+          action: "start",
+          reason: "Mock provider interpreted the user reply as approval to start the pending tool-growth routine."
+        }
+      }));
+    }
     if (input.prompt.includes("TOOL_DRAFT_REQUEST")) {
       return parseModelOutput(JSON.stringify({
         type: "final",
@@ -40,6 +53,20 @@ export class MockProvider implements ModelProvider {
         }),
         memoryCandidates: [],
         skillCandidates: []
+      }));
+    }
+    if (input.prompt.includes("[MOCK_TOOL_GROWTH_REQUEST]")) {
+      return parseModelOutput(JSON.stringify({
+        type: "final",
+        content: "To answer this, COSIA needs a read-only memory promotion queue inspector. It would list pending memory candidates and next actions without mutating anything. Should I start the tool creation routine?",
+        memoryCandidates: [],
+        skillCandidates: [],
+        toolGrowthRequest: {
+          request: "read-only memory promotion queue inspector",
+          capabilityName: "memory_promotion_queue_read",
+          summary: "Inspect pending memory candidates, risk, conflicts, and next actions without mutating files, approvals, memory, tools, policy, or connectors.",
+          readOnly: true
+        }
       }));
     }
     if (normalizedPrompt.includes("call read_file on a relevant path before returning final") && !input.prompt.includes("Tool: read_file")) {

@@ -8,6 +8,7 @@ import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
+import { ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
 import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
 import { executeCommandAdapterPlan, getActiveToolRecord, recordActiveToolExecution, type CommandAdapterPlan } from "./tool_acquisition.js";
@@ -28,6 +29,10 @@ const writeFileArgs = z.object({
 const searchFilesArgs = z.object({
   query: z.string().min(1),
   directory: z.preprocess((value) => value === "" ? undefined : value, z.string().min(1).optional())
+});
+
+const reviewInboxReadArgs = z.object({
+  filter: z.preprocess((value) => value === "" ? undefined : value, z.enum(["all", "memory", "skill"]).optional())
 });
 
 const shellRequestArgs = z.object({
@@ -76,6 +81,11 @@ export class ToolRegistry {
         ]);
         const content = formatSearchResult(contentMatches, pathSearch.matches, pathSearch.diagnostics);
         return { ok: true, content };
+    });
+    this.registerCatalogTool("review_inbox_read", async (args, ctx) => {
+      const parsed = reviewInboxReadArgs.parse(args);
+      const inbox = await new ReviewInboxService(ctx.workspaceRoot).list((parsed.filter ?? "all") as ReviewFilter);
+      return { ok: true, content: formatReviewInboxReadResult(inbox) };
     });
     this.registerCatalogTool("shell_request", async (args, ctx) => {
       const parsed = shellRequestArgs.parse(args);
@@ -252,6 +262,26 @@ function summarizeToolArgs(name: ToolName, args: unknown): Record<string, unknow
     return summarizeShellToolArgs(args);
   }
   return summarizePolicyArgs(args);
+}
+
+function formatReviewInboxReadResult(inbox: Awaited<ReturnType<ReviewInboxService["list"]>>): string {
+  const items = inbox.items.map((item) => ({
+    index: item.index,
+    type: item.type,
+    id: item.idPrefix,
+    status: item.status,
+    risk: item.risk,
+    conflicts: item.conflictCount,
+    recommendedAction: item.recommendedAction,
+    createdAt: item.createdAt,
+    summary: item.summary
+  }));
+  return JSON.stringify({
+    totalPending: inbox.totalPending,
+    memoryPending: inbox.memoryPending,
+    skillPending: inbox.skillPending,
+    items
+  }, null, 2);
 }
 
 async function runWorkspaceCommand(command: string, args: string[], cwd: string): Promise<ToolResult> {

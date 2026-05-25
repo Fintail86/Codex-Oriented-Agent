@@ -60,6 +60,7 @@ export const agentManifestSchema = z.object({
   }),
   selectionTriggers: z.array(z.string().min(1)).default([]),
   allowedTools: z.array(toolNameSchema),
+  toolCatalogMigrationVersion: z.number().int().nonnegative().default(0),
   preferredSkills: z.array(z.string()).default([]),
   blockedSkills: z.array(z.string()).default([]),
   skillWeights: z.record(z.string(), z.number().min(0).max(5)).default({}),
@@ -204,11 +205,29 @@ export const skillMetadataSchema = z.object({
 
 export type SkillMetadata = z.infer<typeof skillMetadataSchema>;
 
+export const toolGrowthRequestSchema = z.object({
+  request: z.string().min(1),
+  capabilityName: z.string().min(1).optional(),
+  summary: z.string().min(1).optional(),
+  readOnly: z.boolean().optional()
+});
+
+export type ToolGrowthRequest = z.infer<typeof toolGrowthRequestSchema>;
+
+export const toolGrowthDecisionSchema = z.object({
+  action: z.enum(["start", "cancel", "clarify", "none"]),
+  reason: z.string().optional()
+});
+
+export type ToolGrowthDecision = z.infer<typeof toolGrowthDecisionSchema>;
+
 export const finalAgentStepSchema = z.object({
   type: z.literal("final"),
   content: z.string(),
   memoryCandidates: z.array(memoryCandidateSchema).optional(),
-  skillCandidates: z.array(skillCandidateSchema).optional()
+  skillCandidates: z.array(skillCandidateSchema).optional(),
+  toolGrowthRequest: toolGrowthRequestSchema.nullable().optional(),
+  toolGrowthDecision: toolGrowthDecisionSchema.nullable().optional()
 });
 
 export const toolCallAgentStepSchema = z.object({

@@ -13,7 +13,7 @@ import { SelfImprovementGovernor } from "./self_improvement.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolRegistry } from "./tool_registry.js";
-import type { AgentStep, CodexAmendmentApprovalRequest, ModelProvider, OverwriteApprovalRequest, ToolName } from "./types.js";
+import type { AgentStep, CodexAmendmentApprovalRequest, ModelProvider, OverwriteApprovalRequest, ToolGrowthDecision, ToolGrowthRequest, ToolName } from "./types.js";
 import type { MemoryReviewSummary } from "./memory_manager.js";
 
 type RunOptions = {
@@ -34,6 +34,8 @@ type RunOptions = {
   forceOverwriteApproval?: boolean;
   onCodexAmendmentRequired?: (request: CodexAmendmentApprovalRequest) => Promise<string | void> | string | void;
   stopAfterCodexAmendmentRequired?: boolean;
+  onToolGrowthRequested?: (request: ToolGrowthRequest) => Promise<void> | void;
+  onToolGrowthDecision?: (decision: ToolGrowthDecision) => Promise<void> | void;
   manualSkillIds?: string[];
   agentId?: string;
   sourceChannel?: "cli" | "repl" | "gateway";
@@ -154,6 +156,12 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
         continue;
       }
       finalContent = output.step.content;
+      if (output.step.toolGrowthRequest) {
+        await options.onToolGrowthRequested?.(output.step.toolGrowthRequest);
+      }
+      if (output.step.toolGrowthDecision) {
+        await options.onToolGrowthDecision?.(output.step.toolGrowthDecision);
+      }
       const candidates = await memory.appendCandidates(output.step.memoryCandidates, session, runId, agent.id);
       const skillCandidates = skills.appendCandidates(output.step.skillCandidates, session, runId, agent.id);
       try {

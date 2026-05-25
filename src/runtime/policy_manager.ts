@@ -233,6 +233,11 @@ export const defaultPolicy: PolicyConfig = {
       workspace: "inside_only",
       enabled: true
     },
+    review_inbox_read: {
+      permission: "read_only",
+      workspace: "inside_only",
+      enabled: true
+    },
     shell_request: {
       permission: "shell_request",
       workspace: "inside_only",
@@ -537,9 +542,12 @@ export function normalizePolicy(policy: PolicyConfig): PolicyConfig {
       name
     }])
   );
-  const tools = Object.fromEntries(
-    Object.entries(policy.tools).filter(([name]) => toolNameSchema.safeParse(name).success && !isBundledToolId(name))
-  );
+  const tools = {
+    ...defaultPolicy.tools,
+    ...Object.fromEntries(
+      Object.entries(policy.tools).filter(([name]) => toolNameSchema.safeParse(name).success && !isBundledToolId(name))
+    )
+  };
   return policyConfigSchema.parse({
     ...policy,
     tools,

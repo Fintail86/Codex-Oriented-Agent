@@ -30,7 +30,8 @@ import {
   ToolGrowthManager,
   type ToolGrowthRoutine
 } from "./tool_growth.js";
-import type { SessionMetadata } from "./types.js";
+import type { PromptBlock } from "./prompt_builder.js";
+import type { SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./types.js";
 
 export type GatewaySourceContext = {
   connector?: "telegram";
@@ -45,8 +46,13 @@ export type GatewayChatState = {
   activeSessionId?: string;
   providerId?: string;
   pendingCommand?: PendingCommand;
+  pendingToolGrowthRequest?: PendingToolGrowthRequest;
   currentToolGrowthRoutineId?: string;
   updatedAt?: string;
+};
+
+export type PendingToolGrowthRequest = ToolGrowthRequest & {
+  createdAt: string;
 };
 
 export type GatewayMessageOptions = {
@@ -109,6 +115,8 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   }
   let pendingOverwrite: PendingCommand | undefined;
   let pendingCodexAmendment: PendingCommand | undefined;
+  let pendingToolGrowthRequest: PendingToolGrowthRequest | undefined;
+  let toolGrowthDecision: ToolGrowthDecision | undefined;
   const output = await withSessionLock(options.workspaceRoot, state.activeSessionId, {
     owner: options.owner
   }, async () => runSession(options.workspaceRoot, {
@@ -116,6 +124,7 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     prompt: input,
     providerId: state.providerId,
     sourceChannel: "gateway",
+    promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
     forceOverwriteApproval: options.source?.connector === "telegram",
     stopAfterOverwriteApprovalRequired: true,
     stopAfterCodexAmendmentRequired: true,
@@ -139,6 +148,15 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
       });
       return pendingCodexAmendment.preview;
     },
+    onToolGrowthRequested: (request) => {
+      pendingToolGrowthRequest = {
+        ...request,
+        createdAt: new Date(now()).toISOString()
+      };
+    },
+    onToolGrowthDecision: (decision) => {
+      toolGrowthDecision = decision;
+    },
     onEvent: () => undefined
   }));
   if (pendingCodexAmendment) {
@@ -146,6 +164,18 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
   }
   if (pendingOverwrite) {
     return done(pendingOverwrite.preview, touch({ ...state, pendingCommand: pendingOverwrite }));
+  }
+  if (toolGrowthDecision && state.pendingToolGrowthRequest) {
+    return handleToolGrowthDecisionAfterRun({
+      ...options,
+      state,
+      now,
+      output,
+      decision: toolGrowthDecision
+    });
+  }
+  if (pendingToolGrowthRequest) {
+    return done(output, touch({ ...state, pendingToolGrowthRequest }));
   }
   return done(output, state);
 }
@@ -548,6 +578,63 @@ async function handleToolGrowthGatewayCommand(options: GatewayMessageOptions & {
   return done("[BLOCKED] Unknown /tool grow command.", state);
 }
 
+async function handleToolGrowthDecisionAfterRun(options: GatewayMessageOptions & {
+  state: GatewayChatState;
+  now: () => number;
+  output: string;
+  decision: ToolGrowthDecision;
+}): Promise<GatewayMessageResult> {
+  const pending = options.state.pendingToolGrowthRequest;
+  if (!pending) {
+    return done("[BLOCKED] No pending tool creation routine request.", options.state);
+  }
+  if (options.decision.action === "cancel") {
+    return done(options.output, touch({ ...options.state, pendingToolGrowthRequest: undefined }));
+  }
+  if (options.decision.action !== "start") {
+    return done(options.output, options.state);
+  }
+  const agentId = options.state.activeSessionId
+    ? (await new SessionManager(options.workspaceRoot).loadSession(options.state.activeSessionId)).assignedAgentId ?? options.policy.agents.defaultAgentId
+    : options.policy.agents.defaultAgentId;
+  if (!agentId) {
+    return done("No default agent. Run `cosia agent bootstrap` locally first.", options.state);
+  }
+  const providerId = options.state.providerId ?? options.providerId;
+  const result = await new ToolGrowthManager(options.workspaceRoot).start({
+    request: pending.request,
+    agentId,
+    providerId
+  });
+  return done([
+    options.output,
+    "",
+    formatToolGrowthStart(result, { surface: "slash" })
+  ].join("\n"), touch({
+    ...options.state,
+    pendingToolGrowthRequest: undefined,
+    currentToolGrowthRoutineId: result.routine.id
+  }));
+}
+
+function pendingToolGrowthPromptBlock(pending: PendingToolGrowthRequest): PromptBlock {
+  return {
+    title: "PENDING TOOL GROWTH REQUEST",
+    source: "runtime",
+    required: true,
+    content: [
+      "A previous assistant turn proposed a guided tool-growth routine and asked the user whether to start it.",
+      `Request: ${pending.request}`,
+      pending.capabilityName ? `Capability name: ${pending.capabilityName}` : undefined,
+      pending.summary ? `Summary: ${pending.summary}` : undefined,
+      `Read only: ${pending.readOnly === false ? "false" : "true"}`,
+      "",
+      "Interpret the current user message semantically and set toolGrowthDecision accordingly.",
+      "Do not require slash commands for this natural-language decision."
+    ].filter(Boolean).join("\n")
+  };
+}
+
 async function handleHashCommand(options: GatewayMessageOptions & {
   input: string;
   state: GatewayChatState;
@@ -799,6 +886,7 @@ function formatPlainApprovalNeedsApply(pending: PendingCommand): string {
     "  /cancel"
   ].join("\n");
 }
+
 
 function formatHashCommandRemovedNotice(): string {
   return [

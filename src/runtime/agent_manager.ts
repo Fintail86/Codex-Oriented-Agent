@@ -7,6 +7,7 @@ import {
   cosiaAgentTemplates,
   cosiaManifest
 } from "./templates.js";
+import { defaultAgentToolIds, toolCatalog } from "./tool_catalog.js";
 import { agentManifestSchema, type AgentManifest } from "./types.js";
 import { normalizeTriggerText, triggerMatches } from "./skills/skill_text.js";
 
@@ -279,7 +280,15 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
     : isCosia
       ? cosiaManifest(manifest.id)
       : undefined;
-  const allowedTools = manifest.allowedTools;
+  const toolCatalogMigrationVersion = typeof raw.toolCatalogMigrationVersion === "number"
+    ? raw.toolCatalogMigrationVersion
+    : 0;
+  const nextToolCatalogMigrationVersion = template
+    ? Math.max(toolCatalogMigrationVersion, 1)
+    : toolCatalogMigrationVersion;
+  const allowedTools = template && toolCatalogMigrationVersion < 1
+    ? migrateSafeDefaultReadOnlyTools(manifest.allowedTools)
+    : manifest.allowedTools;
   const preferredSkills = manifest.preferredSkills ?? [];
   const blockedSkills = manifest.blockedSkills ?? [];
   const skillWeights = manifest.skillWeights ?? {};
@@ -287,6 +296,7 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
   const selectionTriggers = "selectionTriggers" in raw ? manifest.selectionTriggers : (template?.selectionTriggers ?? manifest.selectionTriggers);
   if (
     allowedTools.length === manifest.allowedTools.length &&
+    manifest.toolCatalogMigrationVersion === nextToolCatalogMigrationVersion &&
     manifest.identity === identity &&
     manifest.selectionTriggers === selectionTriggers &&
     manifest.preferredSkills === preferredSkills &&
@@ -300,10 +310,16 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
     identity,
     selectionTriggers,
     allowedTools,
+    toolCatalogMigrationVersion: nextToolCatalogMigrationVersion,
     preferredSkills,
     blockedSkills,
     skillWeights
   };
+}
+
+function migrateSafeDefaultReadOnlyTools(allowedTools: string[]): string[] {
+  const safeDefaultTools = defaultAgentToolIds.filter((toolId) => toolCatalog[toolId].permission === "read_only");
+  return [...new Set([...allowedTools, ...safeDefaultTools])];
 }
 
 function renderCustomAgentFiles(manifest: AgentManifest): Record<string, string> {

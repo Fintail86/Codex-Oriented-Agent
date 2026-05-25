@@ -47,6 +47,7 @@ export type GatewayStopResult = {
   alreadyStopped: boolean;
   timedOut: boolean;
   staleLock: boolean;
+  staleLockRemoved: boolean;
   message: string;
   hint?: string;
 };
@@ -108,18 +109,24 @@ export async function stopGateway(
       alreadyStopped: true,
       timedOut: false,
       staleLock: false,
+      staleLockRemoved: false,
       message: "Gateway is not running. No stop request needed."
     };
   }
   if (isGatewayProcessLockStale(lock, workspaceRoot, now())) {
+    const unlock = await unlockStaleGateway(workspaceRoot, { staleOnly: true, now });
+    await removeGatewayStopRequest(workspaceRoot);
     return {
       requested: false,
-      stopped: false,
-      alreadyStopped: false,
+      stopped: true,
+      alreadyStopped: true,
       timedOut: false,
       staleLock: true,
-      message: "Gateway is not running cleanly, but a stale process lock may exist.",
-      hint: "Run: cosia gateway unlock --stale-only"
+      staleLockRemoved: unlock.removed,
+      message: unlock.removed
+        ? "Gateway was not running. Stale process lock was removed."
+        : "Gateway was not running. Stale process lock cleanup was not needed.",
+      hint: unlock.removed ? undefined : "Check: cosia gateway status"
     };
   }
 
@@ -135,6 +142,7 @@ export async function stopGateway(
         alreadyStopped: false,
         timedOut: false,
         staleLock: false,
+        staleLockRemoved: false,
         message: "Gateway stopped."
       };
     }
@@ -146,6 +154,7 @@ export async function stopGateway(
     alreadyStopped: false,
     timedOut: true,
     staleLock: false,
+    staleLockRemoved: false,
     message: `Gateway did not stop within ${timeoutMs}ms.`,
     hint: [
       "COSIA did not force-kill the process.",
@@ -164,7 +173,7 @@ export async function restartGateway(
     reason: "restart",
     now: options.now
   });
-  if (stop.timedOut || stop.staleLock) {
+  if (stop.timedOut || (stop.staleLock && !stop.staleLockRemoved)) {
     throw new Error(formatGatewayStopResult(stop));
   }
   await waitForNoGatewayLock(workspaceRoot, options.timeoutMs ?? defaultStopTimeoutMs, options.now);
@@ -266,6 +275,7 @@ export function formatGatewayStopResult(result: GatewayStopResult): string {
     `Already stopped: ${result.alreadyStopped}`,
     `Timed out: ${result.timedOut}`,
     `Stale lock: ${result.staleLock}`,
+    `Stale lock removed: ${result.staleLockRemoved}`,
     result.hint ? `Hint:\n${result.hint}` : undefined
   ].filter(Boolean).join("\n");
 }
