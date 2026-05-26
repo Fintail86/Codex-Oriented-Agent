@@ -1,25 +1,24 @@
 import {
-  defaultProviderConfigForId,
   loadRuntimeConfig,
-  providerConfigSchema,
-  providerTypeForId,
   type ProviderProfile,
   type RuntimeConfig
 } from "./runtime_config.js";
 import {
-  getProviderApiKeySecret,
-  getProviderOAuthSecret,
   loadPrivateRuntimeConfig,
   savePrivateRuntimeConfig,
   setProviderApiKeySecret,
   unsetProviderSecrets,
   updatePrivateRuntimeConfig
 } from "./private_config.js";
+import { providerSecretStatus } from "./provider_auth.js";
 import {
   missingProviderProfileHint as providerOnboardingMissingProviderProfileHint,
   validateProviderProfileAddOptions
 } from "./provider_onboarding.js";
 import type { PolicyConfig } from "./policy_manager.js";
+
+export { providerApiKeyForProfile } from "./provider_auth.js";
+export { providerConfigForProfile } from "./provider_runtime.js";
 
 export type ProviderProfileAddOptions = {
   providerId: string;
@@ -123,52 +122,6 @@ export async function listProviderProfileSummaries(workspaceRoot: string): Promi
     .map((profile) => summarizeProviderProfile(workspaceRoot, runtime, profile));
 }
 
-export function providerConfigForProfile(
-  workspaceRoot: string,
-  policy: PolicyConfig,
-  profile: ProviderProfile
-): ReturnType<typeof providerConfigSchema.parse> {
-  const template = policy.model.providers[profile.providerId]
-    ?? defaultProviderConfigForId(profile.providerId);
-  const base = providerConfigSchema.parse({
-    ...template,
-    type: template.type ?? providerTypeForId(profile.providerId),
-    enabled: true
-  });
-  if (profile.providerId === "openai-codex" || base.type === "openai-codex") {
-    return {
-      ...base,
-      enabled: true,
-      type: "openai-codex",
-      model: profile.model ?? base.model
-    };
-  }
-  if (profile.providerId === "codex-cli" || base.type === "codex-cli") {
-    return {
-      ...base,
-      enabled: true,
-      type: "codex-cli"
-    };
-  }
-  const apiKeyEnv = profile.auth.mode === "env"
-    ? profile.auth.envName
-    : base.apiKeyEnv;
-  return {
-    ...base,
-    enabled: true,
-    baseUrl: profile.baseUrl ?? base.baseUrl,
-    model: profile.model ?? base.model,
-    apiKeyEnv
-  };
-}
-
-export function providerApiKeyForProfile(workspaceRoot: string, profile: ProviderProfile): string | undefined {
-  if (profile.auth.mode !== "secret") {
-    return undefined;
-  }
-  return getProviderApiKeySecret(workspaceRoot, profile.name);
-}
-
 export function formatProviderProfileList(items: ProviderProfileSummary[]): string {
   if (!items.length) {
     return [
@@ -238,21 +191,6 @@ function summarizeProviderProfile(workspaceRoot: string, runtime: RuntimeConfig,
     baseUrl: profile.baseUrl,
     secretStatus: providerSecretStatus(workspaceRoot, profile)
   };
-}
-
-function providerSecretStatus(workspaceRoot: string, profile: ProviderProfile): ProviderProfileSummary["secretStatus"] {
-  if (profile.auth.mode === "oauth") {
-    if (profile.providerId === "openai-codex") {
-      return getProviderOAuthSecret(workspaceRoot, profile.name)?.accessToken
-        ? "configured via private secret"
-        : "missing";
-    }
-    return "not required";
-  }
-  if (profile.auth.mode === "env") {
-    return process.env[profile.auth.envName] ? "configured via env" : "missing";
-  }
-  return getProviderApiKeySecret(workspaceRoot, profile.name) ? "configured via private secret" : "missing";
 }
 
 function assertProfileName(name: string): void {
