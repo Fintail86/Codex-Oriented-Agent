@@ -41,6 +41,7 @@ import {
   checkProvider,
   createProvider,
   listProviders,
+  resolveProviderSelection,
   OpenAICompatibleProvider,
   formatPolicyAuditEvents,
   PolicyAuditLog,
@@ -198,6 +199,16 @@ describe("model parsing and run loop", () => {
     expect(listed.some((provider) => provider.id === "codex-cli" && !provider.isDefault)).toBe(true);
     expect(listed.some((provider) => provider.id === "openrouter" && provider.type === "openai-compatible")).toBe(true);
     expect(listed.some((provider) => provider.id === "mock" && provider.enabled)).toBe(true);
+    expect(resolveProviderSelection(policy, "mock")).toBe("mock");
+    expect(() => resolveProviderSelection(policy, "openrouter")).toThrow("Provider id 'openrouter' is not a runtime selection");
+
+    await addProviderProfile(root, "openrouter-profile", {
+      providerId: "openrouter",
+      apiKey: "test-openrouter-key",
+      model: "openai/gpt-test"
+    });
+    const withProfile = await new PolicyManager(root).loadPolicy();
+    expect(resolveProviderSelection(withProfile, "openrouter-profile")).toBe("openrouter-profile");
   });
 
   it("repairs v0.15 provider policy shape with provider types and OpenRouter preset", async () => {

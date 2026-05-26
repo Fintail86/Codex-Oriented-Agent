@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { AgentManager } from "./agent_manager.js";
 import { CapabilityPlanner, type CapabilityFamily, type CapabilityProposal, stableJsonStringify } from "./capability.js";
-import { createProvider } from "./model/provider_registry.js";
+import { createProvider, resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
 import { ShellApprovalLedger, type ShellApproval } from "./shell_approval.js";
@@ -668,10 +668,7 @@ export class ToolAcquisitionManager {
 
   private async createLlmDraft(capability: CapabilityProposal, sourceShellApprovalIds: string[], providerId = "default"): Promise<Record<string, unknown>> {
     const policy = await new PolicyManager(this.workspaceRoot).loadPolicy();
-    const resolvedProviderId = providerId === "default" ? policy.model.activeProviderProfile : providerId;
-    if (!resolvedProviderId) {
-      throw new Error("No active provider profile is configured. Run `cosia provider profile add ...` and `cosia provider profile use <name>`.");
-    }
+    const resolvedProviderId = resolveProviderSelection(policy, providerId);
     const provider = createProvider(resolvedProviderId, this.workspaceRoot, { policy });
     const linkedShell = sourceShellApprovalIds
       .map((id) => new ShellApprovalLedger(this.workspaceRoot).get(id))

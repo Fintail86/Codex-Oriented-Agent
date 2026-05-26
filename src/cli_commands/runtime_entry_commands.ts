@@ -130,7 +130,7 @@ import {
 export function registerStatusDoctorCommands(program: Command): void {
   program
     .command("status")
-    .option("--provider <provider>", "Provider smoke check override: active profile default, a provider profile name, provider id, or mock", "default")
+    .option("--provider <provider>", "Provider smoke check override: active profile default, a provider profile name, or mock", "default")
     .option("--compact", "Print a compact status summary.", false)
     .option("--json", "Print structured JSON status.", false)
     .description("Show workspace, runtime, memory, session, and provider status.")
@@ -393,7 +393,7 @@ export function registerStartRunChatCommands(program: Command): void {
     .option("--session <session-id>", "Use an existing session.")
     .option("--new-session", "Create a new session.", false)
     .option("--goal <goal>", "Goal for --new-session.")
-    .option("--provider <provider>", "Model provider for the suggested or launched chat.", "default")
+    .option("--provider <provider>", "Provider profile name or mock for the suggested or launched chat.", "default")
     .option("--no-chat", "Do not enter chat; print the selected next command.")
     .description("Guided entrypoint for choosing or creating a session.")
     .action(async (options: { session?: string; newSession: boolean; goal?: string; provider: string; chat?: boolean }) => {
@@ -490,7 +490,7 @@ export function registerStartRunChatCommands(program: Command): void {
     .requiredOption("--session <session-id>", "Session id")
     .requiredOption("--prompt <prompt>", "Current user request")
     .option("--agent <agent-id>", "Agent id for this run. Overrides the session assignment without changing it.")
-    .option("--provider <provider>", "Provider override: provider profile name, provider id, or mock")
+    .option("--provider <provider>", "Provider override: provider profile name or mock")
     .option("--provider-timeout-ms <ms>", "Override provider call timeout in milliseconds")
     .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
     .option("--require-tools", "Require at least one read_file or search_files call before final.", false)
@@ -520,7 +520,7 @@ export function registerStartRunChatCommands(program: Command): void {
     .command("chat")
     .requiredOption("--session <session-id>", "Session id")
     .option("--agent <agent-id>", "Agent id for this chat. Overrides the session assignment without changing it.")
-    .option("--provider <provider>", "Provider override: provider profile name, provider id, or mock")
+    .option("--provider <provider>", "Provider override: provider profile name or mock")
     .option("--provider-timeout-ms <ms>", "Override provider call timeout in milliseconds")
     .option("--approve-overwrite", "Allow interactive overwrite approval prompts", false)
     .option("--require-tools", "Require at least one read_file or search_files call before final.", false)

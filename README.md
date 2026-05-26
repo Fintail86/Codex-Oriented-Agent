@@ -1,4 +1,4 @@
-# COSIA v0.61.0
+# COSIA v0.62.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.61.0 splits the previously monolithic runtime test suite into feature-focused files while preserving the current public behavior.
+v0.62.0 tightens provider selection around explicit provider profiles. Runtime `--provider` overrides accept profile names or `mock`; provider ids are setup templates, not runtime selections.
 
 ## Requirements
 
@@ -760,6 +760,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.62.0: Provider id runtime selection is blocked; runtime provider overrides now use explicit provider profile names or `mock`.
 - v0.61.0: Runtime tests split into feature-focused files while preserving the existing 155-test behavior baseline.
 - v0.60-v0.66: Remaining cleanup round focused on docs/backlog reconciliation, test splitting, provider legacy/auth boundaries, runtime domain splits, deprecated alias removal, and stale compatibility removal.
 - v0.59.0: Private direct master Gateway chats where chat id and user id match are treated as remote CLI owner surfaces for cataloged commandId execution.

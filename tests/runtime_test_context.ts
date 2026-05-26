@@ -16,7 +16,7 @@ import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMe
 import { formatMvpChecklist } from "../src/runtime/mvp_checklist.js";
 import { modelInstructionForRetry, parseModelOutput } from "../src/runtime/model/model_provider.js";
 import { ProviderError } from "../src/runtime/model/provider_errors.js";
-import { checkProvider, createProvider, listProviders } from "../src/runtime/model/provider_registry.js";
+import { checkProvider, createProvider, listProviders, resolveProviderSelection } from "../src/runtime/model/provider_registry.js";
 import { OpenAICompatibleProvider, type FetchLike } from "../src/runtime/model/providers/openai_compatible_provider.js";
 import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_audit.js";
 import { applyPendingApproval, cancelPendingApproval, formatPendingApprovals, getPendingApprovalSummary } from "../src/runtime/pending_approvals.js";
@@ -223,6 +223,7 @@ export {
   checkProvider,
   createProvider,
   listProviders,
+  resolveProviderSelection,
   OpenAICompatibleProvider,
   formatPolicyAuditEvents,
   PolicyAuditLog,

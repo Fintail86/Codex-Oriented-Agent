@@ -133,7 +133,7 @@ export function registerToolCommands(program: Command): void {
     .option("--max-count <n>", "Compatibility shortcut for tools that accept maxCount.")
     .option("--from-capability <id>", "Create a draft from a capability proposal.")
     .option("--request <text>", "Create a tool growth routine from a user request.")
-    .option("--provider <provider>", "Model provider for LLM tool draft generation.", "default")
+    .option("--provider <provider>", "Provider profile name or mock for LLM tool draft generation.", "default")
     .option("--agent <agent-id>", "Target agent id for activation.")
     .option("--reason <reason>", "Reason for discard/reject/deactivate.")
     .option("--yes", "Apply an activation. Required for tool activate.", false)
@@ -162,7 +162,7 @@ export function registerToolCommands(program: Command): void {
           const growth = new ToolGrowthManager(workspaceRoot);
           const action = toolId ?? (options.request ? "start" : "review");
           if (action === "start") {
-            if (!options.request) throw new Error("Usage: cosia tool grow --request \"<text>\" [--agent <agent-id>] [--provider <provider>]");
+            if (!options.request) throw new Error("Usage: cosia tool grow --request \"<text>\" [--agent <agent-id>] [--provider <profile-or-mock>]");
             console.log(formatToolGrowthStart(await growth.start({
               request: options.request,
               agentId: options.agent,
@@ -200,7 +200,7 @@ export function registerToolCommands(program: Command): void {
             return;
           }
           if (action === "retry") {
-            if (!extraId) throw new Error("Usage: cosia tool grow retry <routine-id> [--provider <provider>]");
+            if (!extraId) throw new Error("Usage: cosia tool grow retry <routine-id> [--provider <profile-or-mock>]");
             console.log(formatToolGrowthStart(await growth.retry(extraId, { providerId: options.provider }), { advanced: options.advanced }));
             return;
           }

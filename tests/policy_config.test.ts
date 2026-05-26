@@ -41,6 +41,7 @@ import {
   checkProvider,
   createProvider,
   listProviders,
+  resolveProviderSelection,
   OpenAICompatibleProvider,
   formatPolicyAuditEvents,
   PolicyAuditLog,

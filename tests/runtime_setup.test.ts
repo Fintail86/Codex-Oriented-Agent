@@ -41,6 +41,7 @@ import {
   checkProvider,
   createProvider,
   listProviders,
+  resolveProviderSelection,
   OpenAICompatibleProvider,
   formatPolicyAuditEvents,
   PolicyAuditLog,
@@ -186,7 +187,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.61.0\"");
+    expect(policyJson).toContain("\"version\": \"0.62.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };

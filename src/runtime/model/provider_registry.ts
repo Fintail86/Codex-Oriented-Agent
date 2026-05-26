@@ -163,6 +163,25 @@ export function listProviders(policy: PolicyConfig): ProviderListItem[] {
 
 export function resolveProviderSelection(policy: PolicyConfig, requested?: string): string {
   if (requested && requested !== "default") {
+    if (requested === "mock") {
+      return requested;
+    }
+    if (policy.model.providerProfiles[requested]) {
+      return requested;
+    }
+    const providerId = normalizeProviderId(requested);
+    if (policy.model.providers[providerId]) {
+      throw new ProviderError("missing_config", `Provider id '${requested}' is not a runtime selection. Use a provider profile name instead.`, {
+        hint: [
+          `Create a profile for ${providerId}:`,
+          `  cosia provider setup --provider ${providerId}`,
+          "",
+          "Then select or pass the profile name:",
+          "  cosia provider profile use <name>",
+          "  cosia run --provider <name> ..."
+        ].join("\n")
+      });
+    }
     return requested;
   }
   if (policy.model.activeProviderProfile) {

@@ -409,7 +409,7 @@ export function registerAgentSessionCommands(program: Command): void {
     .argument("<session-id>")
     .option("--content <summary>", "Compact session summary")
     .option("--from-context", "Generate a summary proposal from budgeted context.", false)
-    .option("--provider <provider>", "Model provider for --from-context")
+    .option("--provider <provider>", "Provider profile name or mock for --from-context")
     .option("--provider-timeout-ms <ms>", "Override provider timeout for --from-context")
     .option("--yes", "Write generated summary instead of previewing it.", false)
     .description("Write SESSION_SUMMARY.md for a session.")
