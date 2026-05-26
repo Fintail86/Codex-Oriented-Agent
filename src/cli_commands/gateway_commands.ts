@@ -37,7 +37,7 @@ import {
   formatImproveStatus,
   SelfImprovementGovernor
 } from "../runtime/self_improvement.js";
-import { formatSkillCandidate, formatSkillCheckResult, formatSkillMigrationResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "../runtime/skill_manager.js";
+import { formatSkillCandidate, formatSkillCheckResult, formatSkillPromotionPreview, formatSkillSelectionExplanation, SkillManager } from "../runtime/skill_manager.js";
 import { formatStatusReport, getStatusReport } from "../runtime/status_report.js";
 import { formatSessionChoices, formatStartOverview, recommendStartSession, sessionFromChoice } from "../runtime/start_flow.js";
 import { formatGatewayStatus, formatGatewayStopResult, formatGatewayUnlockResult, restartGateway, startGateway, stopGateway, unlockStaleGateway } from "../runtime/gateway_supervisor.js";
@@ -87,7 +87,7 @@ import {
 import { getToolCatalogEntry, isToolId, toolCatalog, toolNameValues } from "../runtime/tool_catalog.js";
 import { ToolRegistry } from "../runtime/tool_registry.js";
 import { formatShellApprovalList, formatShellApprovalPreview, ShellApprovalLedger } from "../runtime/shell_approval.js";
-import { memoryScopeSchema, memoryTierSchema } from "../runtime/types.js";
+import { memoryTierSchema } from "../runtime/types.js";
 import type { SessionMetadata } from "../runtime/types.js";
 import {
   formatActiveTool,

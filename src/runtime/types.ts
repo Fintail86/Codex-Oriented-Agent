@@ -1,19 +1,6 @@
 import { z } from "zod";
 import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 
-export const memoryScopeSchema = z.enum([
-  "global",
-  "user",
-  "codex",
-  "agent",
-  "project",
-  "session",
-  "task",
-  "tool"
-]);
-
-export type MemoryScope = z.infer<typeof memoryScopeSchema>;
-
 export const memoryTierSchema = z.enum([
   "core",
   "agent",
@@ -64,12 +51,7 @@ export const agentManifestSchema = z.object({
   toolCatalogMigrationVersion: z.number().int().nonnegative().default(0),
   preferredSkills: z.array(z.string()).default([]),
   blockedSkills: z.array(z.string()).default([]),
-  skillWeights: z.record(z.string(), z.number().min(0).max(5)).default({}),
-  // Legacy v0.9 agent-local skill fields. They are still accepted so old
-  // workspaces can be inspected and migrated into the global skill toolbox.
-  skills: z.array(z.string()).default([]),
-  skillTriggers: z.record(z.string(), z.array(z.string())).default({}),
-  memoryScopes: z.array(memoryScopeSchema)
+  skillWeights: z.record(z.string(), z.number().min(0).max(5)).default({})
 });
 
 export type AgentManifest = z.infer<typeof agentManifestSchema>;
@@ -124,8 +106,6 @@ const nullableOptional = <T extends z.ZodType>(schema: T) => z.preprocess((value
 
 export const memoryCandidateSchema = z.object({
   tier: nullableOptional(memoryTierSchema),
-  scope: nullableOptional(memoryScopeSchema),
-  legacyScope: nullableOptional(memoryScopeSchema),
   ownerId: nullableOptional(z.string()),
   kind: z.string().min(1),
   content: z.string().min(1),
@@ -145,7 +125,6 @@ export const memoryCandidateRecordSchema = memoryCandidateSchema.extend({
   id: z.string().min(1),
   status: memoryCandidateStatusSchema,
   tier: memoryTierSchema,
-  scope: memoryScopeSchema,
   sourceSessionId: z.string().min(1),
   sourceAgentId: z.string().min(1),
   runId: z.string().optional(),
@@ -303,9 +282,6 @@ export type ToolDefinition = {
 export type MemoryRecord = {
   id: string;
   tier: MemoryTier;
-  scope: MemoryScope;
-  legacyScope: MemoryScope | null;
-  ownerType: string;
   ownerId: string | null;
   kind: string;
   content: string;

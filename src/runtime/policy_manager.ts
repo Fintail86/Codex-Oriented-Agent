@@ -16,7 +16,7 @@ import {
   stripRuntimeConfig
 } from "./runtime_config.js";
 import { isBundledToolId } from "./tool_catalog.js";
-import { memoryScopeSchema, memoryTierSchema, riskLevelSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
+import { memoryTierSchema, riskLevelSchema, toolNameSchema, toolPermissionSchema } from "./types.js";
 
 const policyToolSchema = z.object({
   permission: toolPermissionSchema,
@@ -157,7 +157,6 @@ export const policyConfigSchema = z.object({
   memory: z.object({
     longTermWrite: z.literal("candidate_promote_only"),
     candidateTiers: z.array(memoryTierSchema).default(["core", "agent", "session"]),
-    candidateScopes: z.array(memoryScopeSchema),
     promotionConflictPolicy: z.literal("block_until_resolved").default("block_until_resolved"),
     archivePolicy: z.literal("explicit_cli_only").default("explicit_cli_only"),
     promotionPaths: z.object({
@@ -179,8 +178,6 @@ export const policyConfigSchema = z.object({
       requireNoConflict: z.boolean(),
       allowTiers: z.array(memoryTierSchema).default(["session", "agent"]),
       denyTiers: z.array(memoryTierSchema).default(["core"]),
-      allowScopes: z.array(memoryScopeSchema),
-      denyScopes: z.array(memoryScopeSchema),
       denyKinds: z.array(z.string().min(1))
     }).default({
       mode: "balanced",
@@ -188,8 +185,6 @@ export const policyConfigSchema = z.object({
       requireNoConflict: true,
       allowTiers: ["session", "agent"],
       denyTiers: ["core"],
-      allowScopes: ["agent", "project", "session", "task", "tool"],
-      denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
     })
   }),
@@ -215,7 +210,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.57.0",
+  version: "0.58.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },
@@ -324,7 +319,6 @@ export const defaultPolicy: PolicyConfig = {
   memory: {
     longTermWrite: "candidate_promote_only",
     candidateTiers: ["core", "agent", "session"],
-    candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"],
     promotionConflictPolicy: "block_until_resolved",
     archivePolicy: "explicit_cli_only",
     promotionPaths: {
@@ -340,8 +334,6 @@ export const defaultPolicy: PolicyConfig = {
       requireNoConflict: true,
       allowTiers: ["session", "agent"],
       denyTiers: ["core"],
-      allowScopes: ["agent", "project", "session", "task", "tool"],
-      denyScopes: ["codex", "user", "global"],
       denyKinds: ["security", "policy", "credential", "secret"]
     }
   },
@@ -682,7 +674,6 @@ ${policy.disabledPermissions.map((permission) => `- \`${permission}\``).join("\n
 
 - Long-term memory write policy: \`${policy.memory.longTermWrite}\`
 - Candidate tiers: ${policy.memory.candidateTiers.map((tier) => `\`${tier}\``).join(", ")}
-- Candidate scopes: ${policy.memory.candidateScopes.map((scope) => `\`${scope}\``).join(", ")}
 - Promotion conflict policy: \`${policy.memory.promotionConflictPolicy}\`
 - Archive policy: \`${policy.memory.archivePolicy}\`
 - Promotion paths: session->agent \`${policy.memory.promotionPaths.sessionToAgent}\`, session->core \`${policy.memory.promotionPaths.sessionToCore}\`, agent->core \`${policy.memory.promotionPaths.agentToCore}\`, core->skill \`${policy.memory.promotionPaths.coreToSkillCandidate}\`, core->codex \`${policy.memory.promotionPaths.coreToCodexAmendment}\`

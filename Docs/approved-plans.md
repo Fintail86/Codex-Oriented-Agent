@@ -57,6 +57,7 @@ This directory keeps approved COSIA implementation plans as separate versioned M
 - [v0.55 Telegram Bot API Compliance & Gateway Hardening](plans/v0.55-telegram-bot-api-compliance-hardening.md)
 - [v0.56 CLI Command Catalog Refactor](plans/v0.56-cli-command-catalog-refactor.md)
 - [v0.57 Gateway Surface Registry Refactor](plans/v0.57-gateway-surface-registry-refactor.md)
+- [v0.58 Memory / Skill Store Remodel And Legacy Removal](plans/v0.58-memory-skill-store-remodel-legacy-removal.md)
 - [Current Revised Roadmap: Session Assignment -> Memory Ownership -> Provider Hardening](plans/roadmap-session-memory-provider.md)
 
 ## Notes

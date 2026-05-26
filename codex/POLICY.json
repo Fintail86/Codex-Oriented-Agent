@@ -1,5 +1,5 @@
 {
-  "version": "0.56.0",
+  "version": "0.58.0",
   "agents": {
     "defaultAgentId": "cosia-agent"
   },
@@ -120,16 +120,6 @@
       "agent",
       "session"
     ],
-    "candidateScopes": [
-      "global",
-      "user",
-      "codex",
-      "agent",
-      "project",
-      "session",
-      "task",
-      "tool"
-    ],
     "promotionConflictPolicy": "block_until_resolved",
     "archivePolicy": "explicit_cli_only",
     "promotionPaths": {
@@ -151,18 +141,6 @@
       ],
       "denyTiers": [
         "core"
-      ],
-      "allowScopes": [
-        "agent",
-        "project",
-        "session",
-        "task",
-        "tool"
-      ],
-      "denyScopes": [
-        "codex",
-        "user",
-        "global"
       ],
       "denyKinds": [
         "security",

@@ -219,12 +219,5 @@ ${record.content.trim()}
 }
 
 function serializeAgentManifest(manifest: AgentManifest): Record<string, unknown> {
-  const output: Record<string, unknown> = { ...manifest };
-  if (!manifest.skills.length) {
-    delete output.skills;
-  }
-  if (!Object.keys(manifest.skillTriggers ?? {}).length) {
-    delete output.skillTriggers;
-  }
-  return output;
+  return { ...manifest };
 }

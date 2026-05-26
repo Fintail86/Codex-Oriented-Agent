@@ -3,7 +3,6 @@ import { detectSecrets } from "../risk_classifier.js";
 import type { SkillCandidateRecord } from "../types.js";
 import { highRiskConfirmPhrase, type PromoteSkillResult } from "./skill_candidates.js";
 import type { SkillCheckResult } from "./skill_mirror.js";
-import type { SkillMigrationResult } from "./skill_migration.js";
 import type { SkillSelectionExplainRow } from "./skill_selector.js";
 import { pad, preview } from "./skill_text.js";
 
@@ -94,19 +93,4 @@ export function formatSkillSelectionExplanation(rows: SkillSelectionExplainRow[]
     row.reason
   ].join("  "));
   return [header, ...body].join("\n");
-}
-
-export function formatSkillMigrationResult(result: SkillMigrationResult): string {
-  const lines = [
-    result.changed ? "Migrated legacy agent skills." : "Skill migration preview. No changes made.",
-    `Agent: ${result.agentId}`,
-    `Migratable: ${result.migrated.length ? result.migrated.join(", ") : "none"}`
-  ];
-  for (const skipped of result.skipped) {
-    lines.push(`Skipped: ${skipped.skillId} (${skipped.reason})`);
-  }
-  if (!result.changed && result.migrated.length) {
-    lines.push("Re-run with --yes to migrate these skills.");
-  }
-  return lines.join("\n");
 }

@@ -794,7 +794,6 @@ const cliCoverageInputs: CommandInput[] = [
   coverageCommand("skill.block", ["skill", "block"], "mutation", "Block a skill for an agent.", ["skill", "block"], ["skill", "block", "$skillId"], { required: ["skillId"] }),
   coverageCommand("skill.unblock", ["skill", "unblock"], "mutation", "Unblock a skill for an agent.", ["skill", "unblock"], ["skill", "unblock", "$skillId"], { required: ["skillId"] }),
   coverageCommand("skill.select", ["skill", "select"], "read_only", "Explain deterministic skill selection.", ["skill", "select"]),
-  coverageCommand("skill.migrate", ["skill", "migrate"], "mutation", "Migrate legacy agent-local skills.", ["skill", "migrate"]),
   coverageCommand("policy.group", ["policy"], "read_only", "Show policy command help.", ["policy", "help"]),
   coverageCommand("codex.group", ["codex"], "read_only", "Show Codex law command help.", ["codex", "help"]),
   coverageCommand("codex.amendment.group", ["codex", "amendment"], "read_only", "Show Codex amendment command help.", ["codex", "amendment", "help"]),

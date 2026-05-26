@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { classifyMemoryCandidate, redactedCandidatePreview, type RiskClassification } from "./risk_classifier.js";
@@ -8,12 +8,10 @@ import { createSkillCandidateRecord, ensureSkillCandidateTable, upsertSkillCandi
 import {
   memoryCandidateRecordSchema,
   memoryCandidateSchema,
-  memoryScopeSchema,
   memoryTierSchema,
   type MemoryCandidate,
   type MemoryCandidateRecord,
   type MemoryRecord,
-  type MemoryScope,
   type MemoryTier,
   type RiskLevel,
   type SessionMetadata,
@@ -22,12 +20,9 @@ import {
 
 type AddMemoryInput = {
   tier?: MemoryTier;
-  scope?: MemoryScope;
   content: string;
-  ownerType?: string;
   ownerId?: string;
   kind?: string;
-  legacyScope?: MemoryScope | null;
   sourceSessionId?: string;
   sourceAgentId?: string;
   confidence?: number;
@@ -37,7 +32,7 @@ type AddMemoryInput = {
   expiresAt?: string | null;
 };
 
-type UpdateMemoryInput = Partial<Pick<AddMemoryInput, "tier" | "scope" | "content" | "ownerId" | "kind" | "confidence" | "importance">>;
+type UpdateMemoryInput = Partial<Pick<AddMemoryInput, "tier" | "content" | "ownerId" | "kind" | "confidence" | "importance">>;
 
 type MemorySearchOptions = {
   tier?: MemoryTier;
@@ -48,10 +43,7 @@ type MemorySearchOptions = {
 
 type MemoryRow = {
   id: string;
-  tier: MemoryTier | null;
-  scope: MemoryScope;
-  legacy_scope: MemoryScope | null;
-  owner_type: string;
+  tier: MemoryTier;
   owner_id: string | null;
   kind: string;
   content: string;
@@ -90,25 +82,9 @@ type TierPromotionRow = {
   record_json: string;
 };
 
-type QueueMigrationReport = {
-  version: 1;
-  generatedAt: string;
-  migrations: Array<{
-    id: string;
-    source: "memory_candidates.jsonl" | "auto_promotions.jsonl";
-    imported: number;
-    skippedLegacy: number;
-    skippedInvalid: number;
-    legacyLines: string[];
-    invalidLines: string[];
-  }>;
-};
-
 export type CandidateView = {
   displayId: string;
-  legacy: boolean;
-  record?: MemoryCandidateRecord;
-  raw: Record<string, unknown>;
+  record: MemoryCandidateRecord;
 };
 
 export type MemorySearchResult = {
@@ -196,8 +172,6 @@ export type AutoPromotionPolicy = {
   requireNoConflict: boolean;
   allowTiers?: MemoryTier[];
   denyTiers?: MemoryTier[];
-  allowScopes: MemoryScope[];
-  denyScopes: MemoryScope[];
   denyKinds: string[];
 };
 
@@ -231,22 +205,26 @@ export type MemoryReviewSummary = {
   reviews: CandidateReview[];
 };
 
-const memoryColumnMigrations: Record<string, string> = {
-  tier: "TEXT",
-  legacy_scope: "TEXT",
-  valid_from: "TEXT",
-  valid_until: "TEXT",
-  expires_at: "TEXT",
-  archived_at: "TEXT",
-  archive_reason: "TEXT",
-  replaced_by_memory_id: "TEXT"
-};
-
 const conflictRank: Record<MemoryConflictType, number> = {
   duplicate: 0,
   overlap: 1,
   possible_conflict: 2
 };
+
+function assertCanonicalColumns(db: DatabaseSync, tableName: string, expectedColumns: string[]): void {
+  const actual = (db.prepare(`PRAGMA table_info(${tableName})`).all() as TableColumn[]).map((column) => column.name);
+  const actualSet = new Set(actual);
+  const missing = expectedColumns.filter((column) => !actualSet.has(column));
+  const extra = actual.filter((column) => !expectedColumns.includes(column));
+  if (missing.length || extra.length) {
+    throw new Error([
+      `Unsupported legacy memory database schema for ${tableName}.`,
+      missing.length ? `Missing columns: ${missing.join(", ")}` : undefined,
+      extra.length ? `Legacy columns: ${extra.join(", ")}` : undefined,
+      "Reset the local memory store by removing ignored runtime file memory/longterm.sqlite, then rerun the command."
+    ].filter(Boolean).join(" "));
+  }
+}
 
 export class MemoryManager {
   private readonly memoryDir: string;
@@ -266,10 +244,7 @@ export class MemoryManager {
       db.exec(`
         CREATE TABLE IF NOT EXISTS memories (
           id TEXT PRIMARY KEY,
-          tier TEXT,
-          scope TEXT NOT NULL,
-          legacy_scope TEXT,
-          owner_type TEXT NOT NULL,
+          tier TEXT NOT NULL,
           owner_id TEXT,
           kind TEXT NOT NULL,
           content TEXT NOT NULL,
@@ -289,19 +264,32 @@ export class MemoryManager {
           replaced_by_memory_id TEXT
         );
       `);
-      const existingColumns = new Set((db.prepare("PRAGMA table_info(memories)").all() as TableColumn[]).map((column) => column.name));
-      for (const [columnName, columnDefinition] of Object.entries(memoryColumnMigrations)) {
-        if (!existingColumns.has(columnName)) {
-          db.exec(`ALTER TABLE memories ADD COLUMN ${columnName} ${columnDefinition}`);
-        }
-      }
+      assertCanonicalColumns(db, "memories", [
+        "id",
+        "tier",
+        "owner_id",
+        "kind",
+        "content",
+        "source_session_id",
+        "source_agent_id",
+        "confidence",
+        "importance",
+        "status",
+        "created_at",
+        "updated_at",
+        "last_accessed_at",
+        "valid_from",
+        "valid_until",
+        "expires_at",
+        "archived_at",
+        "archive_reason",
+        "replaced_by_memory_id"
+      ]);
       db.exec(`
         CREATE TABLE IF NOT EXISTS memory_candidates (
           id TEXT PRIMARY KEY,
           status TEXT NOT NULL,
-          tier TEXT,
-          scope TEXT NOT NULL,
-          legacy_scope TEXT,
+          tier TEXT NOT NULL,
           owner_id TEXT,
           kind TEXT NOT NULL,
           content TEXT NOT NULL,
@@ -353,28 +341,30 @@ export class MemoryManager {
           record_json TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS queue_migrations (
-          id TEXT PRIMARY KEY,
-          source_path TEXT NOT NULL,
-          target_table TEXT NOT NULL,
-          status TEXT NOT NULL,
-          started_at TEXT NOT NULL,
-          completed_at TEXT,
-          imported_count INTEGER NOT NULL DEFAULT 0,
-          skipped_count INTEGER NOT NULL DEFAULT 0,
-          report_path TEXT
-        );
       `);
       ensureSkillCandidateTable(db);
-      const candidateColumns = new Set((db.prepare("PRAGMA table_info(memory_candidates)").all() as TableColumn[]).map((column) => column.name));
-      if (!candidateColumns.has("tier")) {
-        db.exec("ALTER TABLE memory_candidates ADD COLUMN tier TEXT");
-      }
-      if (!candidateColumns.has("legacy_scope")) {
-        db.exec("ALTER TABLE memory_candidates ADD COLUMN legacy_scope TEXT");
-      }
-      repairMemoryTierRows(db);
-      repairCandidateTierRows(db);
+      assertCanonicalColumns(db, "memory_candidates", [
+        "id",
+        "status",
+        "tier",
+        "owner_id",
+        "kind",
+        "content",
+        "importance",
+        "confidence",
+        "source_session_id",
+        "source_agent_id",
+        "run_id",
+        "created_at",
+        "reviewed_at",
+        "promoted_memory_id",
+        "auto_promotion_id",
+        "risk_level",
+        "risk_reasons_json",
+        "discard_reason",
+        "record_json",
+        "updated_at"
+      ]);
     } finally {
       db.close();
     }
@@ -455,21 +445,10 @@ export class MemoryManager {
     if (!updates.length) {
       return target;
     }
-    const ownership = normalizeMemoryOwnership({
-      tier: input.tier ?? target.tier,
-      scope: input.scope ?? target.scope,
-      ownerId: input.ownerId !== undefined ? input.ownerId : target.ownerId,
-      sourceSessionId: target.sourceSessionId ?? undefined,
-      sourceAgentId: target.sourceAgentId ?? undefined,
-      existingLegacyScope: target.legacyScope
-    });
     const next: MemoryRecord = {
       ...target,
-      tier: ownership.tier,
-      scope: ownership.scope,
-      legacyScope: ownership.legacyScope,
-      ownerType: ownership.tier,
-      ownerId: ownership.ownerId,
+      tier: input.tier ?? target.tier,
+      ownerId: input.ownerId !== undefined ? input.ownerId : target.ownerId,
       kind: input.kind ?? target.kind,
       content: input.content ?? target.content,
       confidence: input.confidence ?? target.confidence,
@@ -718,7 +697,7 @@ export class MemoryManager {
     if (!agentId) {
       throw new Error("Cannot append memory candidates without an executing or assigned agent.");
     }
-    this.ensureQueueStorage();
+    this.ensureSchema();
     const records: MemoryCandidateRecord[] = candidates.map((candidate) => {
       const parsed = memoryCandidateSchema.parse(candidate);
       return normalizeCandidateRecord({
@@ -753,7 +732,7 @@ export class MemoryManager {
 
   async listCandidates(includeAll = false): Promise<CandidateView[]> {
     const entries = await this.readCandidateEntries();
-    return entries.filter((entry) => includeAll || entry.record?.status === "pending" || (entry.legacy && !includeAll));
+    return entries.filter((entry) => includeAll || entry.record.status === "pending");
   }
 
   async getCandidate(candidateId: string): Promise<CandidateView> {
@@ -775,9 +754,6 @@ export class MemoryManager {
     const entries = await this.readCandidateEntries();
     const index = this.resolveCandidateIndex(entries, candidateId);
     const entry = entries[index];
-    if (entry.legacy || !entry.record) {
-      throw new Error(`Legacy memory candidate cannot be promoted or discarded: ${candidateId}`);
-    }
     if (entry.record.status !== "pending") {
       throw new Error(`Memory candidate is not pending: ${candidateId}`);
     }
@@ -821,7 +797,7 @@ export class MemoryManager {
     const olderThanDays = options.olderThanDays ?? 7;
     const apply = options.apply ?? true;
     const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
-    this.ensureQueueStorage();
+    this.ensureSchema();
     const db = this.open();
     try {
       const rows = db.prepare("SELECT id, record_json FROM memory_candidates ORDER BY created_at ASC, rowid ASC").all() as CandidateRow[];
@@ -883,7 +859,7 @@ export class MemoryManager {
   }
 
   async reviewPendingCandidates(options: { latest?: boolean } = {}): Promise<CandidateReview[]> {
-    const candidates = (await this.listCandidates()).flatMap((candidate) => candidate.record ? [candidate.record] : []);
+    const candidates = (await this.listCandidates()).map((candidate) => candidate.record);
     const selected = options.latest ? latestRunCandidates(candidates) : candidates;
     return selected.map((candidate) => {
       const conflicts = this.findConflictsForCandidate(candidate);
@@ -904,7 +880,7 @@ export class MemoryManager {
   }
 
   revertPromotion(promotionId: string, reason: string): AutoPromotionRecord {
-    this.ensureQueueStorage();
+    this.ensureSchema();
     const promotion = resolvePromotionFromEntries(this.readPromotionEntries(), promotionId, false);
     const entries = this.readCandidateEntriesSync();
     const index = this.resolveCandidateIndex(entries, promotion.candidateId);
@@ -999,18 +975,18 @@ export class MemoryManager {
     const entries = this.readCandidateEntriesSync();
     const index = this.resolveCandidateIndex(entries, candidateId);
     const entry = entries[index];
-    if (entry.legacy || !entry.record || entry.record.status !== "pending") {
+    if (entry.record.status !== "pending") {
       throw new Error(`Memory candidate is not pending: ${candidateId}`);
     }
     return this.transactCandidateUpdate(entries, index, (db) => {
       const promoted = insertMemory(db, candidateToMemoryInput(entry.record as MemoryCandidateRecord));
       const promotion: AutoPromotionRecord = {
         id: randomUUID(),
-        candidateId: entry.record!.id,
+        candidateId: entry.record.id,
         promotedMemoryId: promoted.id,
-        runId: entry.record!.runId,
-        sessionId: entry.record!.sourceSessionId,
-        agentId: entry.record!.sourceAgentId,
+        runId: entry.record.runId,
+        sessionId: entry.record.sourceSessionId,
+        agentId: entry.record.sourceAgentId,
         riskLevel: classification.riskLevel,
         reasons: classification.reasons,
         policyMode,
@@ -1019,7 +995,7 @@ export class MemoryManager {
       return {
         result: promotion,
         candidate: {
-          ...entry.record!,
+          ...entry.record,
           status: "auto_promoted",
           reviewedAt: new Date().toISOString(),
           promotedMemoryId: promoted.id,
@@ -1079,7 +1055,7 @@ export class MemoryManager {
     index: number,
     work: (db: DatabaseSync) => { result: T; candidate: MemoryCandidateRecord }
   ): T {
-    this.ensureQueueStorage();
+    this.ensureSchema();
     const db = this.open();
     try {
       db.exec("BEGIN IMMEDIATE");
@@ -1148,9 +1124,6 @@ export class MemoryManager {
 
   private async pendingCandidateRecord(candidateId: string): Promise<MemoryCandidateRecord> {
     const candidate = await this.getCandidate(candidateId);
-    if (candidate.legacy || !candidate.record) {
-      throw new Error(`Legacy memory candidate cannot be inspected for conflicts: ${candidateId}`);
-    }
     if (candidate.record.status !== "pending") {
       throw new Error(`Memory candidate is not pending: ${candidateId}`);
     }
@@ -1212,9 +1185,6 @@ export class MemoryManager {
     const entries = await this.readCandidateEntries();
     const index = this.resolveCandidateIndex(entries, candidateId);
     const entry = entries[index];
-    if (entry.legacy || !entry.record) {
-      throw new Error(`Legacy memory candidate cannot be promoted or discarded: ${candidateId}`);
-    }
     entries[index] = candidateToView(update(entry.record), index + 1);
     const db = this.open();
     try {
@@ -1260,7 +1230,7 @@ export class MemoryManager {
   }
 
   private readCandidateEntriesSync(): CandidateView[] {
-    this.ensureQueueStorage();
+    this.ensureSchema();
     const db = this.open();
     try {
       cleanupDiscardedCandidateRows(db, 7);
@@ -1272,7 +1242,7 @@ export class MemoryManager {
   }
 
   private readPromotionEntries(): AutoPromotionRecord[] {
-    this.ensureQueueStorage();
+    this.ensureSchema();
     const db = this.open();
     try {
       const rows = db.prepare("SELECT id, record_json FROM auto_promotions ORDER BY created_at ASC, rowid ASC").all() as PromotionRow[];
@@ -1294,7 +1264,7 @@ export class MemoryManager {
   }
 
   exportCandidatesJsonl(): string {
-    const entries = this.readCandidateEntriesSync().map((entry) => entry.record ?? entry.raw);
+    const entries = this.readCandidateEntriesSync().map((entry) => entry.record);
     return entries.length ? `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n` : "";
   }
 
@@ -1309,102 +1279,6 @@ export class MemoryManager {
     }
   }
 
-  private ensureQueueStorage(): void {
-    this.ensureSchema();
-    this.migrateQueueFilesIfNeeded();
-  }
-
-  private migrateQueueFilesIfNeeded(): void {
-    this.ensureMemoryDir();
-    const db = this.open();
-    const reports: QueueMigrationReport["migrations"] = [];
-    try {
-      for (const source of [
-        { fileName: "memory_candidates.jsonl" as const, tableName: "memory_candidates", key: "memory_candidates_jsonl_v1" },
-        { fileName: "auto_promotions.jsonl" as const, tableName: "auto_promotions", key: "auto_promotions_jsonl_v1" }
-      ]) {
-        const sourcePath = join(this.memoryDir, source.fileName);
-        if (!existsSync(sourcePath)) {
-          continue;
-        }
-        const existing = db.prepare("SELECT status FROM queue_migrations WHERE id = ?").get(source.key) as { status: string } | undefined;
-        if (existing?.status === "completed") {
-          backupQueueFile(sourcePath);
-          continue;
-        }
-        const parsed = source.fileName === "memory_candidates.jsonl"
-          ? parseCandidateMigrationEntries(readFileSync(sourcePath, "utf8"))
-          : parsePromotionMigrationEntries(readFileSync(sourcePath, "utf8"));
-        const now = new Date().toISOString();
-        db.exec("BEGIN IMMEDIATE");
-        try {
-          for (const record of parsed.records) {
-            if (source.fileName === "memory_candidates.jsonl") {
-              upsertCandidateRow(db, record as MemoryCandidateRecord);
-            } else {
-              upsertPromotionRow(db, record as AutoPromotionRecord);
-            }
-          }
-          db.prepare(`
-            INSERT INTO queue_migrations (
-              id, source_path, target_table, status, started_at, completed_at, imported_count, skipped_count, report_path
-            ) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              status = excluded.status,
-              completed_at = excluded.completed_at,
-              imported_count = excluded.imported_count,
-              skipped_count = excluded.skipped_count,
-              report_path = excluded.report_path
-          `).run(
-            source.key,
-            sourcePath,
-            source.tableName,
-            now,
-            now,
-            parsed.records.length,
-            parsed.legacyLines.length + parsed.invalidLines.length,
-            this.queueMigrationReportPath()
-          );
-          db.exec("COMMIT");
-        } catch (error) {
-          try {
-            db.exec("ROLLBACK");
-          } catch {
-            // Ignore rollback errors; the original failure is more useful.
-          }
-          throw error;
-        }
-        reports.push({
-          id: source.key,
-          source: source.fileName,
-          imported: parsed.records.length,
-          skippedLegacy: parsed.legacyLines.length,
-          skippedInvalid: parsed.invalidLines.length,
-          legacyLines: parsed.legacyLines,
-          invalidLines: parsed.invalidLines
-        });
-        backupQueueFile(sourcePath);
-      }
-    } finally {
-      db.close();
-    }
-    if (reports.length) {
-      writeQueueMigrationReport(this.queueMigrationReportPath(), reports);
-    }
-  }
-
-  private candidatePath(): string {
-    return join(this.memoryDir, "memory_candidates.jsonl");
-  }
-
-  private promotionPath(): string {
-    return join(this.memoryDir, "auto_promotions.jsonl");
-  }
-
-  private queueMigrationReportPath(): string {
-    return join(this.memoryDir, "queue_migration_report.json");
-  }
-
   private open(): DatabaseSync {
     return new DatabaseSync(this.dbPath);
   }
@@ -1413,7 +1287,7 @@ export class MemoryManager {
 export function calculateMemoryScore(query: string, record: MemoryRecord): MemorySearchResult {
   const normalizedQuery = normalizeMemoryText(query);
   const queryTokens = tokenSet(query);
-  const haystack = normalizeMemoryText(`${record.content} ${record.kind} ${record.tier} ${record.scope} ${record.legacyScope ?? ""} ${record.ownerId ?? ""}`);
+  const haystack = normalizeMemoryText(`${record.content} ${record.kind} ${record.tier} ${record.ownerId ?? ""}`);
   const matchedTokens = intersection([...queryTokens], tokenSet(haystack));
   const exactPhrase = Boolean(normalizedQuery && haystack.includes(normalizedQuery));
   const relevant = exactPhrase || matchedTokens.length > 0;
@@ -1479,10 +1353,7 @@ function shouldAutoPromote(
   if (policy.allowTiers && !policy.allowTiers.includes(candidate.tier)) {
     return false;
   }
-  if (policy.denyScopes.includes(candidate.scope) || policy.denyKinds.includes(candidate.kind.toLowerCase())) {
-    return false;
-  }
-  if (!policy.allowScopes.includes(candidate.scope)) {
+  if (policy.denyKinds.includes(candidate.kind.toLowerCase())) {
     return false;
   }
   const modeAllowedLevels = policy.mode === "balanced" ? ["low", "medium"] : ["low"];
@@ -1529,183 +1400,19 @@ function resolvePromotionFromEntries(entries: AutoPromotionRecord[], promotionId
   throw new Error(`Promotion not found: ${promotionId}`);
 }
 
-function parseCandidateEntries(text: string): CandidateView[] {
-  const entries: CandidateView[] = [];
-  text.split(/\r?\n/).forEach((line, index) => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return;
-    }
-    const lineNumber = index + 1;
-    const raw = JSON.parse(trimmed) as Record<string, unknown>;
-    const parsed = memoryCandidateRecordSchema.safeParse(raw);
-    if (parsed.success) {
-      entries.push(candidateToView(parsed.data, lineNumber));
-    } else {
-      entries.push({
-        displayId: `line:${lineNumber}`,
-        legacy: true,
-        raw
-      });
-    }
-  });
-  return entries;
-}
-
-function parseCandidateMigrationEntries(text: string): {
-  records: MemoryCandidateRecord[];
-  legacyLines: string[];
-  invalidLines: string[];
-} {
-  const records: MemoryCandidateRecord[] = [];
-  const legacyLines: string[] = [];
-  const invalidLines: string[] = [];
-  text.split(/\r?\n/).forEach((line, index) => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return;
-    }
-    const lineId = `line:${index + 1}`;
-    try {
-      const raw = JSON.parse(trimmed) as Record<string, unknown>;
-      const parsed = memoryCandidateRecordSchema.safeParse(raw);
-      if (parsed.success) {
-        records.push(parsed.data);
-      } else {
-        const repaired = normalizeLegacyCandidateRecord(raw);
-        if (repaired) {
-          records.push(repaired);
-        } else {
-          legacyLines.push(lineId);
-        }
-      }
-    } catch {
-      invalidLines.push(lineId);
-    }
-  });
-  return { records, legacyLines, invalidLines };
-}
-
-function normalizeLegacyCandidateRecord(raw: Record<string, unknown>): MemoryCandidateRecord | undefined {
-  const sourceSessionId = typeof raw.sourceSessionId === "string" ? raw.sourceSessionId : undefined;
-  const sourceAgentId = typeof raw.sourceAgentId === "string" ? raw.sourceAgentId : undefined;
-  if (!sourceSessionId || !sourceAgentId) {
-    return undefined;
-  }
-  const status = raw.status;
-  if (status !== "pending" && status !== "promoted" && status !== "discarded" && status !== "auto_promoted" && status !== "reverted") {
-    return undefined;
-  }
-  const ownership = normalizeMemoryOwnership({
-    tier: raw.tier as MemoryTier | undefined,
-    scope: raw.scope as MemoryScope | undefined,
-    ownerId: typeof raw.ownerId === "string" ? raw.ownerId : null,
-    legacyScope: raw.legacyScope as MemoryScope | null | undefined,
-    sourceSessionId,
-    sourceAgentId
-  });
-  const parsed = memoryCandidateRecordSchema.safeParse({
-    ...raw,
-    tier: ownership.tier,
-    scope: ownership.scope,
-    legacyScope: ownership.legacyScope ?? undefined,
-    ownerId: ownership.ownerId ?? undefined
-  });
-  return parsed.success ? parsed.data : undefined;
-}
-
-function parsePromotionMigrationEntries(text: string): {
-  records: AutoPromotionRecord[];
-  legacyLines: string[];
-  invalidLines: string[];
-} {
-  const records: AutoPromotionRecord[] = [];
-  const invalidLines: string[] = [];
-  text.split(/\r?\n/).forEach((line, index) => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return;
-    }
-    try {
-      const raw = JSON.parse(trimmed) as unknown;
-      if (isAutoPromotionRecord(raw)) {
-        records.push(raw);
-      } else {
-        invalidLines.push(`line:${index + 1}`);
-      }
-    } catch {
-      invalidLines.push(`line:${index + 1}`);
-    }
-  });
-  return { records, legacyLines: [], invalidLines };
-}
-
-function repairMemoryTierRows(db: DatabaseSync): void {
-  const rows = db.prepare("SELECT * FROM memories").all() as MemoryRow[];
-  for (const row of rows) {
-    const ownership = normalizeMemoryOwnership({
-      tier: row.tier ?? undefined,
-      scope: row.scope,
-      ownerId: row.owner_id ?? undefined,
-      legacyScope: row.legacy_scope,
-      sourceSessionId: row.source_session_id ?? undefined,
-      sourceAgentId: row.source_agent_id ?? undefined
-    });
-    if (row.tier !== ownership.tier || row.legacy_scope !== ownership.legacyScope || row.owner_id !== ownership.ownerId || row.scope !== ownership.scope || row.owner_type !== ownership.tier) {
-      db.prepare("UPDATE memories SET tier = ?, scope = ?, legacy_scope = ?, owner_type = ?, owner_id = ? WHERE id = ?")
-        .run(ownership.tier, ownership.scope, ownership.legacyScope, ownership.tier, ownership.ownerId, row.id);
-    }
-  }
-}
-
-function repairCandidateTierRows(db: DatabaseSync): void {
-  const rows = db.prepare("SELECT id, record_json FROM memory_candidates").all() as CandidateRow[];
-  for (const row of rows) {
-    const raw = JSON.parse(row.record_json) as Partial<MemoryCandidateRecord> & Record<string, unknown>;
-    const sourceSessionId = typeof raw.sourceSessionId === "string" ? raw.sourceSessionId : "";
-    const sourceAgentId = typeof raw.sourceAgentId === "string" ? raw.sourceAgentId : "";
-    if (!sourceSessionId || !sourceAgentId) {
-      continue;
-    }
-    const ownership = normalizeMemoryOwnership({
-      tier: raw.tier as MemoryTier | undefined,
-      scope: raw.scope as MemoryScope | undefined,
-      ownerId: typeof raw.ownerId === "string" ? raw.ownerId : null,
-      legacyScope: raw.legacyScope as MemoryScope | null | undefined,
-      sourceSessionId,
-      sourceAgentId
-    });
-    const next = memoryCandidateRecordSchema.safeParse({
-      ...raw,
-      tier: ownership.tier,
-      scope: ownership.scope,
-      legacyScope: ownership.legacyScope ?? undefined,
-      ownerId: ownership.ownerId ?? undefined
-    });
-    if (!next.success) {
-      continue;
-    }
-    if (raw.tier !== next.data.tier || raw.scope !== next.data.scope || raw.legacyScope !== next.data.legacyScope || raw.ownerId !== next.data.ownerId) {
-      upsertCandidateRow(db, next.data);
-    }
-  }
-}
-
 function upsertCandidateRow(db: DatabaseSync, record: MemoryCandidateRecord): void {
   const normalized = memoryCandidateRecordSchema.parse(record);
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO memory_candidates (
-      id, status, tier, scope, legacy_scope, owner_id, kind, content, importance, confidence,
+      id, status, tier, owner_id, kind, content, importance, confidence,
       source_session_id, source_agent_id, run_id, created_at, reviewed_at,
       promoted_memory_id, auto_promotion_id, risk_level, risk_reasons_json,
       discard_reason, record_json, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       status = excluded.status,
       tier = excluded.tier,
-      scope = excluded.scope,
-      legacy_scope = excluded.legacy_scope,
       owner_id = excluded.owner_id,
       kind = excluded.kind,
       content = excluded.content,
@@ -1727,8 +1434,6 @@ function upsertCandidateRow(db: DatabaseSync, record: MemoryCandidateRecord): vo
     normalized.id,
     normalized.status,
     normalized.tier,
-    normalized.scope,
-    normalized.legacyScope ?? null,
     normalized.ownerId ?? null,
     normalized.kind,
     normalized.content,
@@ -1890,39 +1595,6 @@ function isAutoPromotionRecord(value: unknown): value is AutoPromotionRecord {
     && typeof record.createdAt === "string";
 }
 
-function backupQueueFile(sourcePath: string): void {
-  if (!existsSync(sourcePath)) {
-    return;
-  }
-  const backupPath = `${sourcePath}.bak`;
-  const target = existsSync(backupPath)
-    ? `${sourcePath}.${new Date().toISOString().replace(/[:.]/g, "-")}.bak`
-    : backupPath;
-  renameSync(sourcePath, target);
-}
-
-function writeQueueMigrationReport(path: string, migrations: QueueMigrationReport["migrations"]): void {
-  let existing: QueueMigrationReport["migrations"] = [];
-  if (existsSync(path)) {
-    try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as QueueMigrationReport;
-      existing = parsed.migrations ?? [];
-    } catch {
-      existing = [];
-    }
-  }
-  const merged = new Map(existing.map((migration) => [migration.id, migration]));
-  for (const migration of migrations) {
-    merged.set(migration.id, migration);
-  }
-  const report: QueueMigrationReport = {
-    version: 1,
-    generatedAt: new Date().toISOString(),
-    migrations: [...merged.values()]
-  };
-  writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-}
-
 export function normalizeMemoryText(value: string): string {
   return value
     .toLowerCase()
@@ -1998,19 +1670,11 @@ function promotionTargetToCandidate(
   target: { tier: Extract<MemoryTier, "agent" | "core">; ownerId: string | null },
   options: PromoteMemoryOptions
 ): MemoryCandidateRecord {
-  const ownership = normalizeMemoryOwnership({
-    tier: target.tier,
-    ownerId: target.ownerId,
-    sourceSessionId: source.sourceSessionId ?? undefined,
-    sourceAgentId: source.sourceAgentId ?? undefined
-  });
   return memoryCandidateRecordSchema.parse({
     id: `promotion:${source.id}`,
     status: "pending",
-    tier: ownership.tier,
-    scope: ownership.scope,
-    legacyScope: ownership.legacyScope ?? undefined,
-    ownerId: ownership.ownerId ?? undefined,
+    tier: target.tier,
+    ownerId: target.ownerId ?? undefined,
     kind: options.kind ?? source.kind,
     content: options.content?.trim() || source.content,
     importance: options.importance ?? source.importance,
@@ -2024,8 +1688,6 @@ function promotionTargetToCandidate(
 function promotionCandidateToMemoryInput(candidate: MemoryCandidateRecord, source: MemoryRecord): AddMemoryInput {
   return {
     tier: candidate.tier,
-    scope: candidate.scope,
-    legacyScope: candidate.legacyScope ?? null,
     ownerId: candidate.ownerId,
     kind: candidate.kind,
     content: candidate.content,
@@ -2079,44 +1741,14 @@ function createTierPromotionRecord(
   };
 }
 
-function legacyScopeToTier(scope: MemoryScope | undefined): MemoryTier {
-  if (scope === "session") {
-    return "session";
-  }
-  if (scope === "agent") {
-    return "agent";
-  }
-  return "core";
-}
-
-function scopeMirrorForTier(tier: MemoryTier, legacyScope?: MemoryScope | null): MemoryScope {
-  if (legacyScope) {
-    return legacyScope;
-  }
-  if (tier === "agent" || tier === "session") {
-    return tier;
-  }
-  return "global";
-}
-
 function normalizeMemoryOwnership(input: {
   tier?: MemoryTier;
-  scope?: MemoryScope;
   ownerId?: string | null;
-  legacyScope?: MemoryScope | null;
-  existingLegacyScope?: MemoryScope | null;
   sourceSessionId?: string;
   sourceAgentId?: string;
-}): { tier: MemoryTier; scope: MemoryScope; legacyScope: MemoryScope | null; ownerId: string | null } {
+}): { tier: MemoryTier; ownerId: string | null } {
   const parsedTier = input.tier ? memoryTierSchema.parse(input.tier) : undefined;
-  const parsedScope = input.scope ? memoryScopeSchema.parse(input.scope) : undefined;
-  const tier = parsedTier ?? legacyScopeToTier(parsedScope);
-  const legacyScope = input.legacyScope !== undefined
-    ? input.legacyScope
-    : parsedScope && parsedScope !== scopeMirrorForTier(tier, null)
-      ? parsedScope
-      : input.existingLegacyScope ?? null;
-  const scope = scopeMirrorForTier(tier, parsedScope ?? legacyScope);
+  const tier = parsedTier ?? "session";
   const ownerId = input.ownerId !== undefined
     ? input.ownerId
     : tier === "session"
@@ -2126,30 +1758,24 @@ function normalizeMemoryOwnership(input: {
         : null;
   return {
     tier,
-    scope,
-    legacyScope,
     ownerId: ownerId ?? null
   };
 }
 
 function normalizeCandidateRecord(
-  candidate: Omit<MemoryCandidateRecord, "tier" | "scope"> & Partial<Pick<MemoryCandidateRecord, "tier" | "scope" | "legacyScope">>,
+  candidate: Omit<MemoryCandidateRecord, "tier"> & Partial<Pick<MemoryCandidateRecord, "tier">>,
   session: SessionMetadata,
   executingAgentId: string
 ): MemoryCandidateRecord {
   const ownership = normalizeMemoryOwnership({
     tier: candidate.tier,
-    scope: candidate.scope,
     ownerId: candidate.ownerId,
-    legacyScope: candidate.legacyScope,
     sourceSessionId: session.id,
     sourceAgentId: executingAgentId
   });
   return memoryCandidateRecordSchema.parse({
     ...candidate,
     tier: ownership.tier,
-    scope: ownership.scope,
-    legacyScope: ownership.legacyScope ?? undefined,
     ownerId: ownership.ownerId ?? undefined
   });
 }
@@ -2157,17 +1783,13 @@ function normalizeCandidateRecord(
 function candidateToView(record: MemoryCandidateRecord, lineNumber: number): CandidateView {
   return {
     displayId: record.id || `line:${lineNumber}`,
-    legacy: false,
-    record,
-    raw: record
+    record
   };
 }
 
 function candidateToMemoryInput(candidate: MemoryCandidateRecord): AddMemoryInput {
   return {
     tier: candidate.tier,
-    scope: candidate.scope,
-    legacyScope: candidate.legacyScope ?? null,
     content: candidate.content,
     ownerId: candidate.ownerId,
     kind: candidate.kind,
@@ -2184,9 +1806,6 @@ function insertMemory(db: DatabaseSync, input: AddMemoryInput): MemoryRecord {
   const record: MemoryRecord = {
     id: randomUUID(),
     tier: ownership.tier,
-    scope: ownership.scope,
-    legacyScope: ownership.legacyScope,
-    ownerType: input.ownerType ?? ownership.tier,
     ownerId: ownership.ownerId,
     kind: input.kind ?? "note",
     content: input.content,
@@ -2207,16 +1826,13 @@ function insertMemory(db: DatabaseSync, input: AddMemoryInput): MemoryRecord {
   };
   db.prepare(`
     INSERT INTO memories (
-      id, tier, scope, legacy_scope, owner_type, owner_id, kind, content, source_session_id, source_agent_id,
+      id, tier, owner_id, kind, content, source_session_id, source_agent_id,
       confidence, importance, status, created_at, updated_at, last_accessed_at,
       valid_from, valid_until, expires_at, archived_at, archive_reason, replaced_by_memory_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     record.id,
     record.tier,
-    record.scope,
-    record.legacyScope,
-    record.ownerType,
     record.ownerId,
     record.kind,
     record.content,
@@ -2241,14 +1857,11 @@ function insertMemory(db: DatabaseSync, input: AddMemoryInput): MemoryRecord {
 function updateMemoryRow(db: DatabaseSync, record: MemoryRecord): void {
   db.prepare(`
     UPDATE memories
-    SET tier = ?, scope = ?, legacy_scope = ?, owner_type = ?, owner_id = ?, kind = ?, content = ?,
+    SET tier = ?, owner_id = ?, kind = ?, content = ?,
       confidence = ?, importance = ?, updated_at = ?
     WHERE id = ? AND status = 'active'
   `).run(
     record.tier,
-    record.scope,
-    record.legacyScope,
-    record.ownerType,
     record.ownerId,
     record.kind,
     record.content,
@@ -2262,16 +1875,13 @@ function updateMemoryRow(db: DatabaseSync, record: MemoryRecord): void {
 function restoreMemorySnapshot(db: DatabaseSync, record: MemoryRecord): void {
   db.prepare(`
     UPDATE memories
-    SET tier = ?, scope = ?, legacy_scope = ?, owner_type = ?, owner_id = ?, kind = ?, content = ?,
+    SET tier = ?, owner_id = ?, kind = ?, content = ?,
       source_session_id = ?, source_agent_id = ?, confidence = ?, importance = ?, status = ?,
       updated_at = ?, last_accessed_at = ?, valid_from = ?, valid_until = ?, expires_at = ?,
       archived_at = ?, archive_reason = ?, replaced_by_memory_id = ?
     WHERE id = ?
   `).run(
     record.tier,
-    record.scope,
-    record.legacyScope,
-    record.ownerType,
     record.ownerId,
     record.kind,
     record.content,
@@ -2312,19 +1922,14 @@ function archiveMemoryRow(db: DatabaseSync, target: MemoryRecord, reason: string
 
 function rowToRecord(row: MemoryRow): MemoryRecord {
   const ownership = normalizeMemoryOwnership({
-    tier: row.tier ?? undefined,
-    scope: row.scope,
+    tier: row.tier,
     ownerId: row.owner_id ?? undefined,
-    legacyScope: row.legacy_scope,
     sourceSessionId: row.source_session_id ?? undefined,
     sourceAgentId: row.source_agent_id ?? undefined
   });
   return {
     id: row.id,
     tier: ownership.tier,
-    scope: ownership.scope,
-    legacyScope: ownership.legacyScope,
-    ownerType: row.owner_type || ownership.tier,
     ownerId: ownership.ownerId,
     kind: row.kind,
     content: row.content,
@@ -2421,9 +2026,4 @@ function classifyConflict(candidateNormalized: string, memoryNormalized: string,
 function preview(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
-}
-
-function serializeCandidateEntries(entries: CandidateView[]): string {
-  const lines = entries.map((entry) => JSON.stringify(entry.record ?? entry.raw));
-  return lines.length ? `${lines.join("\n")}\n` : "";
 }

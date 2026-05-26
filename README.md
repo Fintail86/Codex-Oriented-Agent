@@ -264,7 +264,6 @@ cosia config check
 cosia config migrate --from-policy
 cosia mvp checklist
 cosia memory add --tier <tier> --owner-id <owner-id> --content "<content>"
-cosia memory add --scope <scope> --content "<content>"
 cosia memory search --query "<query>" --tier <tier> --owner-id <owner-id> --show-score
 cosia memory list --tier <tier> --owner-id <owner-id> --limit <n> --all
 cosia memory show <memory-id>
@@ -302,7 +301,6 @@ cosia skill select --agent <agent-id> --prompt "<prompt>" --explain
 cosia skill check
 cosia skill check --agent <agent-id> --repair
 cosia skill sync
-cosia skill migrate --agent <agent-id>
 cosia policy show
 cosia policy check
 cosia policy check --repair
@@ -347,11 +345,11 @@ cosia session show <session-id>
 - Codex provider calls have a default per-call timeout of 120000ms.
 - Prompt assembly uses character budgets. Required blocks are `SECURITY.md`, `POLICY.md`, and the current request.
 - `REF_MEMORY.md` is capped by scored top-N items, `CONTEXT_MEMORY.md` is included by tail, and tool results are capped with explicit truncation markers.
-- Memory candidates and auto-promotions are stored in `memory/longterm.sqlite`.
-- Existing JSONL queue files are imported once, then moved to `.bak` files with a migration report.
+- Memory records, candidates, and promotions are stored in canonical `memory/longterm.sqlite` tables.
+- Legacy JSONL memory queues are not imported. If an old development DB/schema is detected, reset the ignored local memory store and rerun the command.
 - Memory search is scored with deterministic keyword, importance, confidence, and recency signals.
 - Memory ownership is tiered: `core` memory survives agent/session lifecycle, `agent` memory follows an agent, and `session` memory follows a session.
-- Deprecated memory `scope` values are still accepted as aliases. New commands should use `--tier`.
+- Memory ownership is canonicalized through `tier` plus optional `ownerId`; deprecated `scope` aliases are no longer accepted.
 - `REF_MEMORY.md` is built from core memory plus the current session's session memory and the executing agent's agent memory.
 - Memory candidate promotion blocks on duplicate or overlapping active memories unless a resolution mode is specified.
 - Memory tier promotion supports `session -> agent`, `session -> core`, and `agent -> core`; source memories are archived after successful promotion.
@@ -765,7 +763,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
-- v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
+- v0.58.0: Memory/skill store remodel removes scope/JSONL migration compatibility and legacy skill migration, keeping tier/ownerId memory and the global skill toolbox as canonical.
 - v0.57.0: Gateway/Telegram surface now uses command registry and connector descriptor structure for slash help, role checks, callbacks, and Bot API operating defaults.
 - v0.56.0: Model-facing CLI command catalog now uses typed command specs and argv planning, with Commander coverage tests to catch drift such as `memory.search --query`.
 - v0.55.0: Telegram Gateway aligns with Bot API long-polling guidance, detects webhook conflicts, adds explicit webhook status/clear commands, respects retry_after on send calls, and documents group command syntax.
@@ -773,6 +771,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 - v0.54.0: Model-facing CLI command catalog adds `cosia_cli_command_lookup` and commandId-to-fixed-CLI `cosia_runtime_command` for LLM navigation without natural-language command translation or shell-string execution.
 - v0.52.0: Telegram/Gateway run jobs enqueue long provider/tool loops so control commands stay responsive while work continues in the background.
 - v0.51.0: Delegation boundary aligned so routine workspace-local work is delegated under Policy while Codex self-amendment and system-level boundary changes remain final-approval gated.
+- v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
 - v0.49.0: Normal pending approval surface with `cosia pending`, `cosia apply <id> --yes`, and `cosia cancel <id> --reason`.
 - v0.48.0: First-run and recovery UX wording aligned around direct next commands.
 - v0.47.0: Normal product surface compression for README/help/status, with advanced governance moved behind explicit sections.

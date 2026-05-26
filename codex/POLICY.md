@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 ## Version
 
-- Policy version: `0.56.0`
+- Policy version: `0.58.0`
 
 ## Agents
 
@@ -62,7 +62,6 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 - Long-term memory write policy: `candidate_promote_only`
 - Candidate tiers: `core`, `agent`, `session`
-- Candidate scopes: `global`, `user`, `codex`, `agent`, `project`, `session`, `task`, `tool`
 - Promotion conflict policy: `block_until_resolved`
 - Archive policy: `explicit_cli_only`
 - Promotion paths: session->agent `manual_or_low_risk`, session->core `manual_or_low_risk`, agent->core `manual_or_low_risk`, core->skill `manual_or_low_risk`, core->codex `deferred`

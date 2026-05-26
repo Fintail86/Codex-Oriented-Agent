@@ -204,7 +204,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.57.0\"");
+    expect(policyJson).toContain("\"version\": \"0.58.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -2254,7 +2254,7 @@ describe("tool acquisition", () => {
 });
 
 describe("memory", () => {
-  it("upgrades the memory schema idempotently from a v0.3 table", async () => {
+  it("rejects unsupported legacy memory schemas with reset guidance", async () => {
     const root = await workspace();
     await mkdir(join(root, "memory"), { recursive: true });
     const db = new DatabaseSync(join(root, "memory", "longterm.sqlite"));
@@ -2285,20 +2285,7 @@ describe("memory", () => {
     }
 
     const memory = new MemoryManager(root);
-    memory.ensureSchema();
-    memory.ensureSchema();
-
-    const upgraded = new DatabaseSync(join(root, "memory", "longterm.sqlite"));
-    try {
-      const columns = upgraded.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>;
-      expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
-        "archived_at",
-        "archive_reason",
-        "replaced_by_memory_id"
-      ]));
-    } finally {
-      upgraded.close();
-    }
+    expect(() => memory.ensureSchema()).toThrow("Unsupported legacy memory database schema");
   });
 
   it("stores, searches, and writes reference memory", async () => {
@@ -2310,7 +2297,7 @@ describe("memory", () => {
     const memory = new MemoryManager(root);
 
     memory.addMemory({
-      scope: "project",
+      tier: "core",
       content: "This runtime uses Codex / Agent / Session layers.",
       kind: "decision"
     });
@@ -2599,7 +2586,7 @@ describe("memory", () => {
     const root = await initializedWorkspace();
     const memory = new MemoryManager(root);
     const record = memory.addMemory({
-      scope: "project",
+      tier: "core",
       kind: "decision",
       content: "COSIA v0.4 improves memory ranking.",
       importance: 5,
@@ -2617,7 +2604,7 @@ describe("memory", () => {
     const root = await initializedWorkspace();
     const memory = new MemoryManager(root);
     const record = memory.addMemory({
-      scope: "project",
+      tier: "core",
       kind: "note",
       content: "Initial memory lifecycle note."
     });
@@ -2648,14 +2635,14 @@ describe("memory", () => {
 
     await memory.appendCandidates([
       {
-        scope: "project",
+        tier: "core",
         kind: "decision",
         content: "COSIA v0.2 reviews memory candidates before promotion.",
         importance: 4,
         confidence: 0.9
       },
       {
-        scope: "tool",
+        tier: "session",
         kind: "note",
         content: "Discard this candidate in tests.",
         importance: 2,
@@ -2717,12 +2704,12 @@ describe("memory", () => {
     expect((await memory.listCandidates(true)).some((entry) => entry.displayId === candidate!.id)).toBe(false);
   });
 
-  it("migrates JSONL candidate and promotion queues into SQLite once", async () => {
+  it("ignores legacy JSONL candidate and promotion queues", async () => {
     const root = await initializedWorkspace();
     const validCandidate = {
       id: "candidate-jsonl-001",
       status: "pending" as const,
-      scope: "project" as const,
+      tier: "core" as const,
       kind: "note",
       content: "Migrated candidate memory",
       importance: 3,
@@ -2732,7 +2719,7 @@ describe("memory", () => {
       createdAt: "2026-05-20T00:00:00.000Z"
     };
     const legacyCandidate = {
-      scope: "project",
+      tier: "core",
       kind: "note",
       content: "Legacy candidate without v0.2 id",
       importance: 3,
@@ -2754,23 +2741,12 @@ describe("memory", () => {
 
     const memory = new MemoryManager(root);
     const candidates = await memory.listCandidates(true);
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0].displayId).toBe(validCandidate.id);
-    expect(memory.listPromotions(true)).toHaveLength(1);
-    expect(memory.exportCandidatesJsonl()).toContain(validCandidate.id);
-    expect(memory.exportPromotionsJsonl()).toContain(validPromotion.id);
-
-    expect(await readFile(join(root, "memory", "memory_candidates.jsonl.bak"), "utf8")).toContain(validCandidate.id);
-    const report = JSON.parse(await readFile(join(root, "memory", "queue_migration_report.json"), "utf8")) as {
-      migrations: Array<{ source: string; imported: number; skippedLegacy: number }>;
-    };
-    expect(report.migrations.find((item) => item.source === "memory_candidates.jsonl")).toMatchObject({
-      imported: 1,
-      skippedLegacy: 1
-    });
-
-    await writeFile(join(root, "memory", "memory_candidates.jsonl"), `${JSON.stringify(validCandidate)}\n`, "utf8");
-    expect(await memory.listCandidates(true)).toHaveLength(1);
+    expect(candidates).toHaveLength(0);
+    expect(memory.listPromotions(true)).toHaveLength(0);
+    expect(memory.exportCandidatesJsonl()).not.toContain(validCandidate.id);
+    expect(memory.exportPromotionsJsonl()).not.toContain(validPromotion.id);
+    await expect(readFile(join(root, "memory", "memory_candidates.jsonl.bak"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(root, "memory", "queue_migration_report.json"), "utf8")).rejects.toThrow();
   });
 
   it("blocks conflicting candidate promotion and supports replace resolution", async () => {
@@ -2781,7 +2757,7 @@ describe("memory", () => {
     const session = await sessions.createSession("architect-agent", "Resolve memory conflicts");
     const memory = new MemoryManager(root);
     const existing = memory.addMemory({
-      scope: "project",
+      tier: "core",
       kind: "decision",
       content: "COSIA v0.4 improves memory ranking.",
       importance: 5,
@@ -2789,7 +2765,7 @@ describe("memory", () => {
     });
 
     await memory.appendCandidates([{
-      scope: "project",
+      tier: "core",
       kind: "decision",
       content: "cosia v0.4 improves memory ranking",
       importance: 4,
@@ -2818,7 +2794,7 @@ describe("memory", () => {
     const session = await sessions.createSession("architect-agent", "Force and merge memory candidates");
     const memory = new MemoryManager(root);
     const existing = memory.addMemory({
-      scope: "project",
+      tier: "core",
       kind: "note",
       content: "Memory intelligence ranks durable context.",
       importance: 3,
@@ -2827,14 +2803,14 @@ describe("memory", () => {
 
     await memory.appendCandidates([
       {
-        scope: "project",
+        tier: "core",
         kind: "note",
         content: "Memory intelligence ranks durable context",
         importance: 3,
         confidence: 0.7
       },
       {
-        scope: "project",
+        tier: "core",
         kind: "note",
         content: "Memory intelligence ranks durable project context.",
         importance: 5,
@@ -2859,8 +2835,6 @@ describe("memory", () => {
       id: "candidate-secret",
       status: "pending" as const,
       tier: "core" as const,
-      scope: "project" as const,
-      legacyScope: "project" as const,
       kind: "decision",
       content: "Use token = \"sk-testsecret1234567890\" for local auth.",
       importance: 3,
@@ -2916,7 +2890,8 @@ describe("memory", () => {
     const session = await sessions.createSession("architect-agent", "Keep conflicts pending");
     const memory = new MemoryManager(root);
     memory.addMemory({
-      scope: "project",
+      tier: "session",
+      ownerId: session.id,
       kind: "note",
       content: "Mock candidate memory",
       importance: 3,
@@ -3405,7 +3380,7 @@ describe("model parsing and run loop", () => {
       fileInspection: { requiresReadFile: true, triggerPhrases: ["read_file"] },
       memory: {
         longTermWrite: "candidate_promote_only",
-        candidateScopes: ["global", "user", "codex", "agent", "project", "session", "task", "tool"]
+        candidateTiers: ["core", "agent", "session"]
       },
       model: {
         defaultProvider: "codex-cli",
@@ -4015,7 +3990,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.57.0");
+    expect(emptyReport.version).toBe("0.58.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4029,7 +4004,7 @@ describe("status and listing", () => {
     await sessions.appendContext(session.id, "x".repeat(31_000));
     const memory = new MemoryManager(root);
     memory.addMemory({
-      scope: "project",
+      tier: "core",
       content: "COSIA status can count memories.",
       kind: "note"
     });
@@ -5379,7 +5354,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.57.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.58.0");
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -5738,7 +5713,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.57.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.58.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

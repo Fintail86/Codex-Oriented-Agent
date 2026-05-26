@@ -102,10 +102,7 @@ export function architectManifest(agentId: string): AgentManifest {
     toolCatalogMigrationVersion: 2,
     preferredSkills: [],
     blockedSkills: [],
-    skillWeights: {},
-    skills: [],
-    skillTriggers: {},
-    memoryScopes: ["agent", "project", "user", "tool"]
+    skillWeights: {}
   };
 }
 
@@ -150,10 +147,7 @@ export function cosiaManifest(agentId: string): AgentManifest {
     toolCatalogMigrationVersion: 2,
     preferredSkills: [],
     blockedSkills: [],
-    skillWeights: {},
-    skills: [],
-    skillTriggers: {},
-    memoryScopes: ["agent", "project", "user", "tool"]
+    skillWeights: {}
   };
 }
 

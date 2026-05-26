@@ -11,8 +11,8 @@ import { SessionManager } from "../runtime/session_manager.js";
 import { formatSessionChoices, sessionFromChoice } from "../runtime/start_flow.js";
 import { getToolCatalogEntry, isToolId, toolCatalog, toolNameValues } from "../runtime/tool_catalog.js";
 import { ToolRegistry } from "../runtime/tool_registry.js";
-import { memoryScopeSchema, memoryTierSchema } from "../runtime/types.js";
-import type { MemoryScope, MemoryTier, SessionMetadata, ToolName } from "../runtime/types.js";
+import { memoryTierSchema } from "../runtime/types.js";
+import type { MemoryTier, SessionMetadata, ToolName } from "../runtime/types.js";
 import type { ActiveToolRecord } from "../runtime/tool_acquisition.js";
 import { readText } from "../runtime/fs_utils.js";
 import { requireWorkspaceRoot, workspaceRootForInit } from "../runtime/workspace.js";
@@ -175,29 +175,16 @@ export function formatToolCatalog(activeTools: ActiveToolRecord[] = []): string 
 
 export async function resolveMemoryTierOptions(
   workspaceRoot: string,
-  options: { tier?: string; scope?: string; ownerId?: string },
+  options: { tier?: string; ownerId?: string },
   requireTier: boolean
-): Promise<{ tier?: MemoryTier; scope?: MemoryScope; ownerId?: string | null }> {
-  if (options.tier && options.scope) {
-    throw new Error("Use either --tier or deprecated --scope, not both.");
-  }
-  if (!options.tier && !options.scope) {
+): Promise<{ tier?: MemoryTier; ownerId?: string | null }> {
+  if (!options.tier) {
     if (requireTier) {
       throw new Error("Memory tier is required. Use --tier core, --tier agent, or --tier session.");
     }
     return { ownerId: options.ownerId };
   }
-  const scope = options.scope ? memoryScopeSchema.parse(options.scope) : undefined;
-  const tier = options.tier
-    ? memoryTierSchema.parse(options.tier)
-    : scope === "session"
-      ? "session"
-      : scope === "agent"
-        ? "agent"
-        : "core";
-  if (scope) {
-    console.error(`[cosia] warning: --scope is deprecated; using tier '${tier}' with legacy scope '${scope}'.`);
-  }
+  const tier = memoryTierSchema.parse(options.tier);
   if (tier === "agent") {
     if (!options.ownerId) {
       throw new Error("--owner-id is required for agent memory.");
@@ -212,7 +199,6 @@ export async function resolveMemoryTierOptions(
   }
   return {
     tier,
-    scope,
     ownerId: tier === "core" ? options.ownerId ?? null : options.ownerId
   };
 }

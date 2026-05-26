@@ -440,10 +440,12 @@ Risk: high
 
 Current state:
 - Several compatibility shims preserve older data shapes.
-- Known candidates include legacy scan id compatibility, session `agentId`, memory `scope`, legacy memory candidate lines, legacy Telegram process locks, and v0.29/v0.30 compatibility paths.
+- v0.58 removes memory `scope`/`legacyScope`, JSONL memory queue migration, and legacy skill migration from the active runtime.
+- Remaining known candidates include legacy scan id compatibility, session `agentId`, legacy Telegram process locks, and v0.29/v0.30 compatibility paths.
 
 Goal:
 - Remove old data compatibility in a controlled sequence after repair paths and tests exist.
+- For development-only runtime stores, prefer explicit reset guidance over preserving obsolete local data shapes.
 
 Removal/refactor steps:
 - For each legacy path, document current reader, repair path, tests, and user-facing failure mode.
@@ -457,8 +459,8 @@ Verification:
 - Tests cover both pre-removal repair and post-removal rejection.
 
 Do not:
-- Do not delete compatibility code just because current test fixtures do not use it.
-- Do not remove multiple legacy data paths in one commit.
+- Do not silently delete private/runtime stores during normal commands.
+- Do not preserve obsolete local development data shapes when a clean reset is the clearer path.
 
 ## P3 Items
 

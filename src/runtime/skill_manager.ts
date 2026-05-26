@@ -11,12 +11,10 @@ import {
 import {
   formatSkillCandidate,
   formatSkillCheckResult,
-  formatSkillMigrationResult,
   formatSkillPromotionPreview,
   formatSkillSelectionExplanation
 } from "./skills/skill_formatters.js";
 import { SkillMirror, type SkillCheckResult } from "./skills/skill_mirror.js";
-import { SkillMigration, type SkillMigrationResult } from "./skills/skill_migration.js";
 import {
   calculateSkillTriggerMatch,
   SkillSelector,
@@ -33,7 +31,6 @@ export {
   calculateSkillTriggerMatch,
   formatSkillCandidate,
   formatSkillCheckResult,
-  formatSkillMigrationResult,
   formatSkillPromotionPreview,
   formatSkillSelectionExplanation,
   highRiskConfirmPhrase
@@ -47,7 +44,6 @@ export type {
   CreateSkillCandidateInput,
   SkillCandidateCleanupResult,
   SkillCheckResult,
-  SkillMigrationResult,
   SkillPromptBlock,
   SkillRecord,
   SkillSelectionExplainRow,
@@ -61,14 +57,12 @@ export class SkillManager {
   private readonly candidates: SkillCandidateStore;
   private readonly selector: SkillSelector;
   private readonly mirror: SkillMirror;
-  private readonly migration: SkillMigration;
 
   constructor(private readonly workspaceRoot: string) {
     this.store = new SkillStore(workspaceRoot);
     this.mirror = new SkillMirror(this.store);
     this.candidates = new SkillCandidateStore(workspaceRoot, this.store, this.mirror);
     this.selector = new SkillSelector(this.store);
-    this.migration = new SkillMigration(this.store, this.mirror);
   }
 
   ensureSchema(): void {
@@ -160,10 +154,6 @@ export class SkillManager {
     const manifest = this.store.unblockSkill(skillId, agentId);
     this.mirror.syncSkillsIndex(agentId);
     return manifest;
-  }
-
-  migrateAgentSkills(agentId: string, yes = false): SkillMigrationResult {
-    return this.migration.migrateAgentSkills(agentId, yes);
   }
 
   selectSkillPromptBlock(input: {

@@ -583,12 +583,6 @@ function memoryDecision(review: CandidateReview, policy: PolicyConfig): Improvem
   if (!policy.memory.autoPromotion.allowTiers.includes(review.candidate.tier)) {
     reasons.push(`tier ${review.candidate.tier} is not in allowed tiers`);
   }
-  if (!policy.memory.autoPromotion.allowScopes.includes(review.candidate.scope)) {
-    reasons.push(`scope ${review.candidate.scope} is not allowed`);
-  }
-  if (policy.memory.autoPromotion.denyScopes.includes(review.candidate.scope)) {
-    reasons.push(`scope ${review.candidate.scope} is denied`);
-  }
   if (policy.memory.autoPromotion.denyKinds.includes(review.candidate.kind.toLowerCase())) {
     reasons.push(`kind ${review.candidate.kind} is denied`);
   }

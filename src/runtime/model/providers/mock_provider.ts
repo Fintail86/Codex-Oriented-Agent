@@ -98,7 +98,7 @@ export class MockProvider implements ModelProvider {
         memoryCandidates: mockMemoryCandidates(input.prompt)
           ?? (input.prompt.includes("[MOCK_CANDIDATE]")
           ? [{
-              scope: "project",
+              tier: "session",
               kind: "note",
               content: "Mock candidate memory",
               importance: 3,
@@ -116,7 +116,7 @@ export class MockProvider implements ModelProvider {
         memoryCandidates: mockMemoryCandidates(input.prompt)
           ?? (input.prompt.includes("[MOCK_CANDIDATE]")
           ? [{
-              scope: "project",
+              tier: "session",
               kind: "note",
               content: "Mock candidate memory",
               importance: 3,
@@ -162,7 +162,7 @@ export class MockProvider implements ModelProvider {
       memoryCandidates: mockMemoryCandidates(input.prompt)
         ?? (input.prompt.includes("[MOCK_CANDIDATE]")
         ? [{
-            scope: "project",
+            tier: "session",
             kind: "note",
             content: "Mock candidate memory",
             importance: 3,
