@@ -32,9 +32,21 @@ For staged execution plans, see `Docs/refactors/`. This document remains the pro
 - `Docs/refactors/v0.44-memory-session-debug-ux.md`: memory, session, summary, and debug UX separation.
 - `Docs/refactors/v0.45-connector-gateway-safety.md`: connector authorization and Telegram/group safety.
 - `Docs/refactors/v0.46-tool-growth-surface-slimming.md`: guided tool-growth UX and advanced internals boundary.
+- `Docs/plans/v0.60-v0.66-remaining-refactor.md`: remaining cleanup round for tests, provider/auth boundaries, runtime domain splits, aliases, and stale compatibility removal.
 
 ## Completed Cleanup Slices
 
+- `4c2463d` `Allow private master CLI parity`
+  - Private direct Telegram master chats where `chatId === userId === masterUser` now act as remote CLI owner surfaces for cataloged `commandId` execution.
+  - Kept system-boundary, dangerous, shell, auth, provider, connector, and arbitrary CLI execution blocked through model-facing runtime command gates.
+- `518bccc` `Remodel memory and skill stores`
+  - Removed memory `scope`/`legacyScope`, JSONL queue migration, and legacy skill migration from the active runtime.
+  - Kept canonical `tier + ownerId` memory and the global skill toolbox as the supported model.
+- `466bec3` `Refactor gateway surface registry`
+  - Moved Gateway slash metadata, role checks, help output, callback namespaces, and Telegram Bot API operating defaults behind registry/descriptor structures.
+- `4f370f2` `Refactor CLI command catalog`
+  - Replaced ad hoc model-facing command argv templates with typed CLI command specs and a single argv planner.
+  - Added Commander coverage checks to catch drift between public CLI commands and the model-facing command catalog.
 - `18e87f5` `Centralize provider default helpers`
   - Centralized provider id -> provider type fallback in runtime config helpers.
   - Reused the shared provider default helper from provider profiles, policy normalization, and provider registry.
@@ -46,36 +58,23 @@ For staged execution plans, see `Docs/refactors/`. This document remains the pro
 
 ## Remaining Refactor Queue
 
-1. Extract gateway/Telegram CLI commands from `src/cli.ts`.
-   - Keep command names, aliases, token handling, and output stable.
-   - Move connector command registration into `src/cli_commands/`.
-2. Extract tool growth and tool acquisition CLI commands.
-   - Keep active registration approval behavior unchanged.
-   - Do not change command_adapter runtime semantics.
-3. Extract memory/session CLI commands.
-   - Keep deprecated `--scope` behavior until the alias removal item is executed.
-   - Do not remove memory legacy compatibility during command extraction.
-4. Split `tests/runtime.test.ts` into feature-focused files.
-   - Start with provider/config and gateway/Telegram tests because their CLI boundaries are actively changing.
-5. Finish constrained runtime command boundary cleanup.
-   - Keep runtime command catalog/parser/interpreter/executor names distinct from abandoned open-ended intent execution.
-   - Keep the LLM interpreter constrained to supplied command candidates only.
-   - Continue moving gateway/REPL command execution duplication behind shared runtime command executor helpers.
-6. Add a COSIA-owned OAuth provider auth boundary.
-   - Keep current external CLI delegation working.
-   - Plan browser/device OAuth flow, token storage, refresh, and secret redaction as provider-auth infrastructure.
-7. Add provider onboarding flows.
-   - Show selectable provider options during initial provider setup.
-   - Move provider-specific auth/setup steps behind provider onboarding handlers instead of scattered flags.
-8. Clean documentation drift.
-   - Archive or add the v0.39 plan.
-   - Update stale provider/default provider guidance.
-   - Mark historical plan sections as superseded where needed.
-9. Split large runtime domains.
-   - Start with capability/tool acquisition only after CLI and tests are easier to review.
-   - Treat memory manager split as a separate high-risk refactor.
-10. Remove legacy compatibility paths one group at a time.
-   - Only after repair/warning behavior and tests are in place.
+1. Split `tests/runtime.test.ts` into feature-focused files.
+   - Keep behavior and assertions equivalent.
+   - Extract only minimal shared fixtures.
+2. Clean provider/default-provider legacy.
+   - Remove or freeze legacy `model.defaultProvider` as warning/reset guidance only.
+   - Keep `codex-cli` as an explicit compatibility profile, never a default provider.
+3. Refactor provider auth boundaries.
+   - Separate provider profile CRUD, auth resolution, token storage, and provider runtime creation.
+   - Keep OAuth tokens and API keys inside approved private secret storage only.
+4. Split large runtime domains.
+   - Start with memory manager, gateway runtime, tool growth/acquisition, and capability.
+   - Keep behavior-preserving splits separate from legacy removals.
+5. Remove deprecated aliases in grouped waves.
+   - Candidates include `agent-runtime`, `--model-provider`, legacy trigger-pack normal-path remnants, and stale provider/provider-id guidance.
+6. Remove remaining legacy data compatibility paths.
+   - Candidates include legacy session `agentId`, legacy v0.29 scan/fact compatibility, legacy Telegram process locks, and old runtime config compatibility paths.
+   - Prefer explicit reset/recovery guidance over preserving obsolete local development data.
 
 ## Item Format
 
@@ -283,35 +282,35 @@ Do not:
 
 ## P1 Items
 
-### CLI Command Module Split
+### CLI Command Surface Cleanup
 
 Type: refactor
 Priority: P1
 Risk: medium
 
 Current state:
-- `src/cli.ts` contains many unrelated command groups.
-- Provider profile, gateway connector, tool growth, memory, session, and policy commands are mixed in one large entrypoint.
-- Provider profile commands have been extracted to `src/cli_commands/provider_profiles.ts`.
+- Top-level command registration has been split into `src/cli_commands/` modules.
+- The model-facing command catalog now uses typed `CliCommandSpec` records and fixed argv planning.
+- The remaining cleanup is not broad CLI extraction; it is catalog upkeep and deprecated alias removal.
 
 Goal:
-- Keep the CLI command surface unchanged while moving command group wiring into focused modules.
-- Keep `src/cli.ts` as an assembler for top-level command groups.
+- Keep the public CLI and model-facing command catalog aligned one-to-one.
+- Ensure newly added CLI commands get a corresponding catalog entry and safety metadata.
+- Keep commandId execution fixed-argv only.
 
 Removal/refactor steps:
-- Extract gateway connector commands next.
-- Extract tool growth and tool acquisition commands.
-- Extract memory/session commands.
-- Extract policy/config commands after gateway/tool/memory command groups are stable.
+- Keep Commander coverage tests active.
+- Keep `buildCliArgv` as the only model-facing argv generation path.
+- Move deprecated alias removal into the dedicated alias wave.
 
 Verification:
 - Existing CLI tests continue to pass.
-- Command help text remains stable unless a change is explicitly planned.
-- Deprecated aliases still behave as documented until their removal item is executed.
+- Catalog coverage fails when a public CLI command lacks a spec.
+- Model-facing runtime command rejects CLI strings, slash/hash commands, unknown args, and blocked safety classes.
 
 Do not:
-- Do not remove deprecated aliases during the split.
-- Do not change command names or output shape in the structural refactor commit.
+- Do not add phrase-specific natural-language mappings.
+- Do not let model-facing command execution bypass fixed argv planning.
 
 ### Deprecated CLI Alias Removal Queue
 
@@ -321,7 +320,8 @@ Risk: medium
 
 Current state:
 - Deprecated aliases remain for compatibility.
-- Known candidates include `--model-provider`, `--scope`, `agent-runtime`, and older provider/provider-id wording.
+- Known candidates include `--model-provider`, `agent-runtime`, legacy command trigger pack normal-path remnants, and older provider/provider-id wording.
+- Memory `--scope` has already been removed with the v0.58 memory store remodel.
 
 Goal:
 - Remove deprecated aliases through a staged process.
@@ -348,31 +348,29 @@ Priority: P1
 Risk: medium
 
 Current state:
-- Runtime hash commands are now named around `runtime_command_*` modules rather than open-ended command intent.
-- The runtime command interpreter is intended to be a constrained translator: it can only select from supplied runtime command candidates.
-- Gateway and REPL still contain some routing-specific command execution branches, especially for session-free commands and pending-command UX.
+- Hash-prefixed command shortcuts are no longer part of the normal chat or Telegram surface.
+- LLM navigation uses `cosia_cli_command_lookup` to receive catalog candidates, then `cosia_runtime_command` can execute only allowed `commandId + args` through fixed argv planning.
+- Private direct master chat parity is implemented for the owner case without allowing shell strings or system-boundary execution.
 
 Goal:
-- Keep explicit `#` and slash command handling separate from ordinary session conversation.
-- Make `RuntimeCommandCatalog`, deterministic parsing, constrained LLM translation, and runtime command execution clear boundaries.
-- Prevent regression toward arbitrary natural-language command execution, CLI command invention, shell command invention, or active tool activation.
+- Keep slash commands as the user control surface and commandId execution as the model navigation surface.
+- Prevent regression toward arbitrary natural-language command execution, shell command invention, or active tool activation.
+- Keep catalog lookup tag-based, not phrase-mapped.
 
 Removal/refactor steps:
-- Keep `runtime_command_catalog.ts` as the catalog/parser boundary for registered runtime commands.
-- Keep `runtime_command_interpreter.ts` constrained to supplied candidates only.
-- Move duplicate gateway/REPL read-only command execution paths behind shared `runtime_command_executor.ts` helpers where practical.
-- Keep plain-text runtime command hints as guidance only; they must not execute commands without `#`, `/`, or CLI syntax.
-- Rename or document any remaining helper names that still imply deprecated open-ended intent routing.
+- Keep `runtime_command_catalog.ts` as the catalog/spec/lookup facade.
+- Keep runtime command execution behind `modelCallable`, safety, role, and argv planner gates.
+- Remove remaining trigger-pack normal-path remnants in the deprecated alias wave.
 
 Verification:
-- `#게이트웨이 상태 보여줘` returns gateway status, while `#상태 보여줘` returns general COSIA status.
-- Plain `게이트웨이 살아 있어?` guides the user to an explicit runtime command and does not execute.
-- Interpreter output selecting an unknown command id or a command outside the candidate shortlist is rejected.
-- Existing REPL and Telegram command tests pass.
+- Plain natural language does not run slash commands.
+- Lookup returns candidates based on tags and command metadata.
+- Runtime command execution uses `commandId -> fixed argv -> execFile`, not shell strings.
+- System-boundary, dangerous, shell, provider, connector, auth, and token mutations stay blocked through model-facing execution.
 
 Do not:
-- Do not let the interpreter invent new command ids.
-- Do not translate ordinary plain text into runtime command execution.
+- Do not let the model invent command ids.
+- Do not translate ordinary plain text directly into command execution.
 - Do not route shell, activation, config mutation, or write operations without preview/approval gates.
 
 ### Test Suite Split
@@ -412,6 +410,7 @@ Risk: high
 Current state:
 - Several runtime modules have grown into multi-responsibility files.
 - Key examples include capability planning, tool acquisition, memory management, gateway runtime, and REPL coordination.
+- Memory and Gateway now have better surface boundaries, but several files still mix storage, rendering, execution, and orchestration concerns.
 
 Goal:
 - Split large runtime modules along domain boundaries without changing behavior.
@@ -419,8 +418,8 @@ Goal:
 Removal/refactor steps:
 - Split capability scan, fact storage, proposal planning, and normalization.
 - Split tool draft, candidate, activation, execution, and blueprint concerns.
-- Split memory storage, ownership normalization, promotion, and legacy migration.
-- Split gateway supervisor, gateway runtime, connector config, and connector command helpers.
+- Split memory storage, candidate handling, promotion, search, and formatting.
+- Split gateway input routing, job handling, command handling, message rendering, connector descriptors, and connector API clients.
 
 Verification:
 - Typecheck and tests pass after each small split.
@@ -524,14 +523,12 @@ Do not:
 
 ## Suggested Execution Order
 
-1. Extract gateway/Telegram CLI commands.
-2. Extract tool growth and tool acquisition CLI commands.
-3. Extract memory/session CLI commands.
-4. Split tests by feature area.
-5. Fix docs/archive drift and provider setup wording.
-6. Split large runtime modules by domain.
-7. Remove deprecated CLI aliases one group at a time.
-8. Remove legacy data compatibility paths one group at a time.
+1. Split tests by feature area.
+2. Clean provider/default-provider legacy and stale provider wording.
+3. Refactor provider auth/profile/runtime creation boundaries.
+4. Split large runtime modules by domain.
+5. Remove deprecated CLI aliases one group at a time.
+6. Remove legacy data compatibility paths one group at a time.
 
 ## Verification Checklist For Cleanup Work
 

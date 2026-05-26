@@ -30,6 +30,7 @@ The next refactor sequence prioritizes:
 | v0.45 | [Connector Gateway Safety](v0.45-connector-gateway-safety.md) | Telegram/future connector safety, group chat authorization, and gateway recovery. |
 | v0.46 | [Tool Growth Surface Slimming](v0.46-tool-growth-surface-slimming.md) | Keep tool-growth internals but expose them through a lighter guided UX. |
 | v0.47-v0.50 | Product Flow Compression | Compress the normal product surface around setup, chat/run, status, continuity, connector setup, and explicit pending approvals. Advanced governance remains available but is not the first-run path. |
+| v0.60-v0.66 | [Remaining Refactor And Legacy Removal](../plans/v0.60-v0.66-remaining-refactor.md) | Reconcile the backlog, split tests, clean provider/auth legacy, split runtime domains, remove deprecated aliases, and remove stale compatibility paths. |
 
 ## Normal / Advanced / Debug UX
 

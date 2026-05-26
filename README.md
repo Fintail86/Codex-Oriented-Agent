@@ -1,4 +1,4 @@
-# COSIA v0.57.0
+# COSIA v0.59.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.57.0 refactors the Gateway/Telegram surface around command registries and connector descriptors. Slash commands, role checks, callback actions, and Telegram Bot API operating defaults now have a clearer source of truth while preserving existing user-facing behavior.
+v0.59.0 completes the current public-surface refactor round by allowing a private direct Telegram master chat to behave like a remote CLI owner surface for cataloged commandId execution, while keeping system-boundary and dangerous commands gated.
 
 ## Requirements
 
@@ -101,11 +101,9 @@ Gateway connectors are optional external surfaces. They do not own provider sele
 
 ```powershell
 cosia gateway telegram enable
-cosia gateway telegram set chat-id <chat-id>
-cosia gateway telegram set user-id <user-id>
-cosia gateway telegram set mutation-user-id <user-id>
-cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
+cosia gateway auth allow-chat telegram <chat-id>
+cosia gateway auth set-master telegram <user-id>
 cosia gateway telegram check
 cosia gateway start
 ```
@@ -520,11 +518,9 @@ cosia provider oauth login codex
 cosia provider profile use codex
 
 cosia gateway telegram enable
-cosia gateway telegram set chat-id <chat-id>
-cosia gateway telegram set user-id <user-id>
-cosia gateway telegram set mutation-user-id <user-id>
-cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
+cosia gateway auth allow-chat telegram <chat-id>
+cosia gateway auth set-master telegram <user-id>
 cosia policy check --repair
 cosia gateway telegram check
 cosia gateway start
@@ -545,15 +541,16 @@ Connector settings are managed through the CLI:
 
 ```powershell
 cosia gateway telegram enable
-cosia gateway telegram set chat-id <chat-id>
-cosia gateway telegram set user-id <user-id>
-cosia gateway telegram set mutation-user-id <user-id>
-cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
 cosia gateway telegram list
 cosia gateway telegram check
 cosia gateway telegram webhook status
 cosia gateway telegram webhook clear --yes
+cosia gateway auth allow-chat telegram <chat-id>
+cosia gateway auth set-master telegram <user-id>
+cosia gateway auth set-role telegram <user-id> admin --chat-id <chat-id>
+cosia gateway auth list
+cosia gateway auth check telegram --chat-id <chat-id> --user-id <user-id>
 ```
 
 COSIA uses Telegram long polling, not webhooks. If BotFather or another service has configured a webhook for the bot, `cosia gateway telegram check` and `cosia gateway start` will fail until you explicitly clear it with `cosia gateway telegram webhook clear --yes`. The clear command calls `deleteWebhook` with `drop_pending_updates=false`, so pending Telegram updates are not intentionally discarded.
@@ -576,7 +573,7 @@ In groups, Telegram/BotFather privacy mode may only deliver slash commands addre
 
 Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply`, and stale previews are rejected if the target or conflict state changed.
 
-The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply`; dangerous commands are blocked in the connector by default. Group chats are read-only by default even when the chat id is allowlisted. Use `/whoami` in Telegram to discover chat/user ids, then explicitly set user and mutation user ids before enabling group mutation. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks. Long replies are chunked and paced per chat to respect Telegram Bot API rate-limit guidance, so multi-part responses may arrive slightly spaced out.
+The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply`; dangerous commands are blocked in the connector by default. Unknown users are not guests. Use `/whoami` in Telegram to discover chat/user ids, then register the chat and the single global master locally with `cosia gateway auth allow-chat ...` and `cosia gateway auth set-master ...`. Chat-scoped guest/admin roles use `cosia gateway auth set-role ...`. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks. Long replies are chunked and paced per chat to respect Telegram Bot API rate-limit guidance, so multi-part responses may arrive slightly spaced out.
 
 ## Command Trigger Packs
 
@@ -763,6 +760,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.60-v0.66: Remaining cleanup round focused on docs/backlog reconciliation, test splitting, provider legacy/auth boundaries, runtime domain splits, deprecated alias removal, and stale compatibility removal.
 - v0.59.0: Private direct master Gateway chats where chat id and user id match are treated as remote CLI owner surfaces for cataloged commandId execution.
 - v0.58.0: Memory/skill store remodel removes scope/JSONL migration compatibility and legacy skill migration, keeping tier/ownerId memory and the global skill toolbox as canonical.
 - v0.57.0: Gateway/Telegram surface now uses command registry and connector descriptor structure for slash help, role checks, callbacks, and Bot API operating defaults.
