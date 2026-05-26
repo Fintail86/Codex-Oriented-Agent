@@ -210,7 +210,7 @@ export type PolicyCheckResult = {
 };
 
 export const defaultPolicy: PolicyConfig = {
-  version: "0.63.0",
+  version: "0.64.0",
   agents: {
     defaultAgentId: "cosia-agent"
   },

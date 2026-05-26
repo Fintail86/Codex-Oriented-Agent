@@ -4,6 +4,8 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { classifyMemoryCandidate, redactedCandidatePreview, type RiskClassification } from "./risk_classifier.js";
+import { calculateMemoryScore, formatReferenceMemoryLine, type MemorySearchResult } from "./memory_search.js";
+import { intersectMemoryTokens, memoryTokenSet, normalizeMemoryText, previewMemoryText } from "./memory_text.js";
 import { createSkillCandidateRecord, ensureSkillCandidateTable, upsertSkillCandidateRow } from "./skills/skill_candidates.js";
 import {
   memoryCandidateRecordSchema,
@@ -17,6 +19,9 @@ import {
   type SessionMetadata,
   type SkillCandidateRecord
 } from "./types.js";
+
+export { calculateMemoryScore, type MemorySearchResult } from "./memory_search.js";
+export { memoryTokenSet, normalizeMemoryText } from "./memory_text.js";
 
 type AddMemoryInput = {
   tier?: MemoryTier;
@@ -85,12 +90,6 @@ type TierPromotionRow = {
 export type CandidateView = {
   displayId: string;
   record: MemoryCandidateRecord;
-};
-
-export type MemorySearchResult = {
-  record: MemoryRecord;
-  score: number;
-  matchedTokens: string[];
 };
 
 export type MemoryConflictType = "duplicate" | "overlap" | "possible_conflict";
@@ -1091,7 +1090,7 @@ export class MemoryManager {
 
   private findConflictsForPromotionWithDb(db: DatabaseSync, candidate: MemoryCandidateRecord, excludeMemoryIds: string[] = []): MemoryConflict[] {
     const candidateNormalized = normalizeMemoryText(candidate.content);
-    const candidateTokens = tokenSet(candidate.content);
+    const candidateTokens = memoryTokenSet(candidate.content);
     if (!candidateNormalized || !candidateTokens.size) {
       return [];
     }
@@ -1102,8 +1101,8 @@ export class MemoryManager {
           return [];
         }
         const memoryNormalized = normalizeMemoryText(memory.content);
-        const memoryTokens = tokenSet(memory.content);
-        const matchedTokens = intersection([...candidateTokens], memoryTokens);
+        const memoryTokens = memoryTokenSet(memory.content);
+        const matchedTokens = intersectMemoryTokens([...candidateTokens], memoryTokens);
         const overlapRatio = matchedTokens.length / Math.max(1, Math.min(candidateTokens.size, memoryTokens.size));
         const type = classifyConflict(candidateNormalized, memoryNormalized, overlapRatio);
         if (!type) {
@@ -1115,8 +1114,8 @@ export class MemoryManager {
           score: calculateMemoryScore(candidate.content, memory).score,
           overlapRatio,
           matchedTokens,
-          candidatePreview: preview(candidate.content),
-          memoryPreview: preview(memory.content)
+          candidatePreview: previewMemoryText(candidate.content),
+          memoryPreview: previewMemoryText(memory.content)
         }];
       })
       .sort((a, b) => conflictRank[a.type] - conflictRank[b.type] || b.overlapRatio - a.overlapRatio);
@@ -1282,33 +1281,6 @@ export class MemoryManager {
   private open(): DatabaseSync {
     return new DatabaseSync(this.dbPath);
   }
-}
-
-export function calculateMemoryScore(query: string, record: MemoryRecord): MemorySearchResult {
-  const normalizedQuery = normalizeMemoryText(query);
-  const queryTokens = tokenSet(query);
-  const haystack = normalizeMemoryText(`${record.content} ${record.kind} ${record.tier} ${record.ownerId ?? ""}`);
-  const matchedTokens = intersection([...queryTokens], tokenSet(haystack));
-  const exactPhrase = Boolean(normalizedQuery && haystack.includes(normalizedQuery));
-  const relevant = exactPhrase || matchedTokens.length > 0;
-  if (!relevant) {
-    return { record, score: 0, matchedTokens: [] };
-  }
-
-  let score = 0;
-  if (exactPhrase) {
-    score += 6;
-  }
-  score += matchedTokens.length * 2;
-  score += record.importance;
-  score += record.confidence * 2;
-  score += recencyScore(record.updatedAt);
-
-  return {
-    record,
-    score: Number(score.toFixed(2)),
-    matchedTokens
-  };
 }
 
 export function formatMemoryReviewSummary(summary: MemoryReviewSummary): string {
@@ -1595,14 +1567,6 @@ function isAutoPromotionRecord(value: unknown): value is AutoPromotionRecord {
     && typeof record.createdAt === "string";
 }
 
-export function normalizeMemoryText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
 export function formatMemoryConflicts(candidate: MemoryCandidateRecord, conflicts: MemoryConflict[]): string {
   if (!conflicts.length) {
     return `No memory conflicts for candidate ${candidate.id}.`;
@@ -1610,7 +1574,7 @@ export function formatMemoryConflicts(candidate: MemoryCandidateRecord, conflict
   const lines = [
     `Candidate: ${candidate.id}`,
     `Tier: ${candidate.tier}/${candidate.kind}`,
-    `Content: ${preview(candidate.content)}`,
+    `Content: ${previewMemoryText(candidate.content)}`,
     `Conflicts: ${conflicts.length}`,
     ""
   ];
@@ -1950,41 +1914,6 @@ function rowToRecord(row: MemoryRow): MemoryRecord {
   };
 }
 
-function tokenSet(value: string): Set<string> {
-  const normalized = normalizeMemoryText(value);
-  if (!normalized) {
-    return new Set();
-  }
-  return new Set(normalized.split(" ").filter((token) => token.length >= 2));
-}
-
-function intersection(tokens: string[], target: Set<string>): string[] {
-  return [...new Set(tokens)].filter((token) => target.has(token));
-}
-
-function recencyScore(updatedAt: string): number {
-  const ageMs = Date.now() - Date.parse(updatedAt);
-  if (!Number.isFinite(ageMs) || ageMs < 0) {
-    return 1.5;
-  }
-  const ageDays = ageMs / 86_400_000;
-  if (ageDays <= 7) {
-    return 1.5;
-  }
-  if (ageDays <= 30) {
-    return 1;
-  }
-  if (ageDays <= 90) {
-    return 0.5;
-  }
-  return 0;
-}
-
-function formatReferenceMemoryLine(result: MemorySearchResult): string {
-  const record = result.record;
-  return `- [mem:${record.id.slice(0, 8)} score:${result.score.toFixed(2)} ${record.tier}/${record.kind}] ${record.content}`;
-}
-
 function isComparableMemory(candidate: MemoryCandidateRecord, memory: MemoryRecord): boolean {
   return candidate.tier === memory.tier
     && candidate.kind === memory.kind
@@ -2021,9 +1950,4 @@ function classifyConflict(candidateNormalized: string, memoryNormalized: string,
     return "possible_conflict";
   }
   return undefined;
-}
-
-function preview(content: string): string {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
 }

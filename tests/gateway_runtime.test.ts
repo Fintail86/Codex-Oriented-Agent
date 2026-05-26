@@ -167,7 +167,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.63.0");
+    expect(emptyReport.version).toBe("0.64.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -1564,7 +1564,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.63.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.64.0");
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -1923,7 +1923,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.63.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.64.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
