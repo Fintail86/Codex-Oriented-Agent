@@ -8,7 +8,6 @@ import { initProject } from "../runtime/init_project.js";
 import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, getDoctorReport, previewReset, repairDoctor } from "../runtime/doctor.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "../runtime/memory_manager.js";
 import { formatMvpChecklist } from "../runtime/mvp_checklist.js";
-import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "../runtime/runtime_command_triggers.js";
 import {
   CapabilityPlanner,
   capabilityScanJson,

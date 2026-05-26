@@ -1,4 +1,4 @@
-# COSIA v0.64.0
+# COSIA v0.65.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.64.0 starts the runtime domain split by moving memory text normalization and search scoring into focused modules while preserving memory behavior.
+v0.65.0 removes deprecated command aliases and legacy trigger-pack execution surfaces while keeping the commandId catalog as the model-facing navigation layer.
 
 ## Requirements
 
@@ -57,8 +57,6 @@ After linking, use the short project command:
 npm link
 cosia --help
 ```
-
-The legacy `agent-runtime` alias is also kept for compatibility.
 
 ## Quick Start
 
@@ -575,17 +573,6 @@ Telegram review messages may include compact shortcut buttons such as refresh, s
 
 The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply`; dangerous commands are blocked in the connector by default. Unknown users are not guests. Use `/whoami` in Telegram to discover chat/user ids, then register the chat and the single global master locally with `cosia gateway auth allow-chat ...` and `cosia gateway auth set-master ...`. Chat-scoped guest/admin roles use `cosia gateway auth set-role ...`. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks. Long replies are chunked and paced per chat to respect Telegram Bot API rate-limit guidance, so multi-part responses may arrive slightly spaced out.
 
-## Command Trigger Packs
-
-Command trigger packs are legacy/advanced metadata retained for experiments and diagnostics. They are no longer part of the normal chat or Telegram command surface because hash-prefixed natural command execution has been removed.
-
-```powershell
-cosia command triggers check
-cosia command triggers sync --locale ko
-```
-
-Trigger checks warn about short automatic triggers and duplicate triggers. User override trigger packs are intended to take precedence over built-in locale metadata as this surface grows.
-
 ## Skill Candidate Review
 
 ```powershell
@@ -760,6 +747,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.65.0: Deprecated aliases are removed: `agent-runtime`, `--model-provider`, provider-id debug aliases, and legacy command trigger pack CLI surfaces.
 - v0.64.0: Runtime domain split begins with memory text/search helpers extracted from `memory_manager`.
 - v0.63.0: Provider auth secret resolution and profile-to-runtime config creation split into dedicated modules behind the existing provider profile facade.
 - v0.62.0: Provider id runtime selection is blocked; runtime provider overrides now use explicit provider profile names or `mock`.

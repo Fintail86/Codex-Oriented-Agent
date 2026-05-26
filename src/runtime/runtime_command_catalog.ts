@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { isToolId } from "./tool_catalog.js";
 
 export type RuntimeCommandSafety =
@@ -737,10 +735,6 @@ const cliCoverageInputs: CommandInput[] = [
   coverageCommand("improve.show", ["improve", "show"], "read_only", "Show one improvement evidence record.", ["improve", "show"], ["improve", "show", "$id"], { required: ["id"] }),
   coverageCommand("improve.revert", ["improve", "revert"], "mutation", "Revert an applied automatic improvement.", ["improve", "revert"], ["improve", "revert", "$id"], { required: ["id"] }),
   coverageCommand("improve.discard", ["improve", "discard"], "mutation", "Discard an improvement recommendation.", ["improve", "discard"], ["improve", "discard", "$id"], { required: ["id"] }),
-  coverageCommand("command.group", ["command"], "read_only", "Show runtime command metadata help.", ["command", "help"]),
-  coverageCommand("command.triggers.group", ["command", "triggers"], "read_only", "Show legacy trigger pack command help.", ["command", "triggers", "help"]),
-  coverageCommand("command.triggers.check", ["command", "triggers", "check"], "read_only", "Check legacy command trigger packs.", ["command", "triggers", "check"]),
-  coverageCommand("command.triggers.sync", ["command", "triggers", "sync"], "mutation", "Create or update a legacy command trigger override pack.", ["command", "triggers", "sync"]),
   coverageCommand("agent.group", ["agent"], "read_only", "Show agent command help.", ["agent", "help"]),
   coverageCommand("agent.create", ["agent", "create"], "system_boundary", "Create an agent from a template.", ["agent", "create"], ["agent", "create", "$agentId"], { required: ["agentId"] }),
   coverageCommand("agent.list", ["agent", "list"], "read_only", "List agents.", ["agent", "list"]),
@@ -861,11 +855,11 @@ export function retrieveRuntimeCommandCandidateMatches(input: string, limit = 8,
   if (!normalized) {
     return [];
   }
-  const triggerOverrides = workspaceRoot ? readTriggerOverrides(workspaceRoot, "ko") : {};
+  void workspaceRoot;
   const scored = runtimeCommandDefinitions
     .map((definition) => ({
       definition,
-      ...scoreDefinition(normalized, definition, triggerOverrides[definition.commandId])
+      ...scoreDefinition(normalized, definition)
     }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.definition.commandId.localeCompare(b.definition.commandId));
@@ -948,7 +942,7 @@ function normalizeCommandText(value: string): string {
     .trim();
 }
 
-function scoreDefinition(normalized: string, definition: RuntimeCommandDefinition, koOverride?: string[]): { score: number; matchReason: string } {
+function scoreDefinition(normalized: string, definition: RuntimeCommandDefinition): { score: number; matchReason: string } {
   let score = 0;
   const reasons: string[] = [];
   if (normalized === normalizeCommandText(definition.commandId)) {
@@ -975,50 +969,7 @@ function scoreDefinition(normalized: string, definition: RuntimeCommandDefinitio
       reasons.push("description token match");
     }
   }
-  const koTriggers = [...new Set([...(koOverride ?? []), ...definition.triggers.ko])];
-  for (const trigger of [...koTriggers, ...definition.triggers.en]) {
-    const normalizedTrigger = normalizeCommandText(trigger);
-    if (!normalizedTrigger) {
-      continue;
-    }
-    if (normalized === normalizedTrigger) {
-      score += 10;
-      reasons.push(`trigger exact match: ${trigger}`);
-      continue;
-    }
-    if (normalized.includes(normalizedTrigger)) {
-      score += normalizedTrigger.includes(" ") ? 5 : 2;
-      reasons.push(`trigger contained match: ${trigger}`);
-      continue;
-    }
-    if (isAsciiWord(normalizedTrigger) && new RegExp(`\\b${escapeRegExp(normalizedTrigger)}\\b`, "i").test(normalized)) {
-      score += 2;
-      reasons.push(`trigger word match: ${trigger}`);
-    }
-  }
   return { score, matchReason: reasons[0] ?? "token match" };
-}
-
-function readTriggerOverrides(workspaceRoot: string, locale: string): Record<string, string[]> {
-  const path = join(workspaceRoot, "config", `command_triggers.${locale}.json`);
-  if (!existsSync(path)) {
-    return {};
-  }
-  try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (!raw || typeof raw !== "object") {
-      return {};
-    }
-    const pack: Record<string, string[]> = {};
-    for (const [commandId, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (Array.isArray(value)) {
-        pack[commandId] = value.filter((item): item is string => typeof item === "string");
-      }
-    }
-    return pack;
-  } catch {
-    return {};
-  }
 }
 
 function isAsciiWord(value: string): boolean {

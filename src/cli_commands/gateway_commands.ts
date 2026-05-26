@@ -8,7 +8,6 @@ import { initProject } from "../runtime/init_project.js";
 import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, getDoctorReport, previewReset, repairDoctor } from "../runtime/doctor.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "../runtime/memory_manager.js";
 import { formatMvpChecklist } from "../runtime/mvp_checklist.js";
-import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "../runtime/runtime_command_triggers.js";
 import {
   CapabilityPlanner,
   capabilityScanJson,
@@ -148,17 +147,16 @@ export function registerGatewayCommands(program: Command): void {
     .command("start")
     .option("--connector <connector>", "Connector to start. v0.26.1 supports telegram.")
     .option("--provider-profile <name>", "Temporary provider profile override for gateway chat messages.")
-    .option("--model-provider <provider>", "Deprecated alias for --provider-profile.")
     .option("--once", "Process one update batch and exit.", false)
     .description("Start the COSIA gateway supervisor.")
-    .action(async (options: { connector?: string; providerProfile?: string; modelProvider?: string; once: boolean }) => {
+    .action(async (options: { connector?: string; providerProfile?: string; once: boolean }) => {
       await main(async (workspaceRoot) => {
         if (options.connector && options.connector !== "telegram") {
           throw new Error(`Unsupported gateway connector: ${options.connector}`);
         }
         await startGateway(workspaceRoot, {
           connector: options.connector as "telegram" | undefined,
-          providerProfile: options.providerProfile ?? options.modelProvider,
+          providerProfile: options.providerProfile,
           once: options.once
         });
       });
@@ -180,18 +178,17 @@ export function registerGatewayCommands(program: Command): void {
     .command("restart")
     .option("--connector <connector>", "Connector to restart. v0.26.1 supports telegram.")
     .option("--provider-profile <name>", "Temporary provider profile override for gateway chat messages.")
-    .option("--model-provider <provider>", "Deprecated alias for --provider-profile.")
     .option("--timeout-ms <ms>", "Milliseconds to wait for cooperative shutdown.", "10000")
     .option("--once", "After stopping, process one update batch and exit.", false)
     .description("Cooperatively stop and then start the gateway supervisor.")
-    .action(async (options: { connector?: string; providerProfile?: string; modelProvider?: string; timeoutMs: string; once: boolean }) => {
+    .action(async (options: { connector?: string; providerProfile?: string; timeoutMs: string; once: boolean }) => {
       await main(async (workspaceRoot) => {
         if (options.connector && options.connector !== "telegram") {
           throw new Error(`Unsupported gateway connector: ${options.connector}`);
         }
         await restartGateway(workspaceRoot, {
           connector: options.connector as "telegram" | undefined,
-          providerProfile: options.providerProfile ?? options.modelProvider,
+          providerProfile: options.providerProfile,
           timeoutMs: parseIntegerOption(options.timeoutMs, "--timeout-ms"),
           once: options.once
         });
@@ -542,13 +539,12 @@ export function registerGatewayCommands(program: Command): void {
   telegram
     .command("start")
     .option("--provider-profile <name>", "Temporary provider profile override for Telegram chat messages.")
-    .option("--provider <provider>", "Deprecated alias for --provider-profile.")
     .option("--once", "Process one update batch and exit.", false)
     .description("Debug: start Telegram long polling directly. Normal use: cosia gateway start.")
-    .action(async (options: { providerProfile?: string; provider?: string; once: boolean }) => {
+    .action(async (options: { providerProfile?: string; once: boolean }) => {
       await main(async (workspaceRoot) => {
         await startTelegramGateway(workspaceRoot, {
-          providerId: options.providerProfile ?? options.provider,
+          providerId: options.providerProfile,
           once: options.once,
           command: "cosia gateway telegram start"
         });

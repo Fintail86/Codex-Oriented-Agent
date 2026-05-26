@@ -1,11 +1,10 @@
 {
   "name": "cosia",
-  "version": "0.64.0",
+  "version": "0.65.0",
   "description": "COSIA: lightweight provider-neutral agentic runtime guided by a user-amendable Codex.",
   "type": "module",
   "bin": {
-    "cosia": "./dist/src/bin.js",
-    "agent-runtime": "./dist/src/bin.js"
+    "cosia": "./dist/src/bin.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

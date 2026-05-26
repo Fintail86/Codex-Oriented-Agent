@@ -8,7 +8,6 @@ import { initProject } from "../runtime/init_project.js";
 import { applyReset, formatDoctorRepair, formatDoctorReport, formatResetResult, getDoctorReport, previewReset, repairDoctor } from "../runtime/doctor.js";
 import { formatMemoryConflicts, formatMemoryReviewSummary, MemoryManager } from "../runtime/memory_manager.js";
 import { formatMvpChecklist } from "../runtime/mvp_checklist.js";
-import { checkCommandTriggers, formatCommandTriggerCheck, formatCommandTriggerSync, syncCommandTriggers } from "../runtime/runtime_command_triggers.js";
 import {
   CapabilityPlanner,
   capabilityScanJson,
@@ -349,29 +348,6 @@ export function registerMvpReviewImproveCommandCommands(program: Command): void 
     .action(async (id: string, options: { reason: string }) => {
       await main(async (workspaceRoot) => {
         console.log(formatImprovementMutation("Discarded", await new SelfImprovementGovernor(workspaceRoot).discard(id, options.reason)));
-      });
-    });
-
-  const commandCommand = program.command("command").description("Debug: inspect runtime command metadata.");
-  const triggerCommand = commandCommand.command("triggers").description("Manage hash command trigger packs.");
-
-  triggerCommand
-    .command("check")
-    .option("--locale <locale>", "Locale to check.", "ko")
-    .description("Check command trigger pack conflicts and short triggers.")
-    .action(async (options: { locale: string }) => {
-      await main(async (workspaceRoot) => {
-        console.log(formatCommandTriggerCheck(checkCommandTriggers(workspaceRoot, options.locale)));
-      });
-    });
-
-  triggerCommand
-    .command("sync")
-    .option("--locale <locale>", "Locale to sync.", "ko")
-    .description("Create or update a user command trigger override pack.")
-    .action(async (options: { locale: string }) => {
-      await main(async (workspaceRoot) => {
-        console.log(formatCommandTriggerSync(syncCommandTriggers(workspaceRoot, options.locale)));
       });
     });
 
