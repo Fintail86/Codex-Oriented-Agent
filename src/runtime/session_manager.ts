@@ -84,11 +84,16 @@ export class SessionManager {
   async loadSession(sessionId: string): Promise<SessionMetadata> {
     const sessionPath = join(this.sessionDir(sessionId), "session.json");
     const parsed = JSON.parse(await readText(sessionPath));
-    const session = sessionMetadataSchema.parse(parsed);
-    if (parsed.agentId !== undefined || parsed.assignedAgentId !== session.assignedAgentId) {
-      await this.writeSessionMetadata(session);
+    if (parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "agentId")) {
+      throw new Error([
+        "Legacy session metadata field `agentId` is no longer supported.",
+        `Session: ${sessionId}`,
+        "Reset or repair the development session data, then recreate/assign the session:",
+        "  cosia doctor repair",
+        "  cosia session assign <session-id> <agent-id>"
+      ].join("\n"));
     }
-    return session;
+    return sessionMetadataSchema.parse(parsed);
   }
 
   async listSessions(options: { agentId?: string } = {}): Promise<SessionMetadata[]> {

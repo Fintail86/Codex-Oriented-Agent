@@ -22,7 +22,6 @@ import {
   CapabilityPlanner,
   EnvironmentDiscovery,
   capabilityScanJson,
-  legacyEnvironmentScanId,
   normalizeCapabilityProposal,
   stableJsonStringify,
   applyReset,

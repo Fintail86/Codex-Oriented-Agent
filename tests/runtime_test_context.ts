@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager, formatAgentRecommendation } from "../src/runtime/agent_manager.js";
 import { createCliProgram } from "../src/cli_program.js";
-import { CapabilityPlanner, EnvironmentDiscovery, capabilityScanJson, legacyEnvironmentScanId, normalizeCapabilityProposal, stableJsonStringify } from "../src/runtime/capability.js";
+import { CapabilityPlanner, EnvironmentDiscovery, capabilityScanJson, normalizeCapabilityProposal, stableJsonStringify } from "../src/runtime/capability.js";
 import { applyReset, formatResetResult, previewReset, repairDoctor } from "../src/runtime/doctor.js";
 import { initProject } from "../src/runtime/init_project.js";
 import { calculateMemoryScore, formatMemoryConflicts, MemoryManager, normalizeMemoryText } from "../src/runtime/memory_manager.js";
@@ -148,7 +148,7 @@ async function waitForCondition(predicate: () => boolean | Promise<boolean>, tim
 
 async function writeRuntimeLocal(root: string, value: unknown): Promise<void> {
   await mkdir(join(root, "config"), { recursive: true });
-  await writeFile(runtimeLocalPath(root), `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeFile(runtimePrivatePath(root), `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
 function normalizeText(value: string): string {
@@ -204,7 +204,6 @@ export {
   CapabilityPlanner,
   EnvironmentDiscovery,
   capabilityScanJson,
-  legacyEnvironmentScanId,
   normalizeCapabilityProposal,
   stableJsonStringify,
   applyReset,

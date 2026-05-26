@@ -14,7 +14,6 @@ import {
   type ShellApproval
 } from "./shell_approval.js";
 
-export const legacyEnvironmentScanId = "legacy_v0.29";
 const defaultMaxDepth = 3;
 const defaultPlannerMaxStaleAgeMs = 300_000;
 const structuredFileSizeCap = 500 * 1024;
@@ -698,7 +697,12 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
       );
     `);
     if (!hasColumn(db, "environment_facts", "scan_id")) {
-      db.exec("ALTER TABLE environment_facts ADD COLUMN scan_id TEXT");
+      throw new Error([
+        "Legacy capability storage without environment_facts.scan_id is no longer supported.",
+        "Reset the development runtime data and rescan:",
+        "  cosia doctor repair",
+        "  cosia capability scan --request \"<request>\""
+      ].join("\n"));
     }
     ensureColumn(db, "capability_proposals", "source_scan_id", "TEXT");
     ensureColumn(db, "capability_proposals", "grounding_fact_ids_json", "TEXT");
@@ -710,17 +714,12 @@ function ensureCapabilityTables(db: DatabaseSync, workspaceRoot: string): void {
     ensureColumn(db, "capability_proposals", "converted_at", "TEXT");
     const legacyCount = db.prepare("SELECT COUNT(*) AS count FROM environment_facts WHERE scan_id IS NULL OR scan_id = ''").get() as { count: number };
     if (legacyCount.count > 0) {
-      const observedAt = new Date(0).toISOString();
-      const legacyScan: EnvironmentScan = {
-        scanId: legacyEnvironmentScanId,
-        observedAt,
-        workspaceRoot: resolve(workspaceRoot)
-      };
-      db.prepare(`
-        INSERT OR IGNORE INTO environment_scans (scan_id, observed_at, workspace_root, record_json)
-        VALUES (?, ?, ?, ?)
-      `).run(legacyScan.scanId, legacyScan.observedAt, legacyScan.workspaceRoot, JSON.stringify(legacyScan));
-      db.prepare("UPDATE environment_facts SET scan_id = ? WHERE scan_id IS NULL OR scan_id = ''").run(legacyEnvironmentScanId);
+      throw new Error([
+        "Legacy capability facts without scan_id are no longer supported.",
+        "Reset the development runtime data and rescan:",
+        "  cosia doctor repair",
+        "  cosia capability scan --request \"<request>\""
+      ].join("\n"));
     }
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_environment_facts_scan_id ON environment_facts(scan_id);
@@ -1283,9 +1282,15 @@ function normalizeFactFromRow(recordJson: string, scanId: string, observedAt: st
 
 function normalizeStoredProposal(recordJson: string): CapabilityProposal {
   const parsed = JSON.parse(recordJson) as Partial<CapabilityProposal> & { groundingFacts?: string[] };
+  if (!parsed.sourceScanId) {
+    throw new Error([
+      "Legacy capability proposal without sourceScanId is no longer supported.",
+      "Reset the development runtime data and create a fresh capability proposal."
+    ].join("\n"));
+  }
   return normalizeCapabilityProposal({
     id: parsed.id ?? `cap_${randomUUID().slice(0, 8)}`,
-    sourceScanId: parsed.sourceScanId ?? legacyEnvironmentScanId,
+    sourceScanId: parsed.sourceScanId,
     userNeed: parsed.userNeed ? redactText(parsed.userNeed) : "Unknown capability need.",
     capabilityFamily: capabilityFamilySchema.safeParse(parsed.capabilityFamily).success ? parsed.capabilityFamily as CapabilityFamily : "unknown",
     groundingFactIds: parsed.groundingFactIds ?? parsed.groundingFacts ?? [],

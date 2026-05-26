@@ -7,9 +7,7 @@ import {
   gatewayRoot,
   isGatewayProcessLockStale,
   readGatewayProcessLock,
-  readLegacyTelegramProcessLock,
   removeGatewayProcessLock,
-  removeLegacyTelegramProcessLock,
   type GatewayLockRecord
 } from "./gateway_locks.js";
 import { gatewayAuthSummary } from "./gateway_auth.js";
@@ -205,11 +203,9 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
   const activeRunJobs = runJobs.filter((job) => !["succeeded", "failed", "cancelled", "interrupted"].includes(job.status));
   const interruptedRunJobs = runJobs.filter((job) => job.status === "interrupted");
   const lock = await readGatewayProcessLock(workspaceRoot);
-  const legacyTelegramLock = await readLegacyTelegramProcessLock(workspaceRoot);
   const stopRequest = await readGatewayStopRequest(workspaceRoot);
   const now = Date.now();
   const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, now);
-  const legacyLockStale = isGatewayProcessLockStale(legacyTelegramLock, workspaceRoot, now, 120000, "telegram");
   const tokenStatus = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
   const auth = gatewayAuthSummary(policy);
   const report = {
@@ -240,10 +236,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
         failureCount: state.failureCount,
         lastFailure: state.lastFailure,
         activeRunJobs: activeRunJobs.length,
-        interruptedRunJobs: interruptedRunJobs.length,
-        legacyProcessLock: Boolean(legacyTelegramLock),
-        legacyLockStale,
-        legacyLock: legacyTelegramLock
+        interruptedRunJobs: interruptedRunJobs.length
       }
     }
   };
@@ -279,8 +272,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `    Failure count: ${state.failureCount}`,
     state.lastFailure ? `    Last failure: ${state.lastFailure}` : undefined,
     `    Active run jobs: ${activeRunJobs.length}`,
-    `    Interrupted run jobs: ${interruptedRunJobs.length}`,
-    legacyTelegramLock ? `    Legacy lock: present${legacyLockStale ? " stale" : ""}` : undefined
+    `    Interrupted run jobs: ${interruptedRunJobs.length}`
   ].filter(Boolean).join("\n");
 }
 

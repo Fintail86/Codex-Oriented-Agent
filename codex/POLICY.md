@@ -1,10 +1,10 @@
 # POLICY
 
-This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of truth. Runtime settings live in `config/runtime.defaults.json`, legacy `config/runtime.local.json`, and optional ignored `config/runtime.private.json`.
+This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of truth. Runtime settings live in `config/runtime.defaults.json` and optional ignored `config/runtime.private.json`; legacy `config/runtime.local.json` is reported but no longer loaded.
 
 ## Version
 
-- Policy version: `0.65.0`
+- Policy version: `0.66.0`
 
 ## Agents
 

@@ -22,7 +22,6 @@ import {
   CapabilityPlanner,
   EnvironmentDiscovery,
   capabilityScanJson,
-  legacyEnvironmentScanId,
   normalizeCapabilityProposal,
   stableJsonStringify,
   applyReset,
@@ -187,7 +186,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.65.0\"");
+    expect(policyJson).toContain("\"version\": \"0.66.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -278,12 +277,12 @@ describe("runtime setup", () => {
     expect(shellRequestDisabledPrompt).toContain("read_file");
   });
 
-  it("repairs legacy session agentId and supports assignment filters", async () => {
+  it("rejects legacy session agentId and supports canonical assignment filters", async () => {
     const root = await initializedWorkspace();
     const agents = new AgentManager(root);
     await agents.createAgent("architect-agent", "architect");
     const sessions = new SessionManager(root);
-    const session = await sessions.createSession("architect-agent", "Repair legacy session");
+    const session = await sessions.createSession("architect-agent", "Reject legacy session");
     const sessionPath = join(root, "sessions", session.id, "session.json");
     const legacy = {
       id: session.id,
@@ -295,11 +294,13 @@ describe("runtime setup", () => {
     };
     await writeFile(sessionPath, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
 
-    const repaired = await sessions.loadSession(session.id);
-    expect(repaired.assignedAgentId).toBe("architect-agent");
-    const repairedJson = JSON.parse(await readFile(sessionPath, "utf8")) as Record<string, unknown>;
-    expect(repairedJson.assignedAgentId).toBe("architect-agent");
-    expect(repairedJson.agentId).toBeUndefined();
+    await expect(sessions.loadSession(session.id)).rejects.toThrow("Legacy session metadata field `agentId` is no longer supported");
+
+    const canonical = {
+      ...session,
+      assignedAgentId: "architect-agent"
+    };
+    await writeFile(sessionPath, `${JSON.stringify(canonical, null, 2)}\n`, "utf8");
 
     await sessions.assignAgent(session.id, null);
     expect((await sessions.loadSession(session.id)).assignedAgentId).toBeNull();

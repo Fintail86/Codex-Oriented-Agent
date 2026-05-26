@@ -334,7 +334,7 @@ export async function ensureRuntimeDefaults(workspaceRoot: string): Promise<stri
 
 export async function repairRuntimeConfig(workspaceRoot: string): Promise<string[]> {
   const repaired = [...await ensureRuntimeDefaults(workspaceRoot)];
-  for (const path of [runtimeDefaultsPath(workspaceRoot), runtimeLocalPath(workspaceRoot), runtimePrivatePath(workspaceRoot)]) {
+  for (const path of [runtimeDefaultsPath(workspaceRoot), runtimePrivatePath(workspaceRoot)]) {
     if (!existsSync(path)) {
       continue;
     }
@@ -362,6 +362,7 @@ export async function repairRuntimeConfig(workspaceRoot: string): Promise<string
 }
 
 export async function loadRuntimeConfig(workspaceRoot: string, legacyPolicyRaw?: unknown): Promise<RuntimeConfigLoadResult> {
+  void legacyPolicyRaw;
   const sources: Record<string, string> = {};
   let merged = clone(defaultRuntimeConfig) as JsonObject;
   markSources(defaultRuntimeConfig, "built-in", sources);
@@ -373,18 +374,7 @@ export async function loadRuntimeConfig(workspaceRoot: string, legacyPolicyRaw?:
     markSources(parsedDefaults, "runtime.defaults.json", sources);
   }
 
-  const legacy = extractLegacyRuntimeConfig(legacyPolicyRaw);
-  if (Object.keys(legacy).length) {
-    merged = deepMerge(merged, legacy) as JsonObject;
-    markSources(legacy, "legacy POLICY.json", sources);
-  }
-
   const localRaw = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
-  if (localRaw) {
-    const parsedLocal = isObject(localRaw) ? localRaw : {};
-    merged = deepMerge(merged, parsedLocal) as JsonObject;
-    markSources(parsedLocal, "runtime.local.json", sources);
-  }
 
   const privateRaw = await readJsonIfExists(runtimePrivatePath(workspaceRoot));
   if (privateRaw) {
@@ -396,14 +386,12 @@ export async function loadRuntimeConfig(workspaceRoot: string, legacyPolicyRaw?:
   const config = normalizeRuntimeConfig(runtimeConfigSchema.parse(merged));
   const issues = [
     ...collectSecretIssues(defaultsRaw, "config/runtime.defaults.json"),
-    ...collectSecretIssues(localRaw, "config/runtime.local.json"),
     ...collectSecretIssues(privateRaw, "config/runtime.private.json"),
     ...collectLegacyProviderIssues(defaultsRaw, "config/runtime.defaults.json"),
-    ...collectLegacyProviderIssues(localRaw, "config/runtime.local.json"),
     ...collectLegacyProviderIssues(privateRaw, "config/runtime.private.json"),
+    ...collectLegacyRuntimeLocalIssues(localRaw),
     ...collectPersonalDefaultsIssues(defaultsRaw),
     ...collectBundledToolIssues(defaultsRaw, "config/runtime.defaults.json"),
-    ...collectBundledToolIssues(localRaw, "config/runtime.local.json"),
     ...collectBundledToolIssues(privateRaw, "config/runtime.private.json"),
     ...collectToolCatalogIssues()
   ];
@@ -556,7 +544,7 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
   lawPolicy.version = "0.57.0";
   removeBundledPolicyTools(lawPolicy);
   const existingDefaults = await readJsonIfExists(runtimeDefaultsPath(workspaceRoot));
-  const existingLocal = await readJsonIfExists(runtimeLocalPath(workspaceRoot));
+  const existingPrivate = await readJsonIfExists(runtimePrivatePath(workspaceRoot));
   const runtimeDefaults = hasLegacyRuntime
     ? normalizeRuntimeConfig(runtimeConfigSchema.parse({
       ...defaultRuntimeConfig,
@@ -566,11 +554,11 @@ export async function buildRuntimeConfigMigration(workspaceRoot: string): Promis
     : normalizeRuntimeConfig(runtimeConfigSchema.parse(deepMerge(defaultRuntimeConfig, existingDefaults ?? {})));
   const runtimeLocal = hasLegacyRuntime
     ? localConfigFromLegacy(legacy)
-    : (isObject(existingLocal) ? existingLocal as PartialRuntimeConfig : {});
+    : (isObject(existingPrivate) ? existingPrivate as PartialRuntimeConfig : {});
   const mergedRuntimeLocal = deepMerge(runtimeLocal, legacyToolLocal) as PartialRuntimeConfig;
   const changed = JSON.stringify(raw) !== JSON.stringify(lawPolicy)
     || JSON.stringify(existingDefaults ?? null) !== JSON.stringify(runtimeDefaults)
-    || JSON.stringify(existingLocal ?? {}) !== JSON.stringify(mergedRuntimeLocal);
+    || JSON.stringify(existingPrivate ?? {}) !== JSON.stringify(mergedRuntimeLocal);
   const migration = {
     changed,
     policyPath: policyJsonPath(workspaceRoot),
@@ -871,6 +859,18 @@ function collectLegacyProviderIssues(raw: unknown, label: string): RuntimeConfig
     id: "config.legacy_default_provider",
     path: `${label}:model.defaultProvider`,
     message: "Legacy model.defaultProvider is ignored. Use `cosia provider profile add ...` and `cosia provider profile use <name>`."
+  }];
+}
+
+function collectLegacyRuntimeLocalIssues(raw: unknown): RuntimeConfigIssue[] {
+  if (raw === undefined) {
+    return [];
+  }
+  return [{
+    severity: "warning",
+    id: "config.legacy_runtime_local",
+    path: "config/runtime.local.json",
+    message: "Legacy runtime.local.json is no longer loaded. Move private settings to config/runtime.private.json or reset the development config."
   }];
 }
 

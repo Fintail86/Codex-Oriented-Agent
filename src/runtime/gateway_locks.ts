@@ -55,10 +55,6 @@ export function gatewayProcessLockPath(workspaceRoot: string): string {
   return join(gatewayRoot(workspaceRoot), "process.lock");
 }
 
-export function telegramProcessLockPath(workspaceRoot: string): string {
-  return join(telegramGatewayDir(workspaceRoot), "process.lock");
-}
-
 export function sessionLockPath(workspaceRoot: string, sessionId: string): string {
   return join(gatewayLocksDir(workspaceRoot), `session_${sanitizeLockName(sessionId)}.lock`);
 }
@@ -106,14 +102,6 @@ export async function readGatewayProcessLock(workspaceRoot: string): Promise<Gat
   return readLock(path);
 }
 
-export async function readLegacyTelegramProcessLock(workspaceRoot: string): Promise<GatewayLockRecord | undefined> {
-  const path = telegramProcessLockPath(workspaceRoot);
-  if (!(await pathExists(path))) {
-    return undefined;
-  }
-  return readLock(path);
-}
-
 export async function heartbeatGatewayProcessLock(
   workspaceRoot: string,
   lock: GatewayLockRecord,
@@ -138,15 +126,6 @@ export async function heartbeatGatewayProcessLock(
 
 export async function removeGatewayProcessLock(workspaceRoot: string): Promise<boolean> {
   const path = gatewayProcessLockPath(workspaceRoot);
-  if (!(await pathExists(path))) {
-    return false;
-  }
-  await rm(path, { force: true });
-  return true;
-}
-
-export async function removeLegacyTelegramProcessLock(workspaceRoot: string): Promise<boolean> {
-  const path = telegramProcessLockPath(workspaceRoot);
   if (!(await pathExists(path))) {
     return false;
   }

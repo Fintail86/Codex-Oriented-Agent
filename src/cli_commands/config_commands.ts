@@ -50,8 +50,7 @@ import {
   repairTelegramGatewayState,
   resetTelegramGatewayState,
   resolveTelegramToken,
-  startTelegramGateway,
-  unlockStaleTelegramGateway
+  startTelegramGateway
 } from "../runtime/telegram_gateway.js";
 import {
   addTelegramChatId,

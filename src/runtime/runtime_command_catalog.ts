@@ -724,7 +724,6 @@ const cliCoverageInputs: CommandInput[] = [
   coverageCommand("gateway.telegram.group", ["gateway", "telegram"], "read_only", "Show Telegram connector command help.", ["gateway", "telegram", "help"]),
   coverageCommand("gateway.telegram.webhook.group", ["gateway", "telegram", "webhook"], "read_only", "Show Telegram webhook command help.", ["gateway", "telegram", "webhook", "help"]),
   coverageCommand("gateway.telegram.start_direct", ["gateway", "telegram", "start"], "dangerous", "Debug-start Telegram long polling directly.", ["gateway", "telegram", "start"]),
-  coverageCommand("gateway.telegram.unlock_direct", ["gateway", "telegram", "unlock"], "mutation", "Remove a stale Telegram connector process lock.", ["gateway", "telegram", "unlock"], ["gateway", "telegram", "unlock"]),
   coverageCommand("mvp.group", ["mvp"], "read_only", "Show historical MVP helper command help.", ["mvp", "help"]),
   coverageCommand("mvp.checklist", ["mvp", "checklist"], "read_only", "Print the historical MVP acceptance checklist.", ["mvp", "checklist"]),
   coverageCommand("improve.group", ["improve"], "read_only", "Show self-improvement command help.", ["improve", "help"]),

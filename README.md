@@ -1,4 +1,4 @@
-# COSIA v0.65.0
+# COSIA v0.66.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.65.0 removes deprecated command aliases and legacy trigger-pack execution surfaces while keeping the commandId catalog as the model-facing navigation layer.
+v0.66.0 removes stale runtime compatibility paths for legacy sessions, capability scans, Telegram connector locks, and runtime.local config reads.
 
 ## Requirements
 
@@ -324,7 +324,7 @@ cosia session show <session-id>
 - Protected Codex law files are changed through `cosia codex amendment propose/apply`, not generic `write_file`.
 - Final user approval is reserved for Codex self-amendment and system-level boundary changes.
 - Telegram/REPL conversational approval does not change Codex law; `/apply` or CLI `--yes` must apply a concrete pending amendment.
-- Runtime settings live in `config/runtime.defaults.json`, legacy `config/runtime.local.json`, and ignored `config/runtime.private.json`.
+- Runtime settings live in `config/runtime.defaults.json` and ignored `config/runtime.private.json`. Legacy `config/runtime.local.json` is reported but no longer loaded.
 - Secret values live in ignored `config/secrets.private.json` or explicitly configured env vars.
 - `config show`, `config check`, and `config migrate --from-policy` manage runtime configuration.
 - `cosia policy check --repair` regenerates stale `POLICY.md`; `run` and `chat` also auto-sync stale policy mirrors before prompt assembly.
@@ -747,6 +747,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.66.0: Legacy compatibility reads are removed for old session `agentId`, v0.29 capability facts, Telegram connector process locks, and runtime.local config.
 - v0.65.0: Deprecated aliases are removed: `agent-runtime`, `--model-provider`, provider-id debug aliases, and legacy command trigger pack CLI surfaces.
 - v0.64.0: Runtime domain split begins with memory text/search helpers extracted from `memory_manager`.
 - v0.63.0: Provider auth secret resolution and profile-to-runtime config creation split into dedicated modules behind the existing provider profile facade.

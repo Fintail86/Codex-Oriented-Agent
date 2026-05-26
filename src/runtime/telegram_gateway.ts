@@ -7,9 +7,7 @@ import {
   acquireGatewayProcessLock,
   heartbeatGatewayProcessLock,
   isGatewayProcessLockStale,
-  readLegacyTelegramProcessLock,
   readGatewayProcessLock,
-  removeLegacyTelegramProcessLock,
   releaseGatewayProcessLock,
   telegramGatewayDir
 } from "./gateway_locks.js";
@@ -1312,10 +1310,8 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
   const descriptor = telegramGatewayConnectorDescriptor;
   const state = await loadTelegramGatewayState(workspaceRoot);
   const lock = await readGatewayProcessLock(workspaceRoot);
-  const legacyLock = await readLegacyTelegramProcessLock(workspaceRoot);
   const processLocked = Boolean(lock);
   const lockStale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now());
-  const legacyLockStale = isGatewayProcessLockStale(legacyLock, workspaceRoot, Date.now(), 120000, "telegram");
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const auth = gatewayAuthSummary(policy);
   const report = {
@@ -1329,8 +1325,6 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
       processLock: processLocked,
       lockStale,
       lock,
-      legacyProcessLock: Boolean(legacyLock),
-      legacyLockStale,
       authChatCount: auth.chatCount,
       masterConfigured: auth.masterConfigured,
       guestBindings: auth.guestBindings,
@@ -1365,8 +1359,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
     `  Failure count: ${state.failureCount}`,
-    state.lastFailure ? `  Last failure: ${state.lastFailure}` : undefined,
-    legacyLock ? `  Legacy lock: present${legacyLockStale ? " stale" : ""}` : undefined
+    state.lastFailure ? `  Last failure: ${state.lastFailure}` : undefined
   ].filter(Boolean).join("\n");
 }
 
@@ -1403,19 +1396,6 @@ export function formatTelegramStateReset(result: TelegramStateResetResult): stri
     result.preservedNextOffset !== undefined ? `Preserved next offset: ${result.preservedNextOffset}` : undefined,
     `Note: ${result.note}`
   ].filter(Boolean).join("\n");
-}
-
-export async function unlockStaleTelegramGateway(workspaceRoot: string, options: { staleOnly?: boolean } = {}): Promise<{ removed: boolean; reason: string }> {
-  const lock = await readLegacyTelegramProcessLock(workspaceRoot);
-  if (!lock) {
-    return { removed: false, reason: "no process lock" };
-  }
-  const stale = isGatewayProcessLockStale(lock, workspaceRoot, Date.now(), 120000, "telegram");
-  if (options.staleOnly && !stale) {
-    return { removed: false, reason: "lock is not stale" };
-  }
-  const removed = await removeLegacyTelegramProcessLock(workspaceRoot);
-  return { removed, reason: stale ? "stale lock removed" : "lock removed" };
 }
 
 export function formatTelegramCheck(result: TelegramGatewayCheck): string {

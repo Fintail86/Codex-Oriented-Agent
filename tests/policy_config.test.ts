@@ -22,7 +22,6 @@ import {
   CapabilityPlanner,
   EnvironmentDiscovery,
   capabilityScanJson,
-  legacyEnvironmentScanId,
   normalizeCapabilityProposal,
   stableJsonStringify,
   applyReset,
@@ -455,7 +454,7 @@ describe("policy core", () => {
     expect(policy.model.providers.openrouter.model).toBe("openrouter/test-model");
     expect(policy.connectors.telegram.allowedChatIds).toEqual(["123"]);
     expect(await formatConfigCheck(root, rawPolicy)).toContain("Schema: ok");
-    expect(await formatConfigShow(root, rawPolicy)).toContain("runtime.local.json");
+    expect(await formatConfigShow(root, rawPolicy)).toContain("runtime.private.json");
     expect((deepMerge({ a: { b: 1, c: [1] } }, { a: { c: [2] } }) as { a: { b: number; c: number[] } }).a)
       .toEqual({ b: 1, c: [2] });
 
@@ -977,7 +976,7 @@ describe("policy core", () => {
       enabled: false
     };
     await writeFile(policyPath, `${JSON.stringify(rawPolicy, null, 2)}\n`, "utf8");
-    await rm(runtimeLocalPath(root), { force: true });
+    await rm(runtimePrivatePath(root), { force: true });
 
     const migration = await buildRuntimeConfigMigration(root);
     expect((migration.lawPolicy.tools as Record<string, unknown>).git_status).toBeUndefined();

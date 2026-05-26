@@ -250,8 +250,8 @@ export class AgentManager {
         continue;
       }
       try {
-        const parsed = JSON.parse(await readText(join(sessionsDir, entry.name, "session.json"))) as { agentId?: string; assignedAgentId?: string | null };
-        if ((parsed.assignedAgentId ?? parsed.agentId ?? null) === agentId) {
+        const parsed = JSON.parse(await readText(join(sessionsDir, entry.name, "session.json"))) as { assignedAgentId?: string | null };
+        if ((parsed.assignedAgentId ?? null) === agentId) {
           sessionIds.push(entry.name);
         }
       } catch {

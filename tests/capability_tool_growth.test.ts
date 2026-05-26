@@ -22,7 +22,6 @@ import {
   CapabilityPlanner,
   EnvironmentDiscovery,
   capabilityScanJson,
-  legacyEnvironmentScanId,
   normalizeCapabilityProposal,
   stableJsonStringify,
   applyReset,
@@ -449,7 +448,7 @@ describe("capability planner", () => {
     expect(scan.facts.some((fact) => fact.keys?.includes("[REDACTED_KEY]"))).toBe(true);
   });
 
-  it("keeps legacy v0.29 facts readable through the reserved legacy scan", async () => {
+  it("rejects legacy v0.29 capability facts without scan ids", async () => {
     const root = await initializedWorkspace();
     const db = new DatabaseSync(join(root, "memory", "longterm.sqlite"));
     try {
@@ -478,12 +477,7 @@ describe("capability planner", () => {
     }
 
     const discovery = new EnvironmentDiscovery(root);
-    const legacyResult = discovery.listFacts({ scanId: legacyEnvironmentScanId });
-    expect(legacyResult.scan.scanId).toBe(legacyEnvironmentScanId);
-    expect(legacyResult.facts[0]).toMatchObject({ id: "legacy_fact", scanId: legacyEnvironmentScanId });
-
-    const again = discovery.listFacts({ scanId: legacyEnvironmentScanId });
-    expect(again.facts).toHaveLength(1);
+    expect(() => discovery.listFacts({ latest: true })).toThrow("Legacy capability storage without environment_facts.scan_id is no longer supported");
   });
 
   it("uses fact-kind summaries and stable object-key serialization only", async () => {

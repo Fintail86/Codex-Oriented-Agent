@@ -274,8 +274,8 @@ export function splitList(value: string | undefined): string[] {
 
 export function formatPromptManifest(manifest: PromptManifest): string {
   const lines = [
-    `Run: ${manifest.runId ?? "legacy/no-run-id"}`,
-    `Agent: ${manifest.agentId ?? "legacy/unknown"}`,
+    `Run: ${manifest.runId ?? "unknown"}`,
+    `Agent: ${manifest.agentId ?? "unknown"}`,
     `Model step: ${manifest.modelStep ?? "unknown"}`,
     `Timestamp: ${manifest.timestamp}`,
     `Prompt chars: ${manifest.promptChars}/${manifest.maxPromptChars}`,

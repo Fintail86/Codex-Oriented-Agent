@@ -65,8 +65,7 @@ import {
   repairTelegramGatewayState,
   resetTelegramGatewayState,
   resolveTelegramToken,
-  startTelegramGateway,
-  unlockStaleTelegramGateway
+  startTelegramGateway
 } from "../runtime/telegram_gateway.js";
 import {
   addTelegramChatId,
@@ -551,18 +550,4 @@ export function registerGatewayCommands(program: Command): void {
       });
     });
 
-  telegram
-    .command("unlock")
-    .option("--stale-only", "Only remove stale gateway process locks.", false)
-    .description("Remove a stale Telegram gateway process lock.")
-    .action(async (options: { staleOnly: boolean }) => {
-      await main(async (workspaceRoot) => {
-        const result = await unlockStaleTelegramGateway(workspaceRoot, { staleOnly: options.staleOnly });
-        console.log([
-          "Telegram gateway unlock",
-          `Removed: ${result.removed}`,
-          `Reason: ${result.reason}`
-        ].join("\n"));
-      });
-    });
 }
