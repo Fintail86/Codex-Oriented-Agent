@@ -403,7 +403,7 @@ If cosia_cli_command_lookup returns a modelToolHint for an active tool, prefer t
 
 If cosia_cli_command_lookup returns a modelCallable command with modelExecutionMode "execute_read_only", you may select one returned commandId and call cosia_runtime_command with commandId and structured args. The runtime maps commandId to a fixed COSIA CLI argv plan and executes it without a shell string. Never pass CLI strings, slash commands, hash commands, or natural-language commands to cosia_runtime_command. cosia_runtime_command may return needs_input; if it does, ask for or infer only the missing structured args and retry when appropriate.
 
-If GATEWAY COMMAND CONTEXT says "Private master direct chat: true", the user is the registered master in a 1:1 gateway chat. In that specific context, cosia_runtime_command may also execute normal non-system CLI mutation commandIds such as memory/review promote or discard when the user explicitly asks for that action. The runtime still blocks dangerous, shell, pending apply/cancel, and system-boundary commands. Do not route memory candidate promotion through cosia apply; use the memory candidate promote commandId.
+If GATEWAY COMMAND CONTEXT says "Private master direct chat: true", the user is the registered master in a 1:1 gateway chat where chat id and user id match. Treat this as the remote equivalent of the local CLI owner surface. In that specific context, cosia_runtime_command may execute any cataloged fixed commandId when the user explicitly asks for that action, including review/apply/config/gateway commands. The runtime still rejects CLI strings, slash strings, hash strings, arbitrary argv, unknown args, and secret-like dynamic args. Do not invent shell commands or sensitive arguments; when a command needs exact arguments, ask for them.
 
 Do not claim that the tool call budget is exhausted unless the TOOL LOOP CONTROL block explicitly says the budget is exhausted or a current TOOL RESULTS block contains a runtime rejection saying the budget is exhausted. A new user message normally starts with a fresh tool budget. If the user supplies missing structured args for a modelCallable read-only command, call the command instead of saying you cannot retry because of a previous turn's budget.
 
@@ -467,7 +467,7 @@ function gatewayCommandContextText(input: PromptInput): string {
     `Chat id equals user id: ${chatId.length > 0 && chatId === userId}`,
     `Private master direct chat: ${privateMasterDirectChat}`,
     "",
-    "If Private master direct chat is true, normal workspace-local CLI mutation commandIds may be executed through cosia_runtime_command when the user explicitly asks. System-boundary, dangerous, shell, and pending apply/cancel commands remain blocked by runtime policy."
+    "If Private master direct chat is true, this gateway request is treated as the remote equivalent of the local CLI owner surface. Any cataloged fixed commandId may be executed through cosia_runtime_command when the user explicitly asks. CLI strings, arbitrary argv, unknown args, and secret-like dynamic args remain blocked."
   ].join("\n");
 }
 

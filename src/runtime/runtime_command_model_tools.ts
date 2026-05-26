@@ -96,9 +96,10 @@ export async function executeCosiaRuntimeCommand(args: unknown, ctx: ToolContext
     const mode = modelExecutionMode(definition);
     const privateMasterCliOverride = isPrivateMasterDirectChat(ctx);
     if (privateMasterCliOverride) {
-      if (isForbiddenPrivateMasterCliCommand(definition)) {
-        return blocked("private_master_cli_command_blocked", `Command remains blocked even for private master CLI execution: ${definition.commandId}`, definition);
-      }
+      // Private 1:1 chat where chat id, user id, and registered master all resolve
+      // to the same actor is treated as the remote equivalent of the local CLI.
+      // The command still has to come from the fixed command catalog and argv
+      // planner; no CLI string or arbitrary argv is accepted here.
     } else {
       const roleGate = gatewayExecutionGate(ctx, mode);
       if (!roleGate.allowed) {
@@ -203,7 +204,7 @@ function matchesLookupFilters(definition: RuntimeCommandDefinition, input: z.inf
 }
 
 function definitionView(definition: RuntimeCommandDefinition, ctx?: ToolContext): Record<string, unknown> {
-  const privateMasterCliOverrideAvailable = ctx ? isPrivateMasterDirectChat(ctx) && !isForbiddenPrivateMasterCliCommand(definition) : false;
+  const privateMasterCliOverrideAvailable = ctx ? isPrivateMasterDirectChat(ctx) : false;
   return {
     commandId: definition.commandId,
     commandPath: definition.commandPath,
@@ -337,15 +338,6 @@ function isForbiddenModelRuntimeCommand(definition: RuntimeCommandDefinition): b
     || definition.commandId === "pending.cancel"
     || definition.commandId.startsWith("gateway.telegram.set")
     || definition.commandId.startsWith("gateway.telegram.unset")
-    || definition.commandId.startsWith("shell.");
-}
-
-function isForbiddenPrivateMasterCliCommand(definition: RuntimeCommandDefinition): boolean {
-  return definition.safety === "dangerous"
-    || definition.safety === "system_boundary"
-    || definition.commandId === "shell.preview"
-    || definition.commandId === "pending.apply"
-    || definition.commandId === "pending.cancel"
     || definition.commandId.startsWith("shell.");
 }
 

@@ -204,7 +204,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.58.0\"");
+    expect(policyJson).toContain("\"version\": \"0.59.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -3990,7 +3990,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.58.0");
+    expect(emptyReport.version).toBe("0.59.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4517,10 +4517,44 @@ describe("status and listing", () => {
       commandId: "gateway.auth.set_master",
       args: { connector: "telegram", userId: TELEGRAM_FIXTURE_PRIVATE_ID }
     }, privateMasterCtx);
-    expect(privateMasterBoundary.ok).toBe(false);
+    expect(privateMasterBoundary.ok).toBe(true);
     expect(JSON.parse(privateMasterBoundary.content)).toMatchObject({
+      status: "ok",
+      commandId: "gateway.auth.set_master",
+      safety: "system_boundary",
+      privateMasterCliOverride: true,
+      argv: ["gateway", "auth", "set-master", "telegram", TELEGRAM_FIXTURE_PRIVATE_ID]
+    });
+
+    const privateMasterShell = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "shell.run",
+      args: { command: "node --version" }
+    }, privateMasterCtx);
+    expect(privateMasterShell.ok).toBe(true);
+    expect(JSON.parse(privateMasterShell.content)).toMatchObject({
+      status: "ok",
+      commandId: "shell.run",
+      safety: "dangerous",
+      privateMasterCliOverride: true,
+      argv: ["shell", "run", "--command", "node --version"]
+    });
+
+    const nonDirectMasterBoundary = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "gateway.auth.set_master",
+      args: { connector: "telegram", userId: TELEGRAM_FIXTURE_PRIVATE_ID }
+    }, {
+      ...privateMasterCtx,
+      gatewayActor: {
+        connector: "telegram",
+        chatId: "group-1",
+        chatType: "group",
+        userId: TELEGRAM_FIXTURE_PRIVATE_ID
+      }
+    });
+    expect(nonDirectMasterBoundary.ok).toBe(false);
+    expect(JSON.parse(nonDirectMasterBoundary.content)).toMatchObject({
       status: "blocked",
-      reason: "private_master_cli_command_blocked"
+      reason: "gateway_role_denied"
     });
   });
 
@@ -5354,7 +5388,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.58.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.59.0");
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -5713,7 +5747,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.58.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.59.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

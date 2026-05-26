@@ -763,6 +763,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.59.0: Private direct master Gateway chats where chat id and user id match are treated as remote CLI owner surfaces for cataloged commandId execution.
 - v0.58.0: Memory/skill store remodel removes scope/JSONL migration compatibility and legacy skill migration, keeping tier/ownerId memory and the global skill toolbox as canonical.
 - v0.57.0: Gateway/Telegram surface now uses command registry and connector descriptor structure for slash help, role checks, callbacks, and Bot API operating defaults.
 - v0.56.0: Model-facing CLI command catalog now uses typed command specs and argv planning, with Commander coverage tests to catch drift such as `memory.search --query`.
