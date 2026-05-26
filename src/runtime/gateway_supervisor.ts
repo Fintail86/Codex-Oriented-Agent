@@ -17,13 +17,13 @@ import type { FetchLike } from "./model/providers/openai_compatible_provider.js"
 import { resolveProviderSelection } from "./model/provider_registry.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { RunJobLedger } from "./run_jobs.js";
+import { TELEGRAM_ALLOWED_UPDATES } from "./gateway_connector_descriptor.js";
 import {
   checkTelegramGateway,
   inspectTelegramGatewayState,
   loadTelegramGatewayState,
   resolveTelegramToken,
   startTelegramGateway,
-  TELEGRAM_ALLOWED_UPDATES,
   type TelegramGatewayCheck
 } from "./telegram_gateway.js";
 

@@ -1,4 +1,4 @@
-# COSIA v0.56.0
+# COSIA v0.57.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.56.0 refactors the model-facing CLI command catalog so command ids map through typed argv plans instead of ad-hoc string templates. This keeps LLM-facing command lookup aligned with the real COSIA CLI while preserving safety gates, role checks, and shell-string execution bans.
+v0.57.0 refactors the Gateway/Telegram surface around command registries and connector descriptors. Slash commands, role checks, callback actions, and Telegram Bot API operating defaults now have a clearer source of truth while preserving existing user-facing behavior.
 
 ## Requirements
 
@@ -766,6 +766,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 ## Roadmap
 
 - v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
+- v0.57.0: Gateway/Telegram surface now uses command registry and connector descriptor structure for slash help, role checks, callbacks, and Bot API operating defaults.
 - v0.56.0: Model-facing CLI command catalog now uses typed command specs and argv planning, with Commander coverage tests to catch drift such as `memory.search --query`.
 - v0.55.0: Telegram Gateway aligns with Bot API long-polling guidance, detects webhook conflicts, adds explicit webhook status/clear commands, respects retry_after on send calls, and documents group command syntax.
 - v0.53.0: Gateway role authorization moves Telegram user permissions into connector-neutral runtime gates with one global master, chat-scoped guest/admin bindings, and tool-level external access checks.

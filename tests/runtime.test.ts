@@ -204,7 +204,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.56.0\"");
+    expect(policyJson).toContain("\"version\": \"0.57.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -4015,7 +4015,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.56.0");
+    expect(emptyReport.version).toBe("0.57.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -5379,7 +5379,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.56.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.57.0");
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -5738,7 +5738,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.56.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.57.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

@@ -14,8 +14,16 @@ import {
   telegramGatewayDir
 } from "./gateway_locks.js";
 import { chunkTelegramMessage } from "./gateway_format.js";
-import { formatGatewayWhoami, handleGatewayMessage, isGatewayWhoamiInput, type GatewayChatState, type GatewayMessageResult, type GatewaySourceContext } from "./gateway_runtime.js";
-import { gatewayAuthSummary } from "./gateway_auth.js";
+import { formatGatewayWhoami, handleGatewayCallbackAction, handleGatewayMessage, isGatewayWhoamiInput, type GatewayChatState, type GatewayMessageResult, type GatewaySourceContext } from "./gateway_runtime.js";
+import { authorizeGatewayAccess, formatGatewayAuthBlocked, gatewayAuthSummary } from "./gateway_auth.js";
+import {
+  buildGatewayCallbackData,
+  parseGatewayCallbackData,
+  telegramGatewayConnectorDescriptor,
+  TELEGRAM_ALLOWED_UPDATES,
+  type GatewayConnectorDescriptor
+} from "./gateway_connector_descriptor.js";
+import { formatUnknownCallbackNotice } from "./gateway_message_renderer.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
@@ -118,6 +126,7 @@ export type TelegramStartOptions = {
   providerId?: string;
   once?: boolean;
   fetchImpl?: FetchLike;
+  descriptor?: GatewayConnectorDescriptor;
   now?: () => number;
   command?: string;
   stopRequested?: () => boolean | Promise<boolean>;
@@ -193,15 +202,16 @@ export type TelegramMessageSender = {
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
 };
 
-const TELEGRAM_TYPING_REFRESH_MS = 4000;
-const TELEGRAM_SEND_CHAT_MIN_INTERVAL_MS = 1100;
-export const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"] as const;
 const activeTelegramSessionWorkers = new Set<string>();
 
 class TelegramApiClient {
   private readonly fetchImpl: FetchLike;
 
-  constructor(private readonly token: string, fetchImpl?: FetchLike) {
+  constructor(
+    private readonly token: string,
+    fetchImpl?: FetchLike,
+    private readonly descriptor: GatewayConnectorDescriptor = telegramGatewayConnectorDescriptor
+  ) {
     this.fetchImpl = fetchImpl ?? fetch;
   }
 
@@ -223,7 +233,7 @@ class TelegramApiClient {
     const timeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1000));
     return this.call<TelegramUpdate[]>("getUpdates", {
       timeout: timeoutSeconds,
-      allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
+      allowed_updates: telegramAllowedUpdates(this.descriptor),
       ...(offset !== undefined ? { offset } : {})
     });
   }
@@ -256,7 +266,7 @@ class TelegramApiClient {
   private async paceChatSend(chatId: string): Promise<void> {
     const now = Date.now();
     const previous = this.lastSendAtByChat.get(chatId) ?? 0;
-    const waitMs = previous + TELEGRAM_SEND_CHAT_MIN_INTERVAL_MS - now;
+    const waitMs = previous + this.descriptor.messageDefaults.sendPacingMs - now;
     if (waitMs > 0) {
       await delay(waitMs);
     }
@@ -312,10 +322,26 @@ function parseTelegramApiResponse<T>(raw: string): TelegramApiResponse<T> | unde
   }
 }
 
+function telegramAllowedUpdates(descriptor: GatewayConnectorDescriptor): string[] {
+  const allowedUpdates = descriptor.telegram?.allowedUpdates ?? TELEGRAM_ALLOWED_UPDATES;
+  return allowedUpdates.length ? [...allowedUpdates] : [...TELEGRAM_ALLOWED_UPDATES];
+}
+
+function telegramOutputSettings(policy: PolicyConfig, descriptor: GatewayConnectorDescriptor): {
+  messageChunkChars: number;
+  typingRefreshMs: number;
+} {
+  return {
+    messageChunkChars: policy.connectors.telegram.messageChunkChars || descriptor.messageDefaults.messageChunkChars,
+    typingRefreshMs: descriptor.messageDefaults.typingRefreshMs
+  };
+}
+
 export async function checkTelegramGateway(
   workspaceRoot: string,
-  options: { fetchImpl?: FetchLike } = {}
+  options: { fetchImpl?: FetchLike; descriptor?: GatewayConnectorDescriptor } = {}
 ): Promise<TelegramGatewayCheck> {
+  const descriptor = options.descriptor ?? telegramGatewayConnectorDescriptor;
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const config = policy.connectors.telegram;
   const auth = gatewayAuthSummary(policy);
@@ -367,7 +393,7 @@ export async function checkTelegramGateway(
     };
   }
   try {
-    const client = new TelegramApiClient(tokenResolution.token, options.fetchImpl);
+    const client = new TelegramApiClient(tokenResolution.token, options.fetchImpl, descriptor);
     await client.getMe();
     const webhook = await client.getWebhookInfo();
     if (webhook.url?.trim()) {
@@ -384,7 +410,7 @@ export async function checkTelegramGateway(
         adminBindings: auth.adminBindings,
         legacyWarning: auth.legacyWarning,
         groupMode: config.groupMode,
-        allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
+        allowedUpdates: telegramAllowedUpdates(descriptor),
         webhookUrl: webhook.url
       };
     }
@@ -402,7 +428,7 @@ export async function checkTelegramGateway(
       adminBindings: auth.adminBindings,
       legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode,
-      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
+      allowedUpdates: telegramAllowedUpdates(descriptor),
       webhookUrl: webhook.url
     };
   } catch (error) {
@@ -419,15 +445,16 @@ export async function checkTelegramGateway(
       adminBindings: auth.adminBindings,
       legacyWarning: auth.legacyWarning,
       groupMode: config.groupMode,
-      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES]
+      allowedUpdates: telegramAllowedUpdates(descriptor)
     };
   }
 }
 
 export async function getTelegramWebhookStatus(
   workspaceRoot: string,
-  options: { fetchImpl?: FetchLike } = {}
+  options: { fetchImpl?: FetchLike; descriptor?: GatewayConnectorDescriptor } = {}
 ): Promise<TelegramWebhookStatus> {
+  const descriptor = options.descriptor ?? telegramGatewayConnectorDescriptor;
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const tokenResolution = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
   if (!tokenResolution.token) {
@@ -437,11 +464,11 @@ export async function getTelegramWebhookStatus(
       message: "Telegram bot token is not configured.",
       hint: "Run `cosia gateway telegram set token` or `cosia gateway telegram set token-env <ENV_NAME>`.",
       tokenStatus: tokenResolution.status,
-      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES]
+      allowedUpdates: telegramAllowedUpdates(descriptor)
     };
   }
   try {
-    const webhook = await new TelegramApiClient(tokenResolution.token, options.fetchImpl).getWebhookInfo();
+    const webhook = await new TelegramApiClient(tokenResolution.token, options.fetchImpl, descriptor).getWebhookInfo();
     const configured = Boolean(webhook.url?.trim());
     return {
       ok: true,
@@ -454,7 +481,7 @@ export async function getTelegramWebhookStatus(
       webhookUrl: webhook.url,
       pendingUpdateCount: webhook.pending_update_count,
       lastErrorMessage: webhook.last_error_message,
-      allowedUpdates: webhook.allowed_updates ?? [...TELEGRAM_ALLOWED_UPDATES]
+      allowedUpdates: webhook.allowed_updates ?? telegramAllowedUpdates(descriptor)
     };
   } catch (error) {
     return {
@@ -463,15 +490,16 @@ export async function getTelegramWebhookStatus(
       message: (error as Error).message,
       hint: classifyTelegramCheckError(error).hint,
       tokenStatus: tokenResolution.status,
-      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES]
+      allowedUpdates: telegramAllowedUpdates(descriptor)
     };
   }
 }
 
 export async function clearTelegramWebhook(
   workspaceRoot: string,
-  options: { yes?: boolean; fetchImpl?: FetchLike } = {}
+  options: { yes?: boolean; fetchImpl?: FetchLike; descriptor?: GatewayConnectorDescriptor } = {}
 ): Promise<TelegramWebhookClearResult> {
+  const descriptor = options.descriptor ?? telegramGatewayConnectorDescriptor;
   const policy = await new PolicyManager(workspaceRoot).loadPolicy();
   const tokenResolution = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
   if (!tokenResolution.token) {
@@ -493,7 +521,7 @@ export async function clearTelegramWebhook(
     };
   }
   try {
-    await new TelegramApiClient(tokenResolution.token, options.fetchImpl).deleteWebhook();
+    await new TelegramApiClient(tokenResolution.token, options.fetchImpl, descriptor).deleteWebhook();
     return {
       cleared: true,
       applied: true,
@@ -546,10 +574,11 @@ function classifyTelegramCheckError(error: unknown): {
 }
 
 export async function startTelegramGateway(workspaceRoot: string, options: TelegramStartOptions = {}): Promise<void> {
+  const descriptor = options.descriptor ?? telegramGatewayConnectorDescriptor;
   const policyManager = new PolicyManager(workspaceRoot);
   const policy = await policyManager.loadPolicy();
   const config = policy.connectors.telegram;
-  const check = await checkTelegramGateway(workspaceRoot, { fetchImpl: options.fetchImpl });
+  const check = await checkTelegramGateway(workspaceRoot, { fetchImpl: options.fetchImpl, descriptor });
   if (!check.ok) {
     throw new Error(`${check.message}${check.hint ? `\nHint: ${check.hint}` : ""}`);
   }
@@ -558,7 +587,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
   const providerId = resolveProviderSelection(policy, options.providerId);
 
   await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
-  const client = new TelegramApiClient(token, options.fetchImpl);
+  const client = new TelegramApiClient(token, options.fetchImpl, descriptor);
   const lock = await acquireGatewayProcessLock(workspaceRoot, "gateway", options.now, {
     gatewayId: "gateway",
     command: options.command ?? "cosia gateway telegram start"
@@ -613,7 +642,8 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
             state = await processTelegramUpdate(workspaceRoot, policy, client, state, update, {
               providerId,
               owner: `telegram:${telegramUpdateChatId(update) ?? "unknown"}`,
-              now: options.now
+              now: options.now,
+              descriptor
             });
             state.failureCount = 0;
             state.lastFailure = undefined;
@@ -622,7 +652,7 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
             const message = (error as Error).message;
             state.failureCount = state.failureCount + 1;
             state.lastFailure = message;
-            await notifyTelegramUpdateFailure(client, update, message);
+            await notifyTelegramUpdateFailure(client, update, message, descriptor);
             await appendTelegramLog(workspaceRoot, "update_failure", { updateId: update.update_id, error: message });
           }
           state.nextOffset = update.update_id + 1;
@@ -678,8 +708,10 @@ export async function processTelegramUpdate(
   client: TelegramMessageSender,
   state: TelegramGatewayState,
   update: TelegramUpdate,
-  options: { providerId: string; owner: string; now?: () => number }
+  options: { providerId: string; owner: string; now?: () => number; descriptor?: GatewayConnectorDescriptor }
 ): Promise<TelegramGatewayState> {
+  const descriptor = options.descriptor ?? telegramGatewayConnectorDescriptor;
+  const outputSettings = telegramOutputSettings(policy, descriptor);
   const callback = update.callback_query;
   if (callback) {
     const chatId = String(callback.message?.chat.id ?? "");
@@ -691,23 +723,34 @@ export async function processTelegramUpdate(
       });
     }
     return withTelegramTyping(client, chatId, async () => {
-      const input = telegramCallbackInput(callback.data ?? "");
+      const parsedCallback = parseGatewayCallbackData(descriptor, callback.data ?? "");
+      if (!parsedCallback) {
+        await client.sendMessage(chatId, formatUnknownCallbackNotice());
+        return state;
+      }
+      const actor = gatewayActorFromSource(source);
+      const access = authorizeGatewayAccess(policy, actor, parsedCallback.definition.minRole, parsedCallback.definition.safety !== "read_only");
+      if (!access.allowed) {
+        await client.sendMessage(chatId, formatGatewayAuthBlocked(actor, access));
+        return state;
+      }
       let chatState = state.chats[chatId] ?? {
         providerId: options.providerId
       };
       let lastToolResultSummary: string | undefined;
       let result: GatewayMessageResult;
       try {
-        result = await handleGatewayMessage({
+        result = await handleGatewayCallbackAction({
           workspaceRoot,
-          input,
+          input: "",
+          callback: parsedCallback,
           state: chatState,
           policy,
           providerId: chatState.providerId ?? options.providerId,
           owner: options.owner,
           chatId,
           source,
-          now: options.now,
+          now: options.now ?? (() => Date.now()),
           onRunProgress: (event) => {
             lastToolResultSummary = event.toolResultSummary ?? lastToolResultSummary;
           },
@@ -722,17 +765,18 @@ export async function processTelegramUpdate(
             providerId: runState.providerId ?? options.providerId,
             owner: options.owner,
             source,
-            now: options.now
+            now: options.now,
+            descriptor
           })
         });
       } catch (error) {
-        await sendForegroundGatewayFailure(client, chatId, policy, error, lastToolResultSummary);
+        await sendForegroundGatewayFailure(client, chatId, policy, descriptor, error, lastToolResultSummary);
         return state;
       }
       chatState = result.state;
       if (result.output.trim()) {
-        for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-          await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+        for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
+          await client.sendMessage(chatId, chunk, telegramReplyOptions(parsedCallback, result.output, descriptor));
         }
       }
       const chats = nextTelegramChats(state.chats, chatId, chatState);
@@ -741,14 +785,14 @@ export async function processTelegramUpdate(
         chats,
         updatedAt: new Date().toISOString()
       };
-    });
+    }, outputSettings.typingRefreshMs);
   }
 
   const message = update.message;
   if (!message?.text) {
     return state;
   }
-  const messageText = normalizeTelegramAddressedCommand(message.text);
+  const messageText = descriptor.normalizeAddressedCommand(message.text);
   const chatId = String(message.chat.id);
   const source = telegramSourceFromMessage(message);
   if (isGatewayWhoamiInput(messageText)) {
@@ -787,17 +831,18 @@ export async function processTelegramUpdate(
             providerId: runState.providerId ?? options.providerId,
             owner: options.owner,
             source,
-            now: options.now
+            now: options.now,
+            descriptor
           })
         });
       } catch (error) {
-        await sendForegroundGatewayFailure(client, chatId, policy, error, lastToolResultSummary);
+        await sendForegroundGatewayFailure(client, chatId, policy, descriptor, error, lastToolResultSummary);
         continue;
       }
       chatState = result.state;
       if (result.output.trim()) {
-        for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
-          await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output));
+        for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
+          await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output, descriptor));
         }
       }
     }
@@ -807,7 +852,7 @@ export async function processTelegramUpdate(
       chats,
       updatedAt: new Date().toISOString()
     };
-  });
+  }, outputSettings.typingRefreshMs);
 }
 
 type PromoteTelegramRunJobInput = {
@@ -821,6 +866,7 @@ type PromoteTelegramRunJobInput = {
   providerId: string;
   owner: string;
   source: GatewaySourceContext;
+  descriptor: GatewayConnectorDescriptor;
   now?: () => number;
 };
 
@@ -852,6 +898,7 @@ async function promoteTelegramRunJob(input: PromoteTelegramRunJobInput): Promise
     sessionId: job.sessionId,
     fallbackProviderId: input.providerId,
     owner: input.owner,
+    descriptor: input.descriptor,
     now: input.now
   });
   return {
@@ -868,6 +915,7 @@ function startTelegramSessionWorker(options: {
   sessionId: string;
   fallbackProviderId: string;
   owner: string;
+  descriptor: GatewayConnectorDescriptor;
   now?: () => number;
 }): void {
   const key = `${options.workspaceRoot}:${options.sessionId}`;
@@ -888,6 +936,7 @@ async function processTelegramSessionQueue(options: {
   sessionId: string;
   fallbackProviderId: string;
   owner: string;
+  descriptor: GatewayConnectorDescriptor;
   now?: () => number;
 }): Promise<void> {
   const ledger = new RunJobLedger(options.workspaceRoot);
@@ -908,11 +957,13 @@ async function runTelegramJob(options: {
   job: RunJobRecord;
   fallbackProviderId: string;
   owner: string;
+  descriptor: GatewayConnectorDescriptor;
   now?: () => number;
 }): Promise<void> {
   const ledger = new RunJobLedger(options.workspaceRoot);
   const chatId = options.job.source.chatId;
-  const stopTyping = chatId ? startTelegramTyping(options.client, chatId) : () => {};
+  const outputSettings = telegramOutputSettings(options.policy, options.descriptor);
+  const stopTyping = chatId ? startTelegramTyping(options.client, chatId, outputSettings.typingRefreshMs) : () => {};
   await ledger.update(options.job.id, {
     status: "running",
     currentStep: "starting"
@@ -961,8 +1012,8 @@ async function runTelegramJob(options: {
       finalOutputSummary: result.output
     });
     if (chatId) {
-      for (const chunk of chunkTelegramMessage(result.output, options.policy.connectors.telegram.messageChunkChars)) {
-        await options.client.sendMessage(chatId, chunk, telegramReplyOptions(options.job.request, result.output));
+      for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
+        await options.client.sendMessage(chatId, chunk, telegramReplyOptions(options.job.request, result.output, options.descriptor));
       }
     }
   } catch (error) {
@@ -987,7 +1038,7 @@ async function runTelegramJob(options: {
     });
     if (chatId) {
       const output = fallback ?? formatTelegramUpdateFailure(message);
-      for (const chunk of chunkTelegramMessage(output, options.policy.connectors.telegram.messageChunkChars)) {
+      for (const chunk of chunkTelegramMessage(output, outputSettings.messageChunkChars)) {
         await options.client.sendMessage(chatId, chunk);
       }
     }
@@ -1092,6 +1143,7 @@ async function sendForegroundGatewayFailure(
   client: TelegramMessageSender,
   chatId: string,
   policy: PolicyConfig,
+  descriptor: GatewayConnectorDescriptor,
   error: unknown,
   lastToolResultSummary: string | undefined
 ): Promise<void> {
@@ -1099,7 +1151,7 @@ async function sendForegroundGatewayFailure(
   const output = isTimeoutFailure(message) && lastToolResultSummary
     ? formatTimeoutFallback(lastToolResultSummary)
     : formatTelegramUpdateFailure(message);
-  for (const chunk of chunkTelegramMessage(output, policy.connectors.telegram.messageChunkChars)) {
+  for (const chunk of chunkTelegramMessage(output, telegramOutputSettings(policy, descriptor).messageChunkChars)) {
     await client.sendMessage(chatId, chunk);
   }
 }
@@ -1257,6 +1309,7 @@ export async function resetTelegramGatewayState(
 }
 
 export async function formatGatewayStatus(workspaceRoot: string, options: { json?: boolean } = {}): Promise<string> {
+  const descriptor = telegramGatewayConnectorDescriptor;
   const state = await loadTelegramGatewayState(workspaceRoot);
   const lock = await readGatewayProcessLock(workspaceRoot);
   const legacyLock = await readLegacyTelegramProcessLock(workspaceRoot);
@@ -1284,7 +1337,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
       adminBindings: auth.adminBindings,
       legacyWarning: auth.legacyWarning,
       groupMode: policy.connectors.telegram.groupMode,
-      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
+      allowedUpdates: telegramAllowedUpdates(descriptor),
       activeChats: Object.keys(state.chats).length,
       nextOffset: state.nextOffset,
       failureCount: state.failureCount,
@@ -1308,7 +1361,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Admin bindings: ${auth.adminBindings}`,
     auth.legacyWarning ? `  Warning: ${auth.legacyWarning}` : undefined,
     `  Group mode: ${policy.connectors.telegram.groupMode}`,
-    `  Allowed updates: ${TELEGRAM_ALLOWED_UPDATES.join(", ")}`,
+    `  Allowed updates: ${telegramAllowedUpdates(descriptor).join(", ")}`,
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
     `  Failure count: ${state.failureCount}`,
@@ -1461,15 +1514,6 @@ function splitTelegramInputs(text: string): string[] {
   return [trimmed];
 }
 
-function normalizeTelegramAddressedCommand(text: string): string {
-  const trimmed = text.trim();
-  const addressedSlash = trimmed.match(/^@[A-Za-z0-9_]{5,32}\s+([/#].*)$/);
-  if (addressedSlash) {
-    return addressedSlash[1].trim();
-  }
-  return trimmed.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]{5,32}\b/, "$1");
-}
-
 function telegramUpdateChatId(update: TelegramUpdate): string | undefined {
   return update.message?.chat.id !== undefined
     ? String(update.message.chat.id)
@@ -1502,12 +1546,24 @@ function telegramSourceFromCallback(callback: NonNullable<TelegramUpdate["callba
   };
 }
 
+function gatewayActorFromSource(source: GatewaySourceContext) {
+  return {
+    connector: source.connector ?? "telegram",
+    chatId: source.chatId,
+    chatType: source.chatType,
+    userId: source.userId,
+    username: source.username,
+    displayName: source.displayName ?? source.firstName
+  };
+}
+
 async function withTelegramTyping<T>(
   client: TelegramMessageSender,
   chatId: string,
-  task: () => Promise<T>
+  task: () => Promise<T>,
+  typingRefreshMs = telegramGatewayConnectorDescriptor.messageDefaults.typingRefreshMs
 ): Promise<T> {
-  const stopTyping = startTelegramTyping(client, chatId);
+  const stopTyping = startTelegramTyping(client, chatId, typingRefreshMs);
   try {
     return await task();
   } finally {
@@ -1515,7 +1571,7 @@ async function withTelegramTyping<T>(
   }
 }
 
-function startTelegramTyping(client: TelegramMessageSender, chatId: string): () => void {
+function startTelegramTyping(client: TelegramMessageSender, chatId: string, typingRefreshMs: number): () => void {
   if (!client.sendChatAction) {
     return () => {};
   }
@@ -1527,7 +1583,7 @@ function startTelegramTyping(client: TelegramMessageSender, chatId: string): () 
     });
   };
   sendTyping();
-  const timer = setInterval(sendTyping, TELEGRAM_TYPING_REFRESH_MS);
+  const timer = setInterval(sendTyping, typingRefreshMs);
   return () => {
     stopped = true;
     clearInterval(timer);
@@ -1537,14 +1593,15 @@ function startTelegramTyping(client: TelegramMessageSender, chatId: string): () 
 async function notifyTelegramUpdateFailure(
   client: TelegramMessageSender,
   update: TelegramUpdate,
-  message: string
+  message: string,
+  descriptor: GatewayConnectorDescriptor = telegramGatewayConnectorDescriptor
 ): Promise<void> {
   const chatId = telegramUpdateChatId(update);
   if (!chatId) {
     return;
   }
   try {
-    for (const chunk of chunkTelegramMessage(formatTelegramUpdateFailure(message), 3500)) {
+    for (const chunk of chunkTelegramMessage(formatTelegramUpdateFailure(message), descriptor.messageDefaults.messageChunkChars)) {
       await client.sendMessage(chatId, chunk);
     }
   } catch {
@@ -1570,49 +1627,31 @@ function previewTelegramFailure(message: string): string {
   return normalized.length <= 700 ? normalized : `${normalized.slice(0, 700)}... [truncated]`;
 }
 
-function telegramCallbackInput(data: string): string {
-  const [scope, action, value] = data.split(":");
-  if (scope !== "review") {
-    return "/review";
-  }
-  switch (action) {
-    case "refresh":
-      return "/review";
-    case "next":
-      return "/review next";
-    case "show":
-      return `/review show ${value ?? ""}`.trim();
-    case "conflicts":
-      return `/review conflicts ${value ?? ""}`.trim();
-    case "discard":
-      return `/review discard ${value ?? ""} --reason Telegram review discard`.trim();
-    case "promote":
-      return `/review promote ${value ?? ""}`.trim();
-    default:
-      return "/review";
-  }
-}
-
-function telegramReplyOptions(input: string, output: string): { replyMarkup?: unknown } {
-  if (!input.startsWith("/review")) {
+function telegramReplyOptions(input: string | { namespace: string }, output: string, descriptor: GatewayConnectorDescriptor = telegramGatewayConnectorDescriptor): { replyMarkup?: unknown } {
+  const isReview = typeof input === "string" ? input.startsWith("/review") : input.namespace === "review";
+  if (!isReview) {
     return {};
   }
   const firstItem = output.match(/^\s*(?:1\.|\s*1\s+)\s+(memory|skill)\s+([a-zA-Z0-9]{8})/m);
+  const reviewNamespace = descriptor.callbackNamespaces.review;
+  if (!reviewNamespace) {
+    return {};
+  }
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [
     [
-      { text: "Refresh", callback_data: "review:refresh" },
-      { text: "Next", callback_data: "review:next" }
+      { text: "Refresh", callback_data: buildGatewayCallbackData("review", "refresh") },
+      { text: "Next", callback_data: buildGatewayCallbackData("review", "next") }
     ]
   ];
   if (firstItem?.[2]) {
     const id = firstItem[2];
     buttons.push([
-      { text: "Show", callback_data: `review:show:${id}` },
-      { text: "Conflicts", callback_data: `review:conflicts:${id}` }
+      { text: "Show", callback_data: buildGatewayCallbackData("review", "show", id) },
+      { text: "Conflicts", callback_data: buildGatewayCallbackData("review", "conflicts", id) }
     ]);
     buttons.push([
-      { text: "Discard preview", callback_data: `review:discard:${id}` },
-      { text: "Promote preview", callback_data: `review:promote:${id}` }
+      { text: "Discard preview", callback_data: buildGatewayCallbackData("review", "discard", id) },
+      { text: "Promote preview", callback_data: buildGatewayCallbackData("review", "promote", id) }
     ]);
   }
   return { replyMarkup: { inline_keyboard: buttons } };

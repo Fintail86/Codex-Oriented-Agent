@@ -23,6 +23,13 @@ import type { PolicyConfig } from "./policy_manager.js";
 import { formatRunJobCancel, formatRunJobDetail, formatRunJobList, RunJobLedger } from "./run_jobs.js";
 import { getStatusReport, formatStatusReport } from "./status_report.js";
 import { formatReviewInbox, formatReviewNext, formatReviewStats, ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
+import { findGatewayCommandDefinition } from "./gateway_command_registry.js";
+import {
+  formatGatewayHelp,
+  formatGatewayUnknownCommand,
+  formatHashCommandRemovedNotice,
+  formatUnknownCallbackNotice
+} from "./gateway_message_renderer.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { withSessionLock } from "./gateway_locks.js";
@@ -48,7 +55,7 @@ const gatewayToolAssistedProviderTimeoutMs = 300_000;
 const gatewayRunJobDeadlineMs = 420_000;
 
 export type GatewaySourceContext = {
-  connector?: "telegram";
+  connector?: string;
   chatId?: string;
   chatType?: string;
   userId?: string;
@@ -88,6 +95,12 @@ export type GatewayMessageOptions = {
 export type GatewayMessageResult = {
   output: string;
   state: GatewayChatState;
+};
+
+export type GatewayCallbackActionInput = {
+  namespace: string;
+  action: string;
+  value?: string;
 };
 
 export async function handleGatewayMessage(options: GatewayMessageOptions): Promise<GatewayMessageResult> {
@@ -230,33 +243,7 @@ class GatewayRunPromoted extends Error {
   }
 }
 
-export function formatGatewayHelp(): string {
-  return [
-    "COSIA Telegram Gateway commands:",
-    "  /help                 Show this help.",
-    "  /whoami               Show Telegram chat/user ids for local setup.",
-    "  /status               Show compact COSIA status.",
-    "  /sessions             List sessions.",
-    "  /use <session-id>     Select active session for this chat.",
-    "  /new <goal>           Create a session with the default agent.",
-    "  /jobs                 Show active run jobs.",
-    "  /job <job-id>         Show a run job.",
-    "  /cancel <job-id>      Cancel a run job.",
-    "  /review               Show memory/skill review inbox.",
-    "  /review memory|skill  Filter review inbox.",
-    "  /tool grow <request>  Start a guided reusable-tool routine.",
-    "  /tool grow test [routine-id] --yes",
-    "  /tool grow activate [routine-id] --agent <agent-id> --yes",
-    "  /cancel               Cancel pending mutation preview.",
-    "  /apply                Apply pending mutation preview.",
-    "",
-    "Notes:",
-    "  Gateway slash commands require a registered admin or master role. Use /whoami, then set Gateway auth locally.",
-    "  # command shortcuts were removed. Use slash commands or plain natural language.",
-    "",
-    "Plain text is sent to the active COSIA session."
-  ].join("\n");
-}
+export { formatGatewayHelp };
 
 function gatewayAuthBlockReason(options: GatewayMessageOptions, input: string): { output: string; state: GatewayChatState } | undefined {
   const source = options.source;
@@ -306,136 +293,229 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
   now: () => number;
 }): Promise<GatewayMessageResult> {
   const { input, state } = options;
-  if (input === "/help") {
-    return done(formatGatewayHelp(), state);
+  const definition = findGatewayCommandDefinition(input);
+  if (!definition) {
+    return done(formatGatewayUnknownCommand(input), state);
   }
-  if (input === "/whoami") {
-    return done(formatGatewayWhoami(options.source ?? { chatId: options.chatId, chatType: "private" }), state);
-  }
-  if (input === "/status") {
-    return done(formatStatusReport(await getStatusReport(options.workspaceRoot, state.providerId ?? options.providerId), { compact: true }), state);
-  }
-  if (input === "/sessions") {
-    return done(formatGatewaySessions(await new SessionManager(options.workspaceRoot).listSessions(), state.activeSessionId), state);
-  }
-  if (input === "/jobs") {
-    const jobs = await new RunJobLedger(options.workspaceRoot).list({
-      chatId: options.chatId,
-      sessionId: state.activeSessionId,
-      includeTerminal: false
-    });
-    return done(formatRunJobList(jobs), state);
-  }
-  if (input.startsWith("/job ")) {
-    const jobId = input.slice("/job ".length).trim();
-    const job = await new RunJobLedger(options.workspaceRoot).get(jobId);
-    return done(job ? formatRunJobDetail(job) : `Run job not found: ${jobId}`, state);
-  }
-  if (input.startsWith("/cancel ")) {
-    const jobId = input.slice("/cancel ".length).trim();
-    const ledger = new RunJobLedger(options.workspaceRoot);
-    const job = await ledger.requestCancel(jobId);
-    return done(formatRunJobCancel(job), state);
-  }
-  if (input.startsWith("/use ")) {
-    const sessionId = input.slice("/use ".length).trim();
-    if (!sessionId) return done("Usage: /use <session-id>", state);
-    const session = await new SessionManager(options.workspaceRoot).loadSession(sessionId);
-    return done(`Active session set to ${session.id}.`, touch({ ...state, activeSessionId: session.id }));
-  }
-  if (input.startsWith("/new ")) {
-    const goal = input.slice("/new ".length).trim();
-    if (!goal) return done("Usage: /new <goal>", state);
-    const agentId = options.policy.agents.defaultAgentId;
-    if (!agentId) return done("No default agent. Run `cosia agent bootstrap` locally first.", state);
-    await new AgentManager(options.workspaceRoot).loadAgent(agentId);
-    const session = await new SessionManager(options.workspaceRoot).createSession(agentId, goal);
-    return done(`Created and selected session ${session.id}.`, touch({ ...state, activeSessionId: session.id }));
-  }
-  if (input === "/review" || input === "/review memory" || input === "/review skill") {
-    const filter: ReviewFilter = input === "/review memory" ? "memory" : input === "/review skill" ? "skill" : "all";
-    return done(formatReviewInbox(await new ReviewInboxService(options.workspaceRoot).list(filter)), state);
-  }
-  if (input === "/review stats") {
-    const inbox = new ReviewInboxService(options.workspaceRoot);
-    return done(formatReviewStats(await inbox.stats({
-      discardedRetentionDays: options.policy.review.discardedRetentionDays,
-      pendingWarningDays: options.policy.review.pendingWarningDays
-    })), state);
-  }
-  if (input === "/review cleanup") {
-    const ctx = await buildCatalogContext(options);
-    const preview = await previewMutationCommand({
-      type: "matched",
-      commandId: "review.cleanup",
-      confidence: "high",
-      args: {}
-    }, ctx);
-    return done(preview?.output ?? "[BLOCKED] Review cleanup is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
-  }
-  if (input === "/review next") {
-    const inbox = await new ReviewInboxService(options.workspaceRoot).list("all");
-    return done(formatReviewNext(inbox.items[0]), state);
-  }
-  if (input.startsWith("/review show ")) {
-    return done(await new ReviewInboxService(options.workspaceRoot).formatItemDetail(input.slice("/review show ".length).trim()), state);
-  }
-  if (input.startsWith("/review conflicts ")) {
-    return done(await new ReviewInboxService(options.workspaceRoot).formatConflicts(input.slice("/review conflicts ".length).trim()), state);
-  }
-  if (input.startsWith("/review promote ")) {
-    const parts = input.slice("/review promote ".length).trim().split(/\s+/);
-    const target = parts[0];
-    const ctx = await buildCatalogContext(options);
-    const preview = await previewMutationCommand({
-      type: "matched",
-      commandId: "review.promote_skill",
-      confidence: "high",
-      args: { target }
-    }, ctx);
-    return done(preview?.output ?? "[BLOCKED] Review promote preview is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
-  }
-  if (input.startsWith("/review discard ")) {
-    const match = input.match(/^\/review\s+discard\s+(\S+)(?:\s+--reason\s+(.+))?$/);
-    if (!match?.[2]) {
-      return done("[BLOCKED] Usage: /review discard <id> --reason <reason>", state);
+  switch (definition.id) {
+    case "gateway.help":
+      return done(formatGatewayHelp(), state);
+    case "gateway.whoami":
+      return done(formatGatewayWhoami(options.source ?? { chatId: options.chatId, chatType: "private" }), state);
+    case "gateway.status":
+      return done(formatStatusReport(await getStatusReport(options.workspaceRoot, state.providerId ?? options.providerId), { compact: true }), state);
+    case "gateway.sessions":
+      return done(formatGatewaySessions(await new SessionManager(options.workspaceRoot).listSessions(), state.activeSessionId), state);
+    case "gateway.jobs.list":
+      return handleGatewayJobsList(options);
+    case "gateway.jobs.show":
+      return handleGatewayJobShow(options, input.slice("/job ".length).trim());
+    case "gateway.jobs.cancel":
+      return handleGatewayJobCancel(options, input.slice("/cancel ".length).trim());
+    case "gateway.session.use":
+      return handleGatewaySessionUse(options, input.slice("/use ".length).trim());
+    case "gateway.session.new":
+      return handleGatewaySessionNew(options, input.slice("/new ".length).trim());
+    case "gateway.review.list":
+    case "gateway.review.filter": {
+      const filter: ReviewFilter = input === "/review memory" ? "memory" : input === "/review skill" ? "skill" : "all";
+      return handleReviewList(options, filter);
     }
-    const ctx = await buildCatalogContext(options);
-    const preview = await previewMutationCommand({
-      type: "matched",
-      commandId: "review.discard",
-      confidence: "high",
-      args: { target: match[1], reason: match[2].trim() }
-    }, ctx);
-    return done(preview?.output ?? "[BLOCKED] Review discard preview is unavailable.", preview?.pending ? touch({ ...state, pendingCommand: preview.pending }) : state);
-  }
-  if (input === "/cancel") {
-    if (!state.pendingCommand) {
-      return done("[SUCCESS] Pending command cancelled.", touch({ ...state, pendingCommand: undefined }));
+    case "gateway.review.stats":
+      return handleReviewStats(options);
+    case "gateway.review.cleanup":
+      return handleReviewCleanup(options);
+    case "gateway.review.next":
+      return handleReviewNext(options);
+    case "gateway.review.show":
+      return handleReviewShow(options, input.slice("/review show ".length).trim());
+    case "gateway.review.conflicts":
+      return handleReviewConflicts(options, input.slice("/review conflicts ".length).trim());
+    case "gateway.review.promote":
+      return handleReviewPromote(options, input.slice("/review promote ".length).trim().split(/\s+/)[0]);
+    case "gateway.review.discard": {
+      const match = input.match(/^\/review\s+discard\s+(\S+)(?:\s+--reason\s+(.+))?$/);
+      return handleReviewDiscard(options, match?.[1] ?? "", match?.[2]?.trim() ?? "");
     }
-    const output = await cancelGatewayPending(options);
-    return done(output, touch({ ...state, pendingCommand: undefined }));
+    case "gateway.pending.cancel":
+      return handlePendingCancel(options);
+    case "gateway.pending.show":
+      return handlePendingShow(options);
+    case "gateway.pending.apply":
+      return applyGatewayPending(options);
+    case "gateway.tool_growth":
+    case "gateway.tool_growth.test":
+    case "gateway.tool_growth.activate":
+      return handleToolGrowthGatewayCommand({
+        ...options,
+        input,
+        state,
+        now: options.now
+      });
+    default:
+      return done(formatGatewayUnknownCommand(input), state);
   }
-  if (input === "/pending") {
-    const pending = state.pendingCommand;
-    if (!pending) return done("[BLOCKED] 적용할 대기 작업이 없습니다.", state);
-    if (isPendingExpired(pending, options.now)) {
-      return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...state, pendingCommand: undefined }));
-    }
-    return done(formatPendingCommand(pending, options.now), state);
+}
+
+export async function handleGatewayCallbackAction(options: GatewayMessageOptions & {
+  callback: GatewayCallbackActionInput;
+  state: GatewayChatState;
+  now: () => number;
+}): Promise<GatewayMessageResult> {
+  const { callback } = options;
+  if (callback.namespace !== "review") {
+    return done(formatUnknownCallbackNotice(), options.state);
   }
-  if (input === "/apply") {
-    return applyGatewayPending(options);
+  switch (callback.action) {
+    case "refresh":
+      return handleReviewList(options, "all");
+    case "next":
+      return handleReviewNext(options);
+    case "show":
+      return handleReviewShow(options, callback.value ?? "");
+    case "conflicts":
+      return handleReviewConflicts(options, callback.value ?? "");
+    case "discard":
+      return handleReviewDiscard(options, callback.value ?? "", "Telegram review discard");
+    case "promote":
+      return handleReviewPromote(options, callback.value ?? "");
+    default:
+      return done(formatUnknownCallbackNotice(), options.state);
   }
-  if (input === "/tool grow" || input.startsWith("/tool grow ")) {
-    return handleToolGrowthGatewayCommand({
-      ...options,
-      input,
-      state,
-      now: options.now
-    });
+}
+
+async function handleGatewayJobsList(options: GatewayMessageOptions & { state: GatewayChatState }): Promise<GatewayMessageResult> {
+  const jobs = await new RunJobLedger(options.workspaceRoot).list({
+    chatId: options.chatId,
+    sessionId: options.state.activeSessionId,
+    includeTerminal: false
+  });
+  return done(formatRunJobList(jobs), options.state);
+}
+
+async function handleGatewayJobShow(options: GatewayMessageOptions & { state: GatewayChatState }, jobId: string): Promise<GatewayMessageResult> {
+  const job = await new RunJobLedger(options.workspaceRoot).get(jobId);
+  return done(job ? formatRunJobDetail(job) : `Run job not found: ${jobId}`, options.state);
+}
+
+async function handleGatewayJobCancel(options: GatewayMessageOptions & { state: GatewayChatState }, jobId: string): Promise<GatewayMessageResult> {
+  const job = await new RunJobLedger(options.workspaceRoot).requestCancel(jobId);
+  return done(formatRunJobCancel(job), options.state);
+}
+
+async function handleGatewaySessionUse(
+  options: GatewayMessageOptions & { state: GatewayChatState },
+  sessionId: string
+): Promise<GatewayMessageResult> {
+  if (!sessionId) return done("Usage: /use <session-id>", options.state);
+  const session = await new SessionManager(options.workspaceRoot).loadSession(sessionId);
+  return done(`Active session set to ${session.id}.`, touch({ ...options.state, activeSessionId: session.id }));
+}
+
+async function handleGatewaySessionNew(
+  options: GatewayMessageOptions & { state: GatewayChatState },
+  goal: string
+): Promise<GatewayMessageResult> {
+  if (!goal) return done("Usage: /new <goal>", options.state);
+  const agentId = options.policy.agents.defaultAgentId;
+  if (!agentId) return done("No default agent. Run `cosia agent bootstrap` locally first.", options.state);
+  await new AgentManager(options.workspaceRoot).loadAgent(agentId);
+  const session = await new SessionManager(options.workspaceRoot).createSession(agentId, goal);
+  return done(`Created and selected session ${session.id}.`, touch({ ...options.state, activeSessionId: session.id }));
+}
+
+async function handleReviewList(
+  options: GatewayMessageOptions & { state: GatewayChatState },
+  filter: ReviewFilter
+): Promise<GatewayMessageResult> {
+  return done(formatReviewInbox(await new ReviewInboxService(options.workspaceRoot).list(filter)), options.state);
+}
+
+async function handleReviewStats(options: GatewayMessageOptions & { state: GatewayChatState }): Promise<GatewayMessageResult> {
+  const inbox = new ReviewInboxService(options.workspaceRoot);
+  return done(formatReviewStats(await inbox.stats({
+    discardedRetentionDays: options.policy.review.discardedRetentionDays,
+    pendingWarningDays: options.policy.review.pendingWarningDays
+  })), options.state);
+}
+
+async function handleReviewNext(options: GatewayMessageOptions & { state: GatewayChatState }): Promise<GatewayMessageResult> {
+  const inbox = await new ReviewInboxService(options.workspaceRoot).list("all");
+  return done(formatReviewNext(inbox.items[0]), options.state);
+}
+
+async function handleReviewCleanup(options: GatewayMessageOptions & { state: GatewayChatState; now: () => number }): Promise<GatewayMessageResult> {
+  const ctx = await buildCatalogContext(options);
+  const preview = await previewMutationCommand({
+    type: "matched",
+    commandId: "review.cleanup",
+    confidence: "high",
+    args: {}
+  }, ctx);
+  return done(preview?.output ?? "[BLOCKED] Review cleanup is unavailable.", preview?.pending ? touch({ ...options.state, pendingCommand: preview.pending }) : options.state);
+}
+
+async function handleReviewShow(
+  options: GatewayMessageOptions & { state: GatewayChatState },
+  target: string
+): Promise<GatewayMessageResult> {
+  return done(await new ReviewInboxService(options.workspaceRoot).formatItemDetail(target), options.state);
+}
+
+async function handleReviewConflicts(
+  options: GatewayMessageOptions & { state: GatewayChatState },
+  target: string
+): Promise<GatewayMessageResult> {
+  return done(await new ReviewInboxService(options.workspaceRoot).formatConflicts(target), options.state);
+}
+
+async function handleReviewPromote(
+  options: GatewayMessageOptions & { state: GatewayChatState; now: () => number },
+  target: string
+): Promise<GatewayMessageResult> {
+  const ctx = await buildCatalogContext(options);
+  const preview = await previewMutationCommand({
+    type: "matched",
+    commandId: "review.promote_skill",
+    confidence: "high",
+    args: { target }
+  }, ctx);
+  return done(preview?.output ?? "[BLOCKED] Review promote preview is unavailable.", preview?.pending ? touch({ ...options.state, pendingCommand: preview.pending }) : options.state);
+}
+
+async function handleReviewDiscard(
+  options: GatewayMessageOptions & { state: GatewayChatState; now: () => number },
+  target: string,
+  reason: string
+): Promise<GatewayMessageResult> {
+  if (!target || !reason) {
+    return done("[BLOCKED] Usage: /review discard <id> --reason <reason>", options.state);
   }
-  return done(`Unknown Telegram gateway command: ${input}\n\n${formatGatewayHelp()}`, state);
+  const ctx = await buildCatalogContext(options);
+  const preview = await previewMutationCommand({
+    type: "matched",
+    commandId: "review.discard",
+    confidence: "high",
+    args: { target, reason }
+  }, ctx);
+  return done(preview?.output ?? "[BLOCKED] Review discard preview is unavailable.", preview?.pending ? touch({ ...options.state, pendingCommand: preview.pending }) : options.state);
+}
+
+async function handlePendingCancel(options: GatewayMessageOptions & { state: GatewayChatState; now: () => number }): Promise<GatewayMessageResult> {
+  if (!options.state.pendingCommand) {
+    return done("[SUCCESS] Pending command cancelled.", touch({ ...options.state, pendingCommand: undefined }));
+  }
+  const output = await cancelGatewayPending(options);
+  return done(output, touch({ ...options.state, pendingCommand: undefined }));
+}
+
+function handlePendingShow(options: GatewayMessageOptions & { state: GatewayChatState; now: () => number }): GatewayMessageResult {
+  const pending = options.state.pendingCommand;
+  if (!pending) return done("[BLOCKED] 적용할 대기 작업이 없습니다.", options.state);
+  if (isPendingExpired(pending, options.now)) {
+    return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...options.state, pendingCommand: undefined }));
+  }
+  return done(formatPendingCommand(pending, options.now), options.state);
 }
 
 async function handleToolGrowthGatewayCommand(options: GatewayMessageOptions & {
@@ -860,20 +940,4 @@ function shouldPromoteGatewayRunForTool(event: RunProgressEvent): boolean {
     return false;
   }
   return true;
-}
-
-function formatHashCommandRemovedNotice(): string {
-  return [
-    "Hash command shortcuts were removed.",
-    "Use slash commands for explicit runtime actions:",
-    "  /status",
-    "  /review",
-    "  /sessions",
-    "  /pending",
-    "  /apply",
-    "  /cancel",
-    "  /tool grow <request>",
-    "",
-    "Or send plain natural language without #."
-  ].join("\n");
 }

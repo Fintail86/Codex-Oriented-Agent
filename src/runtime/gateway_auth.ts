@@ -2,6 +2,12 @@ import { loadPrivateRuntimeConfig, savePrivateRuntimeConfig } from "./private_co
 import { loadRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
 import type { PolicyConfig } from "./policy_manager.js";
 import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
+import {
+  gatewayMinimumRoleForInput as registryMinimumRoleForInput,
+  isGatewayMutationCommand,
+  isGatewayReadOnlyCommand
+} from "./gateway_command_registry.js";
+import { gatewayConnectorDescriptorFor } from "./gateway_connector_descriptor.js";
 
 export type GatewayAuthDecision = {
   allowed: boolean;
@@ -105,11 +111,19 @@ export function authorizeGatewayInput(policy: PolicyConfig, actor: GatewayActor,
   if (isWhoamiInput(input)) {
     return { allowed: true, chatAllowed: true, reason: "whoami" };
   }
+  return authorizeGatewayAccess(policy, actor, gatewayMinimumRoleForInput(input), isGatewayMutationInput(input));
+}
+
+export function authorizeGatewayAccess(
+  policy: PolicyConfig,
+  actor: GatewayActor,
+  requiredRole: GatewayRole,
+  mutation: boolean
+): GatewayAuthDecision {
   const roleDecision = resolveGatewayRole(policy, actor);
   if (!roleDecision.allowed || !roleDecision.role) {
     return roleDecision;
   }
-  const requiredRole = gatewayMinimumRoleForInput(input);
   if (!gatewayRoleAtLeast(roleDecision.role, requiredRole)) {
     return {
       allowed: false,
@@ -119,7 +133,7 @@ export function authorizeGatewayInput(policy: PolicyConfig, actor: GatewayActor,
       reason: "insufficient_role"
     };
   }
-  if (isGatewayMutationInput(input) && !policy.connectors.telegram.allowMutations) {
+  if (mutation && !policy.connectors.telegram.allowMutations) {
     return {
       allowed: false,
       role: roleDecision.role,
@@ -138,41 +152,15 @@ export function authorizeGatewayInput(policy: PolicyConfig, actor: GatewayActor,
 }
 
 export function gatewayMinimumRoleForInput(input: string): GatewayRole {
-  const normalized = input.trim();
-  if (!normalized.startsWith("/")) {
-    return "guest";
-  }
-  if (isWhoamiInput(normalized)) {
-    return "guest";
-  }
-  if (isAdminReadOnlySlashCommand(normalized)) {
-    return "admin";
-  }
-  return "master";
+  return registryMinimumRoleForInput(input);
 }
 
 export function isGatewayMutationInput(input: string): boolean {
-  const normalized = input.trim();
-  if (!normalized.startsWith("/")) {
-    return false;
-  }
-  return !isWhoamiInput(normalized) && !isAdminReadOnlySlashCommand(normalized);
+  return isGatewayMutationCommand(input);
 }
 
 export function isAdminReadOnlySlashCommand(input: string): boolean {
-  return input === "/help"
-    || input === "/status"
-    || input === "/sessions"
-    || input === "/jobs"
-    || input === "/pending"
-    || input.startsWith("/job ")
-    || input === "/review"
-    || input === "/review memory"
-    || input === "/review skill"
-    || input === "/review stats"
-    || input === "/review next"
-    || input.startsWith("/review show ")
-    || input.startsWith("/review conflicts ");
+  return isGatewayReadOnlyCommand(input) && gatewayMinimumRoleForInput(input) === "admin";
 }
 
 export function isWhoamiInput(input: string): boolean {
@@ -214,9 +202,7 @@ export function formatGatewayAuthBlocked(actor: GatewayActor, decision: GatewayA
     "",
     "Ask the COSIA master to register this chat/user when access is intended.",
     "Local bootstrap commands:",
-    actor.chatId ? `  cosia gateway auth allow-chat ${actor.connector} ${actor.chatId}` : `  cosia gateway auth allow-chat ${actor.connector} <chat-id>`,
-    actor.userId ? `  cosia gateway auth set-master ${actor.connector} ${actor.userId}` : `  cosia gateway auth set-master ${actor.connector} <user-id>`,
-    actor.userId && actor.chatId ? `  cosia gateway auth set-role ${actor.connector} ${actor.userId} guest --chat-id ${actor.chatId}` : `  cosia gateway auth set-role ${actor.connector} <user-id> guest --chat-id <chat-id>`
+    ...gatewayConnectorDescriptorFor(actor.connector).formatBootstrapHints(actor)
   ].filter(Boolean);
   return lines.join("\n");
 }
@@ -234,9 +220,7 @@ export function formatGatewayWhoami(actor: GatewayActor): string {
     actor.displayName ? `Name: ${actor.displayName}` : undefined,
     "",
     "Canonical local bootstrap:",
-    `  cosia gateway auth allow-chat ${actor.connector} ${chatId}`,
-    actor.userId ? `  cosia gateway auth set-master ${actor.connector} ${actor.userId}` : `  cosia gateway auth set-master ${actor.connector} <user-id>`,
-    actor.userId && actor.chatId ? `  cosia gateway auth set-role ${actor.connector} ${actor.userId} guest --chat-id ${actor.chatId}` : `  cosia gateway auth set-role ${actor.connector} <user-id> guest --chat-id <chat-id>`
+    ...gatewayConnectorDescriptorFor(actor.connector).formatBootstrapHints(actor)
   ].filter(Boolean).join("\n");
 }
 
