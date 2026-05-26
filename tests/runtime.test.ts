@@ -4294,6 +4294,44 @@ describe("status and listing", () => {
     expect(seenArgv).toEqual([["review", "--memory"]]);
   });
 
+  it("executes memory.search with the real CLI option shape", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Runtime command memory search");
+    const seenArgv: string[][] = [];
+    setCosiaCliExecutorForTests(async (argv) => {
+      seenArgv.push(argv);
+      return {
+        exitCode: 0,
+        stdout: "mem_123\t[core/note] score:1.00 tokens:폭스\t사용자는 자신을 폭스라고 부른다.",
+        stderr: ""
+      };
+    });
+
+    const result = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "memory.search",
+      args: {
+        query: "폭스",
+        tier: "core",
+        limit: 5,
+        showScore: true
+      }
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "cli"
+    });
+
+    expect(result.ok).toBe(true);
+    const parsed = JSON.parse(result.content) as { status: string; commandId: string; stdout: string; argv: string[] };
+    expect(parsed).toMatchObject({ status: "ok", commandId: "memory.search" });
+    expect(parsed.stdout).toContain("mem_123");
+    expect(parsed.argv).toEqual(["memory", "search", "--query", "폭스", "--tier", "core", "--limit", "5", "--show-score"]);
+    expect(seenArgv).toEqual([["memory", "search", "--query", "폭스", "--tier", "core", "--limit", "5", "--show-score"]]);
+  });
+
   it("returns needs_input for missing structured runtime command args", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);

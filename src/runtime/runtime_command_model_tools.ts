@@ -230,9 +230,15 @@ function bindArgvTemplate(definition: RuntimeCommandDefinition, args: Record<str
     const key = slot[1];
     const optional = Boolean(slot[2]);
     const value = args[key];
+    const previous = argv[argv.length - 1];
+    if (optional && previous?.startsWith("--") && typeof value === "boolean") {
+      if (!value) {
+        argv.pop();
+      }
+      continue;
+    }
     if (value === undefined || value === null || value === "") {
       if (optional) {
-        const previous = argv[argv.length - 1];
         if (previous?.startsWith("--")) {
           argv.pop();
         }

@@ -313,15 +313,16 @@ export const runtimeCommandDefinitions: RuntimeCommandDefinition[] = [
   },
   {
     commandId: "memory.search",
-    cliDisplay: "cosia memory search <query>",
-    argvTemplate: ["memory", "search", "$query"],
+    cliDisplay: "cosia memory search --query <query>",
+    argvTemplate: ["memory", "search", "--query", "$query", "--tier", "$tier?", "--owner-id", "$ownerId?", "--limit", "$limit?", "--show-score", "$showScore?"],
     safety: "read_only",
     description: "Search active long-term memories.",
     ...readOnlyModelSurface,
     tags: ["memory", "메모리", "기억", "search", "검색"],
     modelHint: "Use when the user asks to search durable long-term memory.",
-    argsSchema: { required: ["query"] },
-    examples: ["cosia memory search \"required provider\""],
+    argsSchema: { required: ["query"], optional: ["tier", "ownerId", "limit", "showScore"] },
+    argEnums: { tier: ["core", "agent", "session"] },
+    examples: ["cosia memory search --query \"required provider\""],
     triggers: {
       ko: ["메모리 검색", "기억 검색", "메모리 찾아줘"],
       en: ["memory search", "search memory", "search memories", "find memory"]
