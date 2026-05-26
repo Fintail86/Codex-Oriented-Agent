@@ -4,7 +4,7 @@ This file mirrors `codex/POLICY.json`. The JSON file is the Codex law source of 
 
 ## Version
 
-- Policy version: `0.59.0`
+- Policy version: `0.61.0`
 
 ## Agents
 
