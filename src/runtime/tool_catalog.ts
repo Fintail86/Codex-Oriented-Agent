@@ -88,6 +88,36 @@ export const toolCatalog = {
     },
     description: "Read pending COSIA memory and skill review inbox items without mutating them."
   },
+  cosia_cli_command_lookup: {
+    id: "cosia_cli_command_lookup",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
+    description: "Look up COSIA CLI and runtime command surfaces for model navigation without executing commands."
+  },
+  cosia_runtime_command: {
+    id: "cosia_runtime_command",
+    category: "core",
+    extensionId: "core",
+    permission: "read_only",
+    workspaceBoundary: "inside_only",
+    defaultEnabled: true,
+    defaultAgentAllow: true,
+    exposure: "model",
+    gatewayAccess: {
+      minRole: "admin",
+      allowedChatTypes: ["private", "group", "supergroup", "channel"]
+    },
+    description: "Execute explicitly allowlisted read-only COSIA runtime commands by commandId and structured args."
+  },
   shell_request: {
     id: "shell_request",
     category: "core",

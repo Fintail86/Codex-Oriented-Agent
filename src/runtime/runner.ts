@@ -153,7 +153,10 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       staticBlocks: options.promptStaticBlocks,
       runId,
       modelStep: depth + 1,
-      manualSkillIds: options.manualSkillIds
+      manualSkillIds: options.manualSkillIds,
+      sourceChannel: options.sourceChannel,
+      gatewayActor: options.gatewayActor,
+      gatewayRole: options.gatewayRole
     });
     await appendPromptManifest(workspaceRoot, session.id, promptResult.manifest);
     const prompt = promptResult.prompt;

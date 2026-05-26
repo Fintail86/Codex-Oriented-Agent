@@ -7,6 +7,7 @@ import { SkillManager, type SkillSelectionManifest } from "./skill_manager.js";
 import { listEffectiveActiveModelToolIds } from "./tool_acquisition.js";
 import { isBundledToolId, toolCatalog } from "./tool_catalog.js";
 import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
+import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 
 type PromptInput = {
   workspaceRoot: string;
@@ -25,6 +26,9 @@ type PromptInput = {
   runId?: string;
   modelStep?: number;
   manualSkillIds?: string[];
+  sourceChannel?: "cli" | "repl" | "gateway";
+  gatewayActor?: GatewayActor;
+  gatewayRole?: GatewayRole;
 };
 
 export type PromptBlock = {
@@ -263,6 +267,12 @@ Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
       required: true,
       source: "runtime"
     },
+    ...(input.sourceChannel === "gateway" ? [{
+      title: "GATEWAY COMMAND CONTEXT",
+      content: gatewayCommandContextText(input),
+      required: true,
+      source: "runtime" as const
+    }] : []),
     {
       title: "REQUIRE-TOOLS MODE",
       content: requireToolsText,
@@ -387,14 +397,26 @@ If a tool result says approval is required, overwrite was denied, a pending prev
 
 Static prompt blocks such as AGENT STYLE, AGENT IDENTITY, AGENT LOCAL RULES, and codex/*.md are prompt-loaded context snapshots. You may answer from them, but do not claim you inspected, checked, or read the underlying file in this run unless a current read_file tool result for that path appears in TOOL RESULTS. If you answer from a static block, name it as prompt-loaded context, not live file inspection.
 
-If the user asks about COSIA runtime state that is not available through the current model tools, such as review inbox items, pending approvals, gateway process state, session lists, long-term memory queues, or provider profile status, do not guess and do not translate the request into a hidden command. Also do not inspect SQLite/runtime ledgers through raw file reads as a substitute for a runtime inspection tool. Say that the current active toolset cannot inspect that runtime surface, name the missing read-only capability, explain what the tool would inspect and what it must not mutate, then ask for permission to start the guided tool-growth routine. Include a toolGrowthRequest object in the final AgentStep so the runtime can remember the proposed tool-growth request for the user's next approval message. Do not tell the user to run a slash or CLI command in the normal answer unless they explicitly ask for the command form. Hash-prefixed commands are not part of the runtime command surface.
+If the user asks about COSIA CLI, slash, gateway, review, job, session, provider, policy, memory, skill, pending, or tool-growth command surfaces and you do not know the exact surface, call cosia_cli_command_lookup with the user's original request text in the input field when it is active. The runtime detects catalog tag words and returns commandId candidates; the lookup tool does not execute commands and does not mutate runtime state.
+
+If cosia_cli_command_lookup returns a modelToolHint for an active tool, prefer that active tool before saying the runtime surface is unavailable. For example, review and memory-promotion questions should use review_inbox_read when it is active.
+
+If cosia_cli_command_lookup returns a modelCallable command with modelExecutionMode "execute_read_only", you may select one returned commandId and call cosia_runtime_command with commandId and structured args. The runtime maps commandId to a fixed COSIA CLI argv plan and executes it without a shell string. Never pass CLI strings, slash commands, hash commands, or natural-language commands to cosia_runtime_command. cosia_runtime_command may return needs_input; if it does, ask for or infer only the missing structured args and retry when appropriate.
+
+If GATEWAY COMMAND CONTEXT says "Private master direct chat: true", the user is the registered master in a 1:1 gateway chat. In that specific context, cosia_runtime_command may also execute normal non-system CLI mutation commandIds such as memory/review promote or discard when the user explicitly asks for that action. The runtime still blocks dangerous, shell, pending apply/cancel, and system-boundary commands. Do not route memory candidate promotion through cosia apply; use the memory candidate promote commandId.
+
+Do not claim that the tool call budget is exhausted unless the TOOL LOOP CONTROL block explicitly says the budget is exhausted or a current TOOL RESULTS block contains a runtime rejection saying the budget is exhausted. A new user message normally starts with a fresh tool budget. If the user supplies missing structured args for a modelCallable read-only command, call the command instead of saying you cannot retry because of a previous turn's budget.
+
+If lookup returns only non-callable or safety-blocked command surfaces, tell the user the exact slash or CLI command shown by cliDisplay. Do not claim you ran it. If lookup and active tools cannot answer the request, name the missing read-only capability, explain what it would inspect and what it must not mutate, then ask for permission to start the guided tool-growth routine. Include a toolGrowthRequest object in the final AgentStep so the runtime can remember the proposed tool-growth request for the user's next approval message.
+
+Do not use raw SQLite/runtime file reads as a substitute for runtime command surfaces. Hash-prefixed commands are not part of the runtime command surface.
 
 If a PENDING TOOL GROWTH REQUEST block is present, interpret the current user message semantically. If the user clearly wants to start the proposed routine, return toolGrowthDecision {"action":"start"}. If the user clearly refuses or cancels it, return {"action":"cancel"}. If the user asks a question or the intent is unclear, return {"action":"clarify"} or {"action":"none"} and keep answering normally. Do not require slash commands for this natural-language decision.
 
-For unavailable runtime surfaces, prefer this answer shape in the user's language: "To answer this, COSIA needs a read-only <capability name> tool. It would inspect <specific runtime queue/state>, report <specific fields>, and would not modify files, approvals, memory, tools, policy, or connectors. Should I start the tool creation routine?"
+For unavailable runtime surfaces after lookup, prefer this answer shape in the user's language: "To answer this, COSIA needs a read-only <capability name> tool. It would inspect <specific runtime queue/state>, report <specific fields>, and would not modify files, approvals, memory, tools, policy, or connectors. Should I start the tool creation routine?"
 
-For a tool call, choose exactly one tool listed in ACTIVE TOOL STATE:
-{"type":"tool_call","tool":"<active_tool_name>","args":{"path":"","content":"","query":"","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
+For a tool call, choose exactly one tool listed in ACTIVE TOOL STATE and provide only the structured args needed by that tool:
+{"type":"tool_call","tool":"<active_tool_name>","args":{},"content":"","memoryCandidates":[],"skillCandidates":[]}
 
 For a tool call that needs a search query, keep unused args as empty strings:
 {"type":"tool_call","tool":"<active_search_tool_name>","args":{"path":"","content":"","query":"cosia","directory":"","command":"","cwd":"","reason":"","expectedEffect":""},"content":"","memoryCandidates":[],"skillCandidates":[]}
@@ -424,6 +446,29 @@ Available tools for this run: ${allowedTools.join(", ") || "none"}
 Tool details:
 ${details.join("\n") || "- none"}
 Maximum tool loop depth: 5`;
+}
+
+function gatewayCommandContextText(input: PromptInput): string {
+  const actor = input.gatewayActor;
+  const chatId = String(actor?.chatId ?? "");
+  const userId = String(actor?.userId ?? "");
+  const chatType = actor?.chatType ?? "private";
+  const privateMasterDirectChat = input.gatewayRole === "master"
+    && chatType === "private"
+    && chatId.length > 0
+    && userId.length > 0
+    && chatId === userId;
+  return [
+    "# GATEWAY COMMAND CONTEXT",
+    `Source channel: ${input.sourceChannel ?? "unknown"}`,
+    `Gateway role: ${input.gatewayRole ?? "unknown"}`,
+    `Connector: ${actor?.connector ?? "unknown"}`,
+    `Chat type: ${chatType}`,
+    `Chat id equals user id: ${chatId.length > 0 && chatId === userId}`,
+    `Private master direct chat: ${privateMasterDirectChat}`,
+    "",
+    "If Private master direct chat is true, normal workspace-local CLI mutation commandIds may be executed through cosia_runtime_command when the user explicitly asks. System-boundary, dangerous, shell, and pending apply/cancel commands remain blocked by runtime policy."
+  ].join("\n");
 }
 
 function toolResultsBlock(toolResults: string[], maxChars: number): PromptBlock {

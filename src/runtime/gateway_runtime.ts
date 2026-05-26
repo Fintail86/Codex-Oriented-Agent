@@ -28,6 +28,7 @@ import { SessionManager } from "./session_manager.js";
 import { withSessionLock } from "./gateway_locks.js";
 import { SkillManager } from "./skill_manager.js";
 import { ToolAcquisitionManager } from "./tool_acquisition.js";
+import { toolCatalog } from "./tool_catalog.js";
 import {
   formatToolGrowthActivation,
   formatToolGrowthCancelled,
@@ -79,7 +80,7 @@ export type GatewayMessageOptions = {
   chatId?: string;
   source?: GatewaySourceContext;
   now?: () => number;
-  enqueueSessionRun?: (input: string, state: GatewayChatState) => Promise<GatewayMessageResult>;
+  promoteSessionRun?: (input: string, state: GatewayChatState) => Promise<GatewayMessageResult>;
   onRunProgress?: (event: RunProgressEvent) => Promise<void> | void;
   gatewayRole?: GatewayRole;
 };
@@ -128,9 +129,6 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     }
     return done(formatPlainApprovalNeedsApply(state.pendingCommand), state);
   }
-  if (options.enqueueSessionRun) {
-    return options.enqueueSessionRun(input, state);
-  }
   return runGatewaySessionMessage({ ...authedOptions, input, state, now });
 }
 
@@ -144,51 +142,67 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
   let pendingCodexAmendment: PendingCommand | undefined;
   let pendingToolGrowthRequest: PendingToolGrowthRequest | undefined;
   let toolGrowthDecision: ToolGrowthDecision | undefined;
-  const output = await runSession(options.workspaceRoot, {
-    sessionId: state.activeSessionId!,
-    prompt: input,
-    providerId: state.providerId,
-    sourceChannel: "gateway",
-    gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
-    gatewayRole: options.gatewayRole,
-    providerTimeoutAfterToolMs: options.source?.connector === "telegram" ? gatewayToolAssistedProviderTimeoutMs : undefined,
-    runDeadlineMs: options.source?.connector === "telegram" ? gatewayRunJobDeadlineMs : undefined,
-    promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
-    forceOverwriteApproval: options.source?.connector === "telegram",
-    stopAfterOverwriteApprovalRequired: true,
-    stopAfterCodexAmendmentRequired: true,
-    onOverwriteApprovalRequired: async (request) => {
-      pendingOverwrite = await createWriteFileOverwritePendingCommand({
-        path: request.path,
-        content: request.content,
-        workspaceRoot: options.workspaceRoot,
-        now,
-        ctx: await buildCatalogContext({ ...options, state, now })
-      });
-    },
-    onCodexAmendmentRequired: async (request) => {
-      pendingCodexAmendment = await createCodexAmendmentPendingCommand({
-        path: request.path,
-        content: request.content,
-        reason: "Model requested a protected Codex law change through write_file.",
-        workspaceRoot: options.workspaceRoot,
-        now,
-        ctx: await buildCatalogContext({ ...options, state, now })
-      });
-      return pendingCodexAmendment.preview;
-    },
-    onToolGrowthRequested: (request) => {
-      pendingToolGrowthRequest = {
-        ...request,
-        createdAt: new Date(now()).toISOString()
-      };
-    },
-    onToolGrowthDecision: (decision) => {
-      toolGrowthDecision = decision;
-    },
-    onProgress: options.onRunProgress,
-    onEvent: () => undefined
-  });
+  let output: string;
+  try {
+    output = await runSession(options.workspaceRoot, {
+      sessionId: state.activeSessionId!,
+      prompt: input,
+      providerId: state.providerId,
+      sourceChannel: "gateway",
+      gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
+      gatewayRole: options.gatewayRole,
+      providerTimeoutAfterToolMs: options.source?.connector === "telegram" ? gatewayToolAssistedProviderTimeoutMs : undefined,
+      runDeadlineMs: options.source?.connector === "telegram" ? gatewayRunJobDeadlineMs : undefined,
+      promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
+      forceOverwriteApproval: options.source?.connector === "telegram",
+      stopAfterOverwriteApprovalRequired: true,
+      stopAfterCodexAmendmentRequired: true,
+      onOverwriteApprovalRequired: async (request) => {
+        pendingOverwrite = await createWriteFileOverwritePendingCommand({
+          path: request.path,
+          content: request.content,
+          workspaceRoot: options.workspaceRoot,
+          now,
+          ctx: await buildCatalogContext({ ...options, state, now })
+        });
+      },
+      onCodexAmendmentRequired: async (request) => {
+        pendingCodexAmendment = await createCodexAmendmentPendingCommand({
+          path: request.path,
+          content: request.content,
+          reason: "Model requested a protected Codex law change through write_file.",
+          workspaceRoot: options.workspaceRoot,
+          now,
+          ctx: await buildCatalogContext({ ...options, state, now })
+        });
+        return pendingCodexAmendment.preview;
+      },
+      onToolGrowthRequested: (request) => {
+        pendingToolGrowthRequest = {
+          ...request,
+          createdAt: new Date(now()).toISOString()
+        };
+      },
+      onToolGrowthDecision: (decision) => {
+        toolGrowthDecision = decision;
+      },
+      onProgress: async (event) => {
+        await options.onRunProgress?.(event);
+        // OpenClaw-style boundary: ordinary chat and short read-only lookups
+        // stay foreground. Durable Gateway jobs are for background-worthy tool
+        // work such as writes, shell approvals, or generated/unknown tools.
+        if (shouldPromoteGatewayRunForTool(event) && options.promoteSessionRun) {
+          throw new GatewayRunPromoted(await options.promoteSessionRun(input, state));
+        }
+      },
+      onEvent: () => undefined
+    });
+  } catch (error) {
+    if (error instanceof GatewayRunPromoted) {
+      return error.result;
+    }
+    throw error;
+  }
   if (pendingCodexAmendment) {
     return done(pendingCodexAmendment.preview, touch({ ...state, pendingCommand: pendingCodexAmendment }));
   }
@@ -208,6 +222,12 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
     return done(output, touch({ ...state, pendingToolGrowthRequest }));
   }
   return done(output, state);
+}
+
+class GatewayRunPromoted extends Error {
+  constructor(readonly result: GatewayMessageResult) {
+    super("Gateway run promoted to background job after model selected a tool.");
+  }
 }
 
 export function formatGatewayHelp(): string {
@@ -831,6 +851,16 @@ function formatPlainApprovalNeedsApply(pending: PendingCommand): string {
   ].join("\n");
 }
 
+function shouldPromoteGatewayRunForTool(event: RunProgressEvent): boolean {
+  if (event.status !== "waiting_for_tool" || !event.toolName) {
+    return false;
+  }
+  const entry = (toolCatalog as Record<string, { permission: string } | undefined>)[event.toolName];
+  if (entry?.permission === "read_only") {
+    return false;
+  }
+  return true;
+}
 
 function formatHashCommandRemovedNotice(): string {
   return [

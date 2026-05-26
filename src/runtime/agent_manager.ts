@@ -12,6 +12,7 @@ import { agentManifestSchema, type AgentManifest } from "./types.js";
 import { normalizeTriggerText, triggerMatches } from "./skills/skill_text.js";
 
 export const defaultCosiaAgentId = "cosia-agent";
+const currentToolCatalogMigrationVersion = 2;
 
 export type AgentDeleteResult = {
   changed: boolean;
@@ -284,9 +285,9 @@ function repairAgentManifest(manifest: AgentManifest, raw: Record<string, unknow
     ? raw.toolCatalogMigrationVersion
     : 0;
   const nextToolCatalogMigrationVersion = template
-    ? Math.max(toolCatalogMigrationVersion, 1)
+    ? Math.max(toolCatalogMigrationVersion, currentToolCatalogMigrationVersion)
     : toolCatalogMigrationVersion;
-  const allowedTools = template && toolCatalogMigrationVersion < 1
+  const allowedTools = template && toolCatalogMigrationVersion < currentToolCatalogMigrationVersion
     ? migrateSafeDefaultReadOnlyTools(manifest.allowedTools)
     : manifest.allowedTools;
   const preferredSkills = manifest.preferredSkills ?? [];

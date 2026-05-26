@@ -1,4 +1,4 @@
-# COSIA v0.53.0
+# COSIA v0.54.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.53.0 adds connector-neutral Gateway role authorization: unknown users are blocked before LLM calls, one global master is bootstrapped locally, guest/admin roles are chat-scoped, and external tool access is checked by deterministic runtime gates.
+v0.54.0 adds a model-facing COSIA CLI command surface: agents can look up the full CLI command catalog, choose a `commandId`, and let the runtime execute the fixed COSIA CLI argv plan for explicitly allowlisted read-only commands, without shell-string execution or hardcoded state inspector tools.
 
 ## Requirements
 
@@ -761,6 +761,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 - v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
 - v0.53.0: Gateway role authorization moves Telegram user permissions into connector-neutral runtime gates with one global master, chat-scoped guest/admin bindings, and tool-level external access checks.
+- v0.54.0: Model-facing CLI command catalog adds `cosia_cli_command_lookup` and commandId-to-fixed-CLI `cosia_runtime_command` for LLM navigation without natural-language command translation or shell-string execution.
 - v0.52.0: Telegram/Gateway run jobs enqueue long provider/tool loops so control commands stay responsive while work continues in the background.
 - v0.51.0: Delegation boundary aligned so routine workspace-local work is delegated under Policy while Codex self-amendment and system-level boundary changes remain final-approval gated.
 - v0.49.0: Normal pending approval surface with `cosia pending`, `cosia apply <id> --yes`, and `cosia cancel <id> --reason`.

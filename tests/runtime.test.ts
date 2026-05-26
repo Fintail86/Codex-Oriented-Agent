@@ -20,6 +20,8 @@ import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_a
 import { applyPendingApproval, cancelPendingApproval, formatPendingApprovals, getPendingApprovalSummary } from "../src/runtime/pending_approvals.js";
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath, runtimePrivatePath, secretsPrivatePath } from "../src/runtime/runtime_config.js";
+import { runtimeCommandDefinitions } from "../src/runtime/runtime_command_catalog.js";
+import { setCosiaCliExecutorForTests } from "../src/runtime/runtime_command_model_tools.js";
 import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
@@ -98,6 +100,7 @@ function captureWritable(): { stream: Writable; read: () => string } {
 }
 
 afterEach(async () => {
+  setCosiaCliExecutorForTests(undefined);
   for (const root of tempRoots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -171,6 +174,8 @@ describe("runtime setup", () => {
       "write_file",
       "search_files",
       "review_inbox_read",
+      "cosia_cli_command_lookup",
+      "cosia_runtime_command",
       "shell_request"
     ]));
     expect(session.id).toMatch(/^session_\d{8}_001$/);
@@ -180,7 +185,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.53.0\"");
+    expect(policyJson).toContain("\"version\": \"0.54.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -253,10 +258,11 @@ describe("runtime setup", () => {
     expect(prompt).toContain("shell_request does not execute commands");
     expect(prompt).toContain("Static prompt blocks such as AGENT STYLE");
     expect(prompt).toContain("prompt-loaded context snapshots");
-    expect(prompt).toContain("current active toolset cannot inspect that runtime surface");
+    expect(prompt).toContain("call cosia_cli_command_lookup with the user's original request text");
+    expect(prompt).toContain("cosia_runtime_command may return needs_input");
     expect(prompt).toContain("ask for permission to start the guided tool-growth routine");
     expect(prompt).toContain("Should I start the tool creation routine?");
-    expect(prompt).toContain("Do not tell the user to run a slash or CLI command");
+    expect(prompt).toContain("If lookup returns only non-callable or safety-blocked command surfaces");
     expect(prompt).toContain("Hash-prefixed commands are not part of the runtime command surface");
 
     const policy = await new PolicyManager(root).loadPolicy();
@@ -3990,7 +3996,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.53.0");
+    expect(emptyReport.version).toBe("0.54.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4152,6 +4158,298 @@ describe("status and listing", () => {
       id: candidate.id.slice(0, 8)
     });
     expect((await memory.getCandidate(candidate.id)).record?.status).toBe("pending");
+  });
+
+  it("exposes a model-facing COSIA command lookup tool without executing commands", async () => {
+    const root = await initializedWorkspace();
+
+    const result = await new ToolRegistry().execute("cosia_cli_command_lookup", {
+      input: "메모리 승격 대상",
+      limit: 5
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_cli_command_lookup"],
+      sourceChannel: "cli"
+    });
+
+    expect(result.ok).toBe(true);
+    const parsed = JSON.parse(result.content) as {
+      status: string;
+      detectedTags: string[];
+      candidates: Array<{
+        commandId: string;
+        cliDisplay: string;
+        modelCallable: boolean;
+        modelExecutionMode: string;
+        modelToolHint?: { toolId: string; args?: Record<string, unknown> };
+      }>;
+    };
+    expect(parsed.status).toBe("ok");
+    expect(parsed.detectedTags).toContain("메모리");
+    const review = parsed.candidates.find((candidate) => candidate.commandId === "review.memory");
+    expect(review).toMatchObject({
+      cliDisplay: "cosia review --memory",
+      modelCallable: true,
+      modelExecutionMode: "execute_read_only",
+      modelToolHint: {
+        toolId: "review_inbox_read"
+      }
+    });
+
+    const approval = await new ToolRegistry().execute("cosia_cli_command_lookup", {
+      input: "셋다 승인할께",
+      limit: 5
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_cli_command_lookup"],
+      sourceChannel: "cli"
+    });
+    const approvalParsed = JSON.parse(approval.content) as {
+      detectedTags: string[];
+      candidates: Array<{ commandId: string; cliDisplay: string; safety: string }>;
+    };
+    expect(approvalParsed.detectedTags).toContain("승인");
+    expect(approvalParsed.candidates[0]).toMatchObject({
+      commandId: "memory.candidate.promote",
+      cliDisplay: "cosia memory candidate promote <candidate-id>",
+      safety: "mutation"
+    });
+
+    const privateMasterApproval = await new ToolRegistry().execute("cosia_cli_command_lookup", {
+      input: "셋다 승인할께",
+      limit: 5
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_cli_command_lookup"],
+      sourceChannel: "gateway",
+      gatewayActor: {
+        connector: "telegram",
+        chatId: "120274824",
+        chatType: "private",
+        userId: "120274824"
+      },
+      gatewayRole: "master"
+    });
+    const privateMasterParsed = JSON.parse(privateMasterApproval.content) as {
+      candidates: Array<{ commandId: string; privateMasterCliOverrideAvailable: boolean }>;
+    };
+    expect(privateMasterParsed.candidates[0]).toMatchObject({
+      commandId: "memory.candidate.promote",
+      privateMasterCliOverrideAvailable: true
+    });
+  });
+
+  it("catalogs representative CLI commands with fixed argv templates", () => {
+    const ids = new Set(runtimeCommandDefinitions.map((definition) => definition.commandId));
+    for (const commandId of [
+      "status.show",
+      "provider.profile.check",
+      "gateway.auth.set_master",
+      "gateway.telegram.check",
+      "review.list",
+      "memory.candidate.promote",
+      "memory.search",
+      "tool.grow.review",
+      "codex.amendment.apply"
+    ]) {
+      expect(ids.has(commandId)).toBe(true);
+    }
+    for (const definition of runtimeCommandDefinitions) {
+      expect(definition.cliDisplay).toMatch(/^cosia |^\//);
+      expect(Array.isArray(definition.argvTemplate)).toBe(true);
+      expect((definition.tags ?? []).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("executes only allowlisted read-only runtime commands through fixed COSIA CLI argv", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Runtime command model surface");
+    const seenArgv: string[][] = [];
+    setCosiaCliExecutorForTests(async (argv) => {
+      seenArgv.push(argv);
+      return {
+        exitCode: 0,
+        stdout: "Review Inbox\nPending: 1 (1 memory, 0 skill)",
+        stderr: ""
+      };
+    });
+
+    const result = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "review.memory",
+      args: {}
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "cli"
+    });
+
+    expect(result.ok).toBe(true);
+    const parsed = JSON.parse(result.content) as { status: string; commandId: string; stdout: string; argv: string[] };
+    expect(parsed).toMatchObject({ status: "ok", commandId: "review.memory" });
+    expect(parsed.stdout).toContain("Review Inbox");
+    expect(parsed.argv).toEqual(["review", "--memory"]);
+    expect(seenArgv).toEqual([["review", "--memory"]]);
+  });
+
+  it("returns needs_input for missing structured runtime command args", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Runtime command needs input");
+
+    const result = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "memory.search",
+      args: {}
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "cli"
+    });
+
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.content)).toMatchObject({
+      status: "needs_input",
+      commandId: "memory.search",
+      missingArgs: ["query"]
+    });
+  });
+
+  it("blocks CLI strings and non-model-callable commands from the model-facing runtime command surface", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Runtime command blocks");
+    const registry = new ToolRegistry();
+    const ctx = {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "cli" as const
+    };
+
+    const cliString = await registry.execute("cosia_runtime_command", {
+      commandId: "cosia review",
+      args: {}
+    }, ctx);
+    expect(cliString.ok).toBe(false);
+    expect(JSON.parse(cliString.content)).toMatchObject({
+      status: "blocked",
+      reason: "cli_string_not_allowed"
+    });
+
+    const shell = await registry.execute("cosia_runtime_command", {
+      commandId: "gateway.auth.set_master",
+      args: { connector: "telegram", userId: "123" }
+    }, ctx);
+    expect(shell.ok).toBe(false);
+    expect(JSON.parse(shell.content)).toMatchObject({
+      status: "blocked",
+      reason: "not_model_callable"
+    });
+  });
+
+  it("applies Gateway role gates to model-facing command tools", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Gateway runtime command role gate");
+    setCosiaCliExecutorForTests(async (argv) => ({
+      exitCode: 0,
+      stdout: `argv=${argv.join(" ")}`,
+      stderr: ""
+    }));
+    const gatewayActor = {
+      connector: "telegram",
+      chatId: "chat-1",
+      chatType: "private",
+      userId: "user-1"
+    };
+
+    const guestResult = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "review.list",
+      args: {}
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "gateway",
+      gatewayActor,
+      gatewayRole: "guest"
+    });
+    expect(guestResult.ok).toBe(false);
+    expect(guestResult.content).toContain("role guest is below required role admin");
+
+    const adminResult = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "review.list",
+      args: {}
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "gateway",
+      gatewayActor,
+      gatewayRole: "admin"
+    });
+    expect(adminResult.ok).toBe(true);
+    expect(JSON.parse(adminResult.content)).toMatchObject({
+      status: "ok",
+      commandId: "review.list"
+    });
+
+    const privateMasterCtx = {
+      workspaceRoot: root,
+      allowedTools: ["cosia_runtime_command"],
+      sessionId: session.id,
+      agentId: "cosia-agent",
+      sourceChannel: "gateway" as const,
+      gatewayActor: {
+        connector: "telegram",
+        chatId: "120274824",
+        chatType: "private",
+        userId: "120274824"
+      },
+      gatewayRole: "master" as const
+    };
+    const privateMasterDiscard = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "review.discard",
+      args: { target: "eeb6b7ef", reason: "duplicate style candidate" }
+    }, privateMasterCtx);
+    expect(privateMasterDiscard.ok).toBe(true);
+    expect(JSON.parse(privateMasterDiscard.content)).toMatchObject({
+      status: "ok",
+      commandId: "review.discard",
+      safety: "mutation",
+      privateMasterCliOverride: true,
+      argv: ["memory", "candidate", "discard", "eeb6b7ef", "--reason", "duplicate style candidate"]
+    });
+
+    const privateMasterPromote = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "memory.candidate.promote",
+      args: { candidateId: "40a12b4f" }
+    }, privateMasterCtx);
+    expect(privateMasterPromote.ok).toBe(true);
+    expect(JSON.parse(privateMasterPromote.content)).toMatchObject({
+      status: "ok",
+      commandId: "memory.candidate.promote",
+      safety: "mutation",
+      privateMasterCliOverride: true,
+      argv: ["memory", "candidate", "promote", "40a12b4f"]
+    });
+
+    const privateMasterBoundary = await new ToolRegistry().execute("cosia_runtime_command", {
+      commandId: "gateway.auth.set_master",
+      args: { connector: "telegram", userId: "120274824" }
+    }, privateMasterCtx);
+    expect(privateMasterBoundary.ok).toBe(false);
+    expect(JSON.parse(privateMasterBoundary.content)).toMatchObject({
+      status: "blocked",
+      reason: "private_master_cli_command_blocked"
+    });
   });
 
   it("previews and applies bulk discard for conflicted memory candidates", async () => {
@@ -4678,7 +4976,56 @@ describe("status and listing", () => {
     expect(chunks[1]).toContain("[continued 2/");
   });
 
-  it("enqueues Telegram session runs and keeps job status commands responsive", async () => {
+  it("keeps read-only Telegram tool calls in the foreground", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Foreground read-only tool");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          mutationUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_TOOL_CALL:search_files:COSIA] hello"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain(`Mock response for ${session.id}.`);
+    expect(sent.some((message) => message.text.includes("작업을 시작했어."))).toBe(false);
+    expect(await new RunJobLedger(root).list({ includeTerminal: true })).toEqual([]);
+  });
+
+  it("promotes Telegram session runs to jobs after the model selects a background-worthy tool", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
     const session = await sessions.createSession("cosia-agent", "Async gateway job");
@@ -4716,7 +5063,7 @@ describe("status and listing", () => {
       message: {
         chat: { id: 123 },
         from: { id: 42, username: "fox" },
-        text: "[MOCK_SLOW_FINAL] hello"
+        text: "[MOCK_TOOL_CALL:shell_request:node --version] hello"
       }
     }, {
       providerId: "mock",
@@ -4742,6 +5089,56 @@ describe("status and listing", () => {
     await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${session.id}.`)));
     const job = await new RunJobLedger(root).get(jobId!);
     expect(job?.status).toBe("succeeded");
+  });
+
+  it("does not create a Telegram run job for a normal final-only conversation", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "Foreground gateway chat");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "쿠미?"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.at(-1)?.text).toContain(`Mock response for ${session.id}.`);
+    expect(sent.some((message) => message.text.includes("작업을 시작했어."))).toBe(false);
+    expect(await new RunJobLedger(root).list({ includeTerminal: true })).toEqual([]);
   });
 
   it("keeps Telegram groups read-only by default and requires user-level mutation authorization", async () => {
@@ -4803,7 +5200,42 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.53.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.54.0");
+
+    const masterMentionPolicy = {
+      ...readOnlyGroupPolicy,
+      connectors: {
+        telegram: {
+          ...readOnlyGroupPolicy.connectors.telegram,
+          mutationUserIds: ["42"]
+        }
+      }
+    };
+    state = await processTelegramUpdate(root, masterMentionPolicy, sender, state, {
+      update_id: 20,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "@Kumi_coais_bot /new Mentioned group session"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Created and selected session");
+
+    state = await processTelegramUpdate(root, masterMentionPolicy, sender, state, {
+      update_id: 21,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: "/new@Kumi_coais_bot Suffixed group session"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Created and selected session");
 
     const sentBeforeUnknownGroupNatural = sent.length;
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, {
@@ -5079,7 +5511,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.53.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.54.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
@@ -5204,9 +5636,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
-    await waitForCondition(() => sent.some((message) => message.text.includes("Should I start the tool creation routine?")));
-    state = await loadTelegramGatewayState(root);
+    expect(sent.at(-1)?.text).toContain("Should I start the tool creation routine?");
     expect(state.chats["123"]?.pendingToolGrowthRequest?.capabilityName).toBe("memory_promotion_queue_read");
     expect(state.chats["123"]?.currentToolGrowthRoutineId).toBeUndefined();
 
@@ -5222,8 +5652,6 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    await waitForCondition(() => sent.some((message) => message.text.includes("Tool growth routine created:")));
-    state = await loadTelegramGatewayState(root);
     const routineId = state.chats["123"]?.currentToolGrowthRoutineId;
     expect(routineId).toMatch(/^grow_/);
     expect(state.chats["123"]?.pendingToolGrowthRequest).toBeUndefined();
@@ -5456,7 +5884,7 @@ describe("status and listing", () => {
     await waitForCondition(() => sent.some((message) => message.text.includes("[PARTIAL SUCCESS] 도구 조회는 성공했지만 LLM 최종 응답이 timeout")));
     expect(sent.at(-1)?.text).toContain("Memory pending:");
     const jobs = await new RunJobLedger(root).list({ includeTerminal: true });
-    expect(jobs.some((job) => job.status === "failed" && job.failureKind === "timeout" && job.finalOutputSummary?.includes("[PARTIAL SUCCESS]"))).toBe(true);
+    expect(jobs).toEqual([]);
   });
 
   it("repairs and resets stale Telegram gateway state without connector settings", async () => {
@@ -5663,7 +6091,7 @@ describe("status and listing", () => {
     const state = await loadTelegramGatewayState(root);
     expect(state.nextOffset).toBe(22);
     const jobs = await new RunJobLedger(root).list({ includeTerminal: true });
-    expect(jobs.some((job) => job.status === "failed" && job.errorSummary?.includes("Unknown model provider"))).toBe(true);
+    expect(jobs).toEqual([]);
     expect(sent.join("\n")).toContain("will not retry forever");
   });
 

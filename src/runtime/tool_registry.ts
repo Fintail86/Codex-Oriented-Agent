@@ -10,6 +10,7 @@ import { summarizePolicyArgs } from "./policy_audit.js";
 import { PolicyEngine } from "./policy_engine.js";
 import { PolicyManager } from "./policy_manager.js";
 import { detectSecrets } from "./risk_classifier.js";
+import { executeCosiaCliCommandLookup, executeCosiaRuntimeCommand } from "./runtime_command_model_tools.js";
 import { ReviewInboxService, type ReviewFilter } from "./review_inbox.js";
 import { loadRuntimeConfig } from "./runtime_config.js";
 import { formatShellApprovalPreview, ShellApprovalLedger, summarizeShellToolArgs } from "./shell_approval.js";
@@ -89,6 +90,8 @@ export class ToolRegistry {
       const inbox = await new ReviewInboxService(ctx.workspaceRoot).list((parsed.filter ?? "all") as ReviewFilter);
       return { ok: true, content: formatReviewInboxReadResult(inbox) };
     });
+    this.registerCatalogTool("cosia_cli_command_lookup", executeCosiaCliCommandLookup);
+    this.registerCatalogTool("cosia_runtime_command", executeCosiaRuntimeCommand);
     this.registerCatalogTool("shell_request", async (args, ctx) => {
       const parsed = shellRequestArgs.parse(args);
       const approval = new ShellApprovalLedger(ctx.workspaceRoot).create({

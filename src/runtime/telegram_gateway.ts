@@ -14,7 +14,7 @@ import {
   telegramGatewayDir
 } from "./gateway_locks.js";
 import { chunkTelegramMessage } from "./gateway_format.js";
-import { formatGatewayWhoami, handleGatewayMessage, isGatewayWhoamiInput, type GatewayChatState, type GatewaySourceContext } from "./gateway_runtime.js";
+import { formatGatewayWhoami, handleGatewayMessage, isGatewayWhoamiInput, type GatewayChatState, type GatewayMessageResult, type GatewaySourceContext } from "./gateway_runtime.js";
 import { gatewayAuthSummary } from "./gateway_auth.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
@@ -471,30 +471,40 @@ export async function processTelegramUpdate(
       let chatState = state.chats[chatId] ?? {
         providerId: options.providerId
       };
-      const result = await handleGatewayMessage({
-        workspaceRoot,
-        input,
-        state: chatState,
-        policy,
-        providerId: chatState.providerId ?? options.providerId,
-        owner: options.owner,
-        chatId,
-        source,
-        now: options.now,
-        enqueueSessionRun: async (runInput, runState) => enqueueTelegramRunJob({
+      let lastToolResultSummary: string | undefined;
+      let result: GatewayMessageResult;
+      try {
+        result = await handleGatewayMessage({
           workspaceRoot,
+          input,
+          state: chatState,
           policy,
-          client,
-          chatId,
-          input: runInput,
-          state,
-          chatState: runState,
-          providerId: runState.providerId ?? options.providerId,
+          providerId: chatState.providerId ?? options.providerId,
           owner: options.owner,
+          chatId,
           source,
-          now: options.now
-        })
-      });
+          now: options.now,
+          onRunProgress: (event) => {
+            lastToolResultSummary = event.toolResultSummary ?? lastToolResultSummary;
+          },
+          promoteSessionRun: async (runInput, runState) => promoteTelegramRunJob({
+            workspaceRoot,
+            policy,
+            client,
+            chatId,
+            input: runInput,
+            state,
+            chatState: runState,
+            providerId: runState.providerId ?? options.providerId,
+            owner: options.owner,
+            source,
+            now: options.now
+          })
+        });
+      } catch (error) {
+        await sendForegroundGatewayFailure(client, chatId, policy, error, lastToolResultSummary);
+        return state;
+      }
       chatState = result.state;
       if (result.output.trim()) {
         for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
@@ -514,7 +524,7 @@ export async function processTelegramUpdate(
   if (!message?.text) {
     return state;
   }
-  const messageText = message.text;
+  const messageText = normalizeTelegramAddressedCommand(message.text);
   const chatId = String(message.chat.id);
   const source = telegramSourceFromMessage(message);
   if (isGatewayWhoamiInput(messageText)) {
@@ -526,30 +536,40 @@ export async function processTelegramUpdate(
       providerId: options.providerId
     };
     for (const input of splitTelegramInputs(messageText)) {
-      const result = await handleGatewayMessage({
-        workspaceRoot,
-        input,
-        state: chatState,
-        policy,
-        providerId: chatState.providerId ?? options.providerId,
-        owner: options.owner,
-        chatId,
-        source,
-        now: options.now,
-        enqueueSessionRun: async (runInput, runState) => enqueueTelegramRunJob({
+      let lastToolResultSummary: string | undefined;
+      let result: GatewayMessageResult;
+      try {
+        result = await handleGatewayMessage({
           workspaceRoot,
+          input,
+          state: chatState,
           policy,
-          client,
-          chatId,
-          input: runInput,
-          state,
-          chatState: runState,
-          providerId: runState.providerId ?? options.providerId,
+          providerId: chatState.providerId ?? options.providerId,
           owner: options.owner,
+          chatId,
           source,
-          now: options.now
-        })
-      });
+          now: options.now,
+          onRunProgress: (event) => {
+            lastToolResultSummary = event.toolResultSummary ?? lastToolResultSummary;
+          },
+          promoteSessionRun: async (runInput, runState) => promoteTelegramRunJob({
+            workspaceRoot,
+            policy,
+            client,
+            chatId,
+            input: runInput,
+            state,
+            chatState: runState,
+            providerId: runState.providerId ?? options.providerId,
+            owner: options.owner,
+            source,
+            now: options.now
+          })
+        });
+      } catch (error) {
+        await sendForegroundGatewayFailure(client, chatId, policy, error, lastToolResultSummary);
+        continue;
+      }
       chatState = result.state;
       if (result.output.trim()) {
         for (const chunk of chunkTelegramMessage(result.output, policy.connectors.telegram.messageChunkChars)) {
@@ -566,7 +586,7 @@ export async function processTelegramUpdate(
   });
 }
 
-type EnqueueTelegramRunJobInput = {
+type PromoteTelegramRunJobInput = {
   workspaceRoot: string;
   policy: PolicyConfig;
   client: TelegramMessageSender;
@@ -580,7 +600,7 @@ type EnqueueTelegramRunJobInput = {
   now?: () => number;
 };
 
-async function enqueueTelegramRunJob(input: EnqueueTelegramRunJobInput): Promise<{ output: string; state: GatewayChatState }> {
+async function promoteTelegramRunJob(input: PromoteTelegramRunJobInput): Promise<{ output: string; state: GatewayChatState }> {
   if (!input.chatState.activeSessionId) {
     return {
       output: "No active session. Use /sessions, /use <session-id>, or /new <goal>.",
@@ -842,6 +862,22 @@ function formatTimeoutFallback(toolResultSummary: string): string {
     "",
     toolResultSummary
   ].join("\n");
+}
+
+async function sendForegroundGatewayFailure(
+  client: TelegramMessageSender,
+  chatId: string,
+  policy: PolicyConfig,
+  error: unknown,
+  lastToolResultSummary: string | undefined
+): Promise<void> {
+  const message = (error as Error).message;
+  const output = isTimeoutFailure(message) && lastToolResultSummary
+    ? formatTimeoutFallback(lastToolResultSummary)
+    : formatTelegramUpdateFailure(message);
+  for (const chunk of chunkTelegramMessage(output, policy.connectors.telegram.messageChunkChars)) {
+    await client.sendMessage(chatId, chunk);
+  }
 }
 
 function parseReviewInboxToolResult(toolResultSummary: string): {
@@ -1170,6 +1206,15 @@ function splitTelegramInputs(text: string): string[] {
     return lines;
   }
   return [trimmed];
+}
+
+function normalizeTelegramAddressedCommand(text: string): string {
+  const trimmed = text.trim();
+  const addressedSlash = trimmed.match(/^@[A-Za-z0-9_]{5,32}\s+([/#].*)$/);
+  if (addressedSlash) {
+    return addressedSlash[1].trim();
+  }
+  return trimmed.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]{5,32}\b/, "$1");
 }
 
 function telegramUpdateChatId(update: TelegramUpdate): string | undefined {
