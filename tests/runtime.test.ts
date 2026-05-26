@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import type { Command } from "commander";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentManager, formatAgentRecommendation } from "../src/runtime/agent_manager.js";
+import { createCliProgram } from "../src/cli_program.js";
 import { CapabilityPlanner, EnvironmentDiscovery, capabilityScanJson, legacyEnvironmentScanId, normalizeCapabilityProposal, stableJsonStringify } from "../src/runtime/capability.js";
 import { applyReset, formatResetResult, previewReset, repairDoctor } from "../src/runtime/doctor.js";
 import { initProject } from "../src/runtime/init_project.js";
@@ -20,6 +22,7 @@ import { formatPolicyAuditEvents, PolicyAuditLog } from "../src/runtime/policy_a
 import { applyPendingApproval, cancelPendingApproval, formatPendingApprovals, getPendingApprovalSummary } from "../src/runtime/pending_approvals.js";
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath, runtimePrivatePath, secretsPrivatePath } from "../src/runtime/runtime_config.js";
+import { argvPlanSlotNames, buildCliArgv } from "../src/runtime/cli_argv_planner.js";
 import { runtimeCommandDefinitions } from "../src/runtime/runtime_command_catalog.js";
 import { setCosiaCliExecutorForTests } from "../src/runtime/runtime_command_model_tools.js";
 import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
@@ -89,6 +92,8 @@ import { findWorkspaceRoot, requireWorkspaceRoot } from "../src/runtime/workspac
 
 const tempRoots: string[] = [];
 const execFileAsync = promisify(execFile);
+const TELEGRAM_FIXTURE_PRIVATE_ID = "111111111";
+const TELEGRAM_FIXTURE_BOT_USERNAME = "CosiaFixtureBot";
 
 function captureWritable(): { stream: Writable; read: () => string } {
   let text = "";
@@ -101,6 +106,16 @@ function captureWritable(): { stream: Writable; read: () => string } {
     }),
     read: () => text
   };
+}
+
+function collectCommanderCommandPaths(command: Command, prefix: string[] = []): string[][] {
+  const paths: string[][] = [];
+  for (const child of command.commands) {
+    const path = [...prefix, child.name()];
+    paths.push(path);
+    paths.push(...collectCommanderCommandPaths(child, path));
+  }
+  return paths;
 }
 
 afterEach(async () => {
@@ -189,7 +204,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.55.0\"");
+    expect(policyJson).toContain("\"version\": \"0.56.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -4000,7 +4015,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.55.0");
+    expect(emptyReport.version).toBe("0.56.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4228,9 +4243,9 @@ describe("status and listing", () => {
       sourceChannel: "gateway",
       gatewayActor: {
         connector: "telegram",
-        chatId: "120274824",
+        chatId: TELEGRAM_FIXTURE_PRIVATE_ID,
         chatType: "private",
-        userId: "120274824"
+        userId: TELEGRAM_FIXTURE_PRIVATE_ID
       },
       gatewayRole: "master"
     });
@@ -4243,7 +4258,7 @@ describe("status and listing", () => {
     });
   });
 
-  it("catalogs representative CLI commands with fixed argv templates", () => {
+  it("catalogs representative CLI commands with typed argv plans", () => {
     const ids = new Set(runtimeCommandDefinitions.map((definition) => definition.commandId));
     for (const commandId of [
       "status.show",
@@ -4260,9 +4275,49 @@ describe("status and listing", () => {
     }
     for (const definition of runtimeCommandDefinitions) {
       expect(definition.cliDisplay).toMatch(/^cosia |^\//);
-      expect(Array.isArray(definition.argvTemplate)).toBe(true);
+      expect(definition).not.toHaveProperty("argvTemplate");
+      expect(Array.isArray(definition.commandPath)).toBe(true);
+      expect(Array.isArray(definition.argvPlan)).toBe(true);
+      for (const token of definition.argvPlan) {
+        expect(["literal", "positional", "option", "booleanFlag"]).toContain(token.kind);
+      }
+      const declaredArgs = new Set([
+        ...(definition.argsSchema.required ?? []),
+        ...(definition.argsSchema.optional ?? [])
+      ]);
+      for (const slotName of argvPlanSlotNames(definition)) {
+        expect(declaredArgs.has(slotName)).toBe(true);
+      }
       expect((definition.tags ?? []).length).toBeGreaterThan(0);
     }
+
+    const catalogPaths = new Set(runtimeCommandDefinitions.map((definition) => definition.commandPath.join(" ")));
+    for (const path of collectCommanderCommandPaths(createCliProgram())) {
+      expect(catalogPaths.has(path.join(" "))).toBe(true);
+    }
+  });
+
+  it("builds typed CLI argv plans without shell strings or ad-hoc templates", () => {
+    const memorySearch = runtimeCommandDefinitions.find((definition) => definition.commandId === "memory.search");
+    expect(memorySearch).toBeDefined();
+    expect(buildCliArgv(memorySearch!, {
+      query: "폭스",
+      tier: "core",
+      limit: 5,
+      showScore: true
+    })).toEqual(["memory", "search", "--query", "폭스", "--tier", "core", "--limit", "5", "--show-score"]);
+    expect(buildCliArgv(memorySearch!, {
+      query: "폭스",
+      showScore: false
+    })).toEqual(["memory", "search", "--query", "폭스"]);
+
+    const gatewayAuthCheck = runtimeCommandDefinitions.find((definition) => definition.commandId === "gateway.auth.check");
+    expect(gatewayAuthCheck).toBeDefined();
+    expect(buildCliArgv(gatewayAuthCheck!, {
+      connector: "telegram",
+      chatId: "111111111",
+      userId: "222222222"
+    })).toEqual(["gateway", "auth", "check", "telegram", "--chat-id", "111111111", "--user-id", "222222222"]);
   });
 
   it("executes only allowlisted read-only runtime commands through fixed COSIA CLI argv", async () => {
@@ -4451,9 +4506,9 @@ describe("status and listing", () => {
       sourceChannel: "gateway" as const,
       gatewayActor: {
         connector: "telegram",
-        chatId: "120274824",
+        chatId: TELEGRAM_FIXTURE_PRIVATE_ID,
         chatType: "private",
-        userId: "120274824"
+        userId: TELEGRAM_FIXTURE_PRIVATE_ID
       },
       gatewayRole: "master" as const
     };
@@ -4485,7 +4540,7 @@ describe("status and listing", () => {
 
     const privateMasterBoundary = await new ToolRegistry().execute("cosia_runtime_command", {
       commandId: "gateway.auth.set_master",
-      args: { connector: "telegram", userId: "120274824" }
+      args: { connector: "telegram", userId: TELEGRAM_FIXTURE_PRIVATE_ID }
     }, privateMasterCtx);
     expect(privateMasterBoundary.ok).toBe(false);
     expect(JSON.parse(privateMasterBoundary.content)).toMatchObject({
@@ -5324,7 +5379,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.55.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.56.0");
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -5340,7 +5395,7 @@ describe("status and listing", () => {
       message: {
         chat: { id: -100, type: "group" },
         from: { id: 42, username: "fox" },
-        text: "@Kumi_coais_bot /new Mentioned group session"
+        text: `@${TELEGRAM_FIXTURE_BOT_USERNAME} /new Mentioned group session`
       }
     }, {
       providerId: "mock",
@@ -5353,7 +5408,7 @@ describe("status and listing", () => {
       message: {
         chat: { id: -100, type: "group" },
         from: { id: 42, username: "fox" },
-        text: "/new@Kumi_coais_bot Suffixed group session"
+        text: `/new@${TELEGRAM_FIXTURE_BOT_USERNAME} Suffixed group session`
       }
     }, {
       providerId: "mock",
@@ -5683,7 +5738,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.55.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.56.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

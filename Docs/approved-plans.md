@@ -55,6 +55,7 @@ This directory keeps approved COSIA implementation plans as separate versioned M
 - [v0.53 Gateway Role Authorization + Tool Access Policy](plans/v0.53-gateway-role-authorization-tool-access-policy.md)
 - [v0.54 Model-Facing Runtime Command Surface](plans/v0.54-model-facing-runtime-command-surface.md)
 - [v0.55 Telegram Bot API Compliance & Gateway Hardening](plans/v0.55-telegram-bot-api-compliance-hardening.md)
+- [v0.56 CLI Command Catalog Refactor](plans/v0.56-cli-command-catalog-refactor.md)
 - [Current Revised Roadmap: Session Assignment -> Memory Ownership -> Provider Hardening](plans/roadmap-session-memory-provider.md)
 
 ## Notes

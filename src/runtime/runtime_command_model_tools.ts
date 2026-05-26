@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { buildCliArgv } from "./cli_argv_planner.js";
 import { gatewayRoleAtLeast } from "./gateway_auth.js";
 import { detectSecrets } from "./risk_classifier.js";
 import {
@@ -138,7 +139,7 @@ export async function executeCosiaRuntimeCommand(args: unknown, ctx: ToolContext
       return blocked("invalid_dynamic_arg", argValidation.reason, definition);
     }
 
-    const argv = bindArgvTemplate(definition, parsed.args);
+    const argv = buildCliArgv(definition, parsed.args);
     const execution = await runCosiaCli(argv, ctx.workspaceRoot);
     return {
       ok: execution.exitCode === 0,
@@ -205,6 +206,7 @@ function definitionView(definition: RuntimeCommandDefinition, ctx?: ToolContext)
   const privateMasterCliOverrideAvailable = ctx ? isPrivateMasterDirectChat(ctx) && !isForbiddenPrivateMasterCliCommand(definition) : false;
   return {
     commandId: definition.commandId,
+    commandPath: definition.commandPath,
     cliDisplay: definition.cliDisplay,
     description: definition.description,
     safety: definition.safety,
@@ -217,41 +219,6 @@ function definitionView(definition: RuntimeCommandDefinition, ctx?: ToolContext)
     modelHint: definition.modelHint,
     modelToolHint: definition.modelToolHint
   };
-}
-
-function bindArgvTemplate(definition: RuntimeCommandDefinition, args: Record<string, unknown>): string[] {
-  const argv: string[] = [];
-  for (const token of definition.argvTemplate) {
-    const slot = token.match(/^\$([A-Za-z0-9_]+)(\?)?$/);
-    if (!slot) {
-      argv.push(token);
-      continue;
-    }
-    const key = slot[1];
-    const optional = Boolean(slot[2]);
-    const value = args[key];
-    const previous = argv[argv.length - 1];
-    if (optional && previous?.startsWith("--") && typeof value === "boolean") {
-      if (!value) {
-        argv.pop();
-      }
-      continue;
-    }
-    if (value === undefined || value === null || value === "") {
-      if (optional) {
-        if (previous?.startsWith("--")) {
-          argv.pop();
-        }
-        continue;
-      }
-      throw new Error(`Missing required argv slot: ${key}`);
-    }
-    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
-      throw new Error(`Unsupported argv slot value type for ${key}.`);
-    }
-    argv.push(String(value));
-  }
-  return argv;
 }
 
 async function runCosiaCli(argv: string[], workspaceRoot: string): Promise<CliExecutionResult> {
