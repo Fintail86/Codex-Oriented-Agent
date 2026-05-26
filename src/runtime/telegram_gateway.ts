@@ -33,7 +33,7 @@ export type TelegramTokenResolution = {
 export type TelegramGatewayCheck = {
   ok: boolean;
   status: "ok" | "failed";
-  reason?: "disabled" | "missing_token" | "missing_allowed_chat_ids" | "auth_failed" | "network_error" | "http_error" | "malformed_response";
+  reason?: "disabled" | "missing_token" | "missing_allowed_chat_ids" | "auth_failed" | "network_error" | "http_error" | "malformed_response" | "webhook_conflict";
   message: string;
   hint?: string;
   tokenStatus?: TelegramTokenResolution["status"];
@@ -46,6 +46,36 @@ export type TelegramGatewayCheck = {
   adminBindings?: number;
   legacyWarning?: string;
   groupMode?: PolicyConfig["connectors"]["telegram"]["groupMode"];
+  allowedUpdates?: string[];
+  webhookUrl?: string;
+};
+
+export type TelegramWebhookInfo = {
+  url?: string;
+  pending_update_count?: number;
+  last_error_message?: string;
+  max_connections?: number;
+  allowed_updates?: string[];
+};
+
+export type TelegramWebhookStatus = {
+  ok: boolean;
+  status: "ok" | "failed";
+  message: string;
+  hint?: string;
+  tokenStatus?: TelegramTokenResolution["status"];
+  webhookUrl?: string;
+  pendingUpdateCount?: number;
+  lastErrorMessage?: string;
+  allowedUpdates?: string[];
+};
+
+export type TelegramWebhookClearResult = {
+  cleared: boolean;
+  applied: boolean;
+  message: string;
+  hint?: string;
+  tokenStatus?: TelegramTokenResolution["status"];
 };
 
 export type TelegramGatewayState = {
@@ -128,15 +158,32 @@ type TelegramApiResponse<T> = {
   ok: boolean;
   result?: T;
   description?: string;
+  error_code?: number;
+  parameters?: TelegramResponseParameters;
+};
+
+type TelegramResponseParameters = {
+  retry_after?: number;
+  migrate_to_chat_id?: number | string;
 };
 
 class TelegramApiError extends Error {
   constructor(
     message: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly errorCode?: number,
+    readonly parameters?: TelegramResponseParameters
   ) {
     super(message);
     this.name = "TelegramApiError";
+  }
+
+  get retryAfterSeconds(): number | undefined {
+    return this.parameters?.retry_after;
+  }
+
+  get migrateToChatId(): number | string | undefined {
+    return this.parameters?.migrate_to_chat_id;
   }
 }
 
@@ -147,6 +194,8 @@ export type TelegramMessageSender = {
 };
 
 const TELEGRAM_TYPING_REFRESH_MS = 4000;
+const TELEGRAM_SEND_CHAT_MIN_INTERVAL_MS = 1100;
+export const TELEGRAM_ALLOWED_UPDATES = ["message", "callback_query"] as const;
 const activeTelegramSessionWorkers = new Set<string>();
 
 class TelegramApiClient {
@@ -160,38 +209,73 @@ class TelegramApiClient {
     return this.call<unknown>("getMe", {});
   }
 
+  async getWebhookInfo(): Promise<TelegramWebhookInfo> {
+    return this.call<TelegramWebhookInfo>("getWebhookInfo", {});
+  }
+
+  async deleteWebhook(): Promise<boolean> {
+    return this.call<boolean>("deleteWebhook", {
+      drop_pending_updates: false
+    });
+  }
+
   async getUpdates(offset: number | undefined, timeoutMs: number): Promise<TelegramUpdate[]> {
     const timeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1000));
     return this.call<TelegramUpdate[]>("getUpdates", {
       timeout: timeoutSeconds,
-      allowed_updates: ["message", "callback_query"],
+      allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
       ...(offset !== undefined ? { offset } : {})
     });
   }
 
   async sendMessage(chatId: string, text: string, options: { replyMarkup?: unknown } = {}): Promise<void> {
+    await this.paceChatSend(chatId);
     await this.call("sendMessage", {
       chat_id: chatId,
       text,
       ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {})
-    });
+    }, { retryAfterOnce: true });
   }
 
   async sendChatAction(chatId: string, action: "typing" = "typing"): Promise<void> {
     await this.call("sendChatAction", {
       chat_id: chatId,
       action
-    });
+    }, { retryAfterOnce: true });
   }
 
   async answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
     await this.call("answerCallbackQuery", {
       callback_query_id: callbackQueryId,
       ...(text ? { text } : {})
-    });
+    }, { retryAfterOnce: true });
   }
 
-  private async call<T>(method: string, body: Record<string, unknown>): Promise<T> {
+  private readonly lastSendAtByChat = new Map<string, number>();
+
+  private async paceChatSend(chatId: string): Promise<void> {
+    const now = Date.now();
+    const previous = this.lastSendAtByChat.get(chatId) ?? 0;
+    const waitMs = previous + TELEGRAM_SEND_CHAT_MIN_INTERVAL_MS - now;
+    if (waitMs > 0) {
+      await delay(waitMs);
+    }
+    this.lastSendAtByChat.set(chatId, Date.now());
+  }
+
+  private async call<T>(method: string, body: Record<string, unknown>, options: { retryAfterOnce?: boolean } = {}): Promise<T> {
+    try {
+      return await this.callOnce<T>(method, body);
+    } catch (error) {
+      if (options.retryAfterOnce && error instanceof TelegramApiError && error.retryAfterSeconds !== undefined) {
+        await delay(Math.max(0, error.retryAfterSeconds) * 1000);
+        return this.callOnce<T>(method, body);
+      }
+      throw error;
+    }
+  }
+
+  private async callOnce<T>(method: string, body: Record<string, unknown>): Promise<T> {
     const response = await this.fetchImpl(`https://api.telegram.org/bot${this.token}/${method}`, {
       method: "POST",
       headers: {
@@ -199,17 +283,32 @@ class TelegramApiClient {
       },
       body: JSON.stringify(body)
     });
+    const raw = await response.text();
+    const parsed = parseTelegramApiResponse<T>(raw);
     if (!response.ok) {
-      throw new TelegramApiError(`Telegram HTTP ${response.status}: ${await safeResponsePreview(response)}`, response.status);
+      if (parsed) {
+        throw new TelegramApiError(parsed.description ?? `Telegram HTTP ${response.status}`, response.status, parsed.error_code, parsed.parameters);
+      }
+      throw new TelegramApiError(`Telegram HTTP ${response.status}: ${raw.slice(0, 300)}`, response.status);
     }
-    const parsed = await response.json() as TelegramApiResponse<T>;
+    if (!parsed) {
+      throw new TelegramApiError(`Telegram ${method} returned malformed response.`);
+    }
     if (!parsed.ok) {
-      throw new TelegramApiError(parsed.description ?? `Telegram ${method} failed.`);
+      throw new TelegramApiError(parsed.description ?? `Telegram ${method} failed.`, response.status, parsed.error_code, parsed.parameters);
     }
     if (parsed.result === undefined) {
       throw new TelegramApiError(`Telegram ${method} returned malformed response.`);
     }
     return parsed.result;
+  }
+}
+
+function parseTelegramApiResponse<T>(raw: string): TelegramApiResponse<T> | undefined {
+  try {
+    return JSON.parse(raw) as TelegramApiResponse<T>;
+  } catch {
+    return undefined;
   }
 }
 
@@ -268,7 +367,27 @@ export async function checkTelegramGateway(
     };
   }
   try {
-    await new TelegramApiClient(tokenResolution.token, options.fetchImpl).getMe();
+    const client = new TelegramApiClient(tokenResolution.token, options.fetchImpl);
+    await client.getMe();
+    const webhook = await client.getWebhookInfo();
+    if (webhook.url?.trim()) {
+      return {
+        ok: false,
+        status: "failed",
+        reason: "webhook_conflict",
+        message: "Telegram webhook is configured, but COSIA Telegram Gateway uses long polling.",
+        hint: "Run `cosia gateway telegram webhook clear --yes` to disable the webhook before starting COSIA Gateway.",
+        tokenStatus: tokenResolution.status,
+        authChatCount: auth.chatCount,
+        masterConfigured: auth.masterConfigured,
+        guestBindings: auth.guestBindings,
+        adminBindings: auth.adminBindings,
+        legacyWarning: auth.legacyWarning,
+        groupMode: config.groupMode,
+        allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
+        webhookUrl: webhook.url
+      };
+    }
     return {
       ok: true,
       status: "ok",
@@ -282,7 +401,9 @@ export async function checkTelegramGateway(
       guestBindings: auth.guestBindings,
       adminBindings: auth.adminBindings,
       legacyWarning: auth.legacyWarning,
-      groupMode: config.groupMode
+      groupMode: config.groupMode,
+      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
+      webhookUrl: webhook.url
     };
   } catch (error) {
     const classified = classifyTelegramCheckError(error);
@@ -297,7 +418,95 @@ export async function checkTelegramGateway(
       guestBindings: auth.guestBindings,
       adminBindings: auth.adminBindings,
       legacyWarning: auth.legacyWarning,
-      groupMode: config.groupMode
+      groupMode: config.groupMode,
+      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES]
+    };
+  }
+}
+
+export async function getTelegramWebhookStatus(
+  workspaceRoot: string,
+  options: { fetchImpl?: FetchLike } = {}
+): Promise<TelegramWebhookStatus> {
+  const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const tokenResolution = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
+  if (!tokenResolution.token) {
+    return {
+      ok: false,
+      status: "failed",
+      message: "Telegram bot token is not configured.",
+      hint: "Run `cosia gateway telegram set token` or `cosia gateway telegram set token-env <ENV_NAME>`.",
+      tokenStatus: tokenResolution.status,
+      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES]
+    };
+  }
+  try {
+    const webhook = await new TelegramApiClient(tokenResolution.token, options.fetchImpl).getWebhookInfo();
+    const configured = Boolean(webhook.url?.trim());
+    return {
+      ok: true,
+      status: "ok",
+      message: configured
+        ? "Telegram webhook is configured. COSIA long polling will not start until it is cleared."
+        : "Telegram webhook is not configured. COSIA long polling can be used.",
+      hint: configured ? "Run `cosia gateway telegram webhook clear --yes` to disable the webhook." : undefined,
+      tokenStatus: tokenResolution.status,
+      webhookUrl: webhook.url,
+      pendingUpdateCount: webhook.pending_update_count,
+      lastErrorMessage: webhook.last_error_message,
+      allowedUpdates: webhook.allowed_updates ?? [...TELEGRAM_ALLOWED_UPDATES]
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      message: (error as Error).message,
+      hint: classifyTelegramCheckError(error).hint,
+      tokenStatus: tokenResolution.status,
+      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES]
+    };
+  }
+}
+
+export async function clearTelegramWebhook(
+  workspaceRoot: string,
+  options: { yes?: boolean; fetchImpl?: FetchLike } = {}
+): Promise<TelegramWebhookClearResult> {
+  const policy = await new PolicyManager(workspaceRoot).loadPolicy();
+  const tokenResolution = resolveTelegramToken(workspaceRoot, policy.connectors.telegram);
+  if (!tokenResolution.token) {
+    return {
+      cleared: false,
+      applied: false,
+      message: "Telegram bot token is not configured.",
+      hint: "Run `cosia gateway telegram set token` or `cosia gateway telegram set token-env <ENV_NAME>`.",
+      tokenStatus: tokenResolution.status
+    };
+  }
+  if (!options.yes) {
+    return {
+      cleared: false,
+      applied: false,
+      message: "Telegram webhook clear preview. No remote Telegram settings were changed.",
+      hint: "Apply with: cosia gateway telegram webhook clear --yes",
+      tokenStatus: tokenResolution.status
+    };
+  }
+  try {
+    await new TelegramApiClient(tokenResolution.token, options.fetchImpl).deleteWebhook();
+    return {
+      cleared: true,
+      applied: true,
+      message: "Telegram webhook cleared with drop_pending_updates=false.",
+      tokenStatus: tokenResolution.status
+    };
+  } catch (error) {
+    return {
+      cleared: false,
+      applied: true,
+      message: (error as Error).message,
+      hint: classifyTelegramCheckError(error).hint,
+      tokenStatus: tokenResolution.status
     };
   }
 }
@@ -307,6 +516,18 @@ function classifyTelegramCheckError(error: unknown): {
   hint: string;
 } {
   if (error instanceof TelegramApiError) {
+    if (error.migrateToChatId !== undefined) {
+      return {
+        reason: "http_error",
+        hint: `Telegram says this chat migrated to ${error.migrateToChatId}. Update Gateway auth locally with \`cosia gateway auth remove-chat telegram <old-chat-id>\` and \`cosia gateway auth allow-chat telegram ${error.migrateToChatId}\`.`
+      };
+    }
+    if (error.retryAfterSeconds !== undefined) {
+      return {
+        reason: "http_error",
+        hint: `Telegram asked COSIA to retry after ${error.retryAfterSeconds}s. If this repeats, reduce message volume or wait before retrying.`
+      };
+    }
     if (error.status === 401 || error.status === 403 || error.status === 404) {
       return {
         reason: "auth_failed",
@@ -464,7 +685,10 @@ export async function processTelegramUpdate(
     const chatId = String(callback.message?.chat.id ?? "");
     const source = telegramSourceFromCallback(callback);
     if (client.answerCallbackQuery) {
-      await client.answerCallbackQuery(callback.id);
+      await client.answerCallbackQuery(callback.id).catch(() => {
+        // Callback acknowledgements are user-interface hints. They must not
+        // prevent the underlying command from being handled.
+      });
     }
     return withTelegramTyping(client, chatId, async () => {
       const input = telegramCallbackInput(callback.data ?? "");
@@ -1060,6 +1284,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
       adminBindings: auth.adminBindings,
       legacyWarning: auth.legacyWarning,
       groupMode: policy.connectors.telegram.groupMode,
+      allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
       activeChats: Object.keys(state.chats).length,
       nextOffset: state.nextOffset,
       failureCount: state.failureCount,
@@ -1083,6 +1308,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `  Admin bindings: ${auth.adminBindings}`,
     auth.legacyWarning ? `  Warning: ${auth.legacyWarning}` : undefined,
     `  Group mode: ${policy.connectors.telegram.groupMode}`,
+    `  Allowed updates: ${TELEGRAM_ALLOWED_UPDATES.join(", ")}`,
     `  Active chats: ${Object.keys(state.chats).length}`,
     `  Next offset: ${state.nextOffset ?? "none"}`,
     `  Failure count: ${state.failureCount}`,
@@ -1151,7 +1377,34 @@ export function formatTelegramCheck(result: TelegramGatewayCheck): string {
     result.adminBindings !== undefined ? `Admin bindings: ${result.adminBindings}` : undefined,
     result.legacyWarning ? `Warning: ${result.legacyWarning}` : undefined,
     result.groupMode ? `Group mode: ${result.groupMode}` : undefined,
+    result.allowedUpdates ? `Allowed updates: ${result.allowedUpdates.join(", ")}` : undefined,
+    result.webhookUrl ? `Webhook: configured (${result.webhookUrl})` : "Webhook: none",
     result.reason ? `Reason: ${result.reason}` : undefined,
+    result.hint ? `Hint: ${result.hint}` : undefined
+  ].filter(Boolean).join("\n");
+}
+
+export function formatTelegramWebhookStatus(result: TelegramWebhookStatus): string {
+  return [
+    "Telegram webhook",
+    `Status: ${result.status}`,
+    `Message: ${result.message}`,
+    result.tokenStatus ? `Token: ${result.tokenStatus}` : undefined,
+    `Webhook: ${result.webhookUrl?.trim() ? result.webhookUrl : "none"}`,
+    result.pendingUpdateCount !== undefined ? `Pending updates: ${result.pendingUpdateCount}` : undefined,
+    result.lastErrorMessage ? `Last webhook error: ${result.lastErrorMessage}` : undefined,
+    result.allowedUpdates ? `Allowed updates: ${result.allowedUpdates.join(", ")}` : undefined,
+    result.hint ? `Hint: ${result.hint}` : undefined
+  ].filter(Boolean).join("\n");
+}
+
+export function formatTelegramWebhookClear(result: TelegramWebhookClearResult): string {
+  return [
+    "Telegram webhook clear",
+    `Applied: ${result.applied}`,
+    `Cleared: ${result.cleared}`,
+    `Message: ${result.message}`,
+    result.tokenStatus ? `Token: ${result.tokenStatus}` : undefined,
     result.hint ? `Hint: ${result.hint}` : undefined
   ].filter(Boolean).join("\n");
 }
@@ -1376,14 +1629,6 @@ async function appendTelegramLog(workspaceRoot: string, event: string, data: Rec
 
 async function writeTelegramStatus(workspaceRoot: string, status: Record<string, unknown>): Promise<void> {
   await writeText(join(telegramGatewayDir(workspaceRoot), "status.json"), `${JSON.stringify(status, null, 2)}\n`);
-}
-
-async function safeResponsePreview(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, 300);
-  } catch {
-    return "";
-  }
 }
 
 function registerGatewaySignals(onSignal: () => void): () => void {

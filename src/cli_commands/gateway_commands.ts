@@ -54,10 +54,14 @@ import {
 } from "../runtime/gateway_auth.js";
 import {
   checkTelegramGateway,
+  clearTelegramWebhook,
   formatTelegramCheck,
   formatTelegramStateInspection,
   formatTelegramStateRepair,
   formatTelegramStateReset,
+  formatTelegramWebhookClear,
+  formatTelegramWebhookStatus,
+  getTelegramWebhookStatus,
   inspectTelegramGatewayState,
   repairTelegramGatewayState,
   resetTelegramGatewayState,
@@ -464,6 +468,31 @@ export function registerGatewayCommands(program: Command): void {
     .action(async () => {
       await main(async (workspaceRoot) => {
         console.log(formatTelegramCheck(await checkTelegramGateway(workspaceRoot)));
+      });
+    });
+
+  const telegramWebhook = telegram
+    .command("webhook")
+    .description("Inspect or clear Telegram webhook settings used by the Bot API.");
+
+  telegramWebhook
+    .command("status")
+    .description("Show Telegram webhook status. COSIA long polling requires no webhook.")
+    .action(async () => {
+      await main(async (workspaceRoot) => {
+        console.log(formatTelegramWebhookStatus(await getTelegramWebhookStatus(workspaceRoot)));
+      });
+    });
+
+  telegramWebhook
+    .command("clear")
+    .option("--yes", "Clear the remote Telegram webhook. Without this, only show a preview.", false)
+    .description("Disable Telegram webhook for this bot using deleteWebhook(drop_pending_updates=false).")
+    .action(async (options: { yes: boolean }) => {
+      await main(async (workspaceRoot) => {
+        console.log(formatTelegramWebhookClear(await clearTelegramWebhook(workspaceRoot, {
+          yes: options.yes
+        })));
       });
     });
 

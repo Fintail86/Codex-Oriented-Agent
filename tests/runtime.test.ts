@@ -43,7 +43,11 @@ import { codexTemplates } from "../src/runtime/templates.js";
 import { RunJobLedger } from "../src/runtime/run_jobs.js";
 import {
   checkTelegramGateway,
+  clearTelegramWebhook,
   formatTelegramCheck,
+  formatTelegramWebhookClear,
+  formatTelegramWebhookStatus,
+  getTelegramWebhookStatus,
   inspectTelegramGatewayState,
   loadTelegramGatewayState,
   processTelegramUpdate,
@@ -185,7 +189,7 @@ describe("runtime setup", () => {
     expect(sessionJson.agentId).toBeUndefined();
     expect(await readFile(join(root, "codex", "SECURITY.md"), "utf8")).toContain("SECURITY");
     const policyJson = await readFile(join(root, "codex", "POLICY.json"), "utf8");
-    expect(policyJson).toContain("\"version\": \"0.54.0\"");
+    expect(policyJson).toContain("\"version\": \"0.55.0\"");
     expect(policyJson).toContain("\"defaultAgentId\": \"cosia-agent\"");
     expect(policyJson).not.toContain("\"promptBudget\"");
     const policyLaw = JSON.parse(policyJson) as { tools: Record<string, unknown> };
@@ -3996,7 +4000,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.54.0");
+    expect(emptyReport.version).toBe("0.55.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -4900,7 +4904,12 @@ describe("status and listing", () => {
     expect(await readFile(secretsPrivatePath(root), "utf8")).toContain("secrettelegram");
 
     const check = await checkTelegramGateway(root, {
-      fetchImpl: async () => jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } })
+      fetchImpl: async (url) => {
+        if (String(url).endsWith("/getWebhookInfo")) {
+          return jsonResponse({ ok: true, result: { url: "", pending_update_count: 0 } });
+        }
+        return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
     });
     expect(check).toMatchObject({
       ok: true,
@@ -4908,16 +4917,93 @@ describe("status and listing", () => {
       authChatCount: 1,
       masterConfigured: true,
       adminBindings: 0,
-      groupMode: "allowed_users"
+      groupMode: "allowed_users",
+      allowedUpdates: ["message", "callback_query"]
     });
     expect(formatTelegramCheck(check)).not.toContain("secrettelegram");
     expect(formatTelegramCheck(check)).toContain("Group mode: allowed_users");
+    expect(formatTelegramCheck(check)).toContain("Allowed updates: message, callback_query");
+    expect(formatTelegramCheck(check)).toContain("Webhook: none");
 
     await removeTelegramUserId(root, "42");
     await removeTelegramMutationUserId(root, "42");
     const updated = await new PolicyManager(root).loadPolicy();
     expect(updated.gateway.authorization.roleBindings).toEqual([]);
     expect(updated.gateway.authorization.masterUser).toBeUndefined();
+  });
+
+  it("detects Telegram webhook conflicts and clears webhook only with explicit yes", async () => {
+    const root = await initializedWorkspace();
+    await enableTelegramConnector(root, true);
+    await addTelegramChatId(root, "123");
+    await setTelegramToken(root, "1234567890:AAsecrettelegramtokenvalue");
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      requests.push({ url: String(url), body });
+      if (String(url).endsWith("/getMe")) {
+        return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getWebhookInfo")) {
+        return jsonResponse({
+          ok: true,
+          result: {
+            url: "https://example.test/cosia-hook",
+            pending_update_count: 3,
+            allowed_updates: ["message"]
+          }
+        });
+      }
+      if (String(url).endsWith("/deleteWebhook")) {
+        return jsonResponse({ ok: true, result: true });
+      }
+      return jsonResponse({ ok: false, description: "unknown" }, 404);
+    };
+
+    const check = await checkTelegramGateway(root, { fetchImpl });
+    expect(check).toMatchObject({
+      ok: false,
+      reason: "webhook_conflict",
+      webhookUrl: "https://example.test/cosia-hook",
+      allowedUpdates: ["message", "callback_query"]
+    });
+    expect(formatTelegramCheck(check)).toContain("webhook clear --yes");
+    expect(formatTelegramCheck(check)).not.toContain("AAsecrettelegram");
+
+    const status = await getTelegramWebhookStatus(root, { fetchImpl });
+    expect(formatTelegramWebhookStatus(status)).toContain("Webhook: https://example.test/cosia-hook");
+    expect(formatTelegramWebhookStatus(status)).toContain("Pending updates: 3");
+
+    const beforePreviewCalls = requests.length;
+    const preview = await clearTelegramWebhook(root, { fetchImpl });
+    expect(preview).toMatchObject({ applied: false, cleared: false });
+    expect(requests).toHaveLength(beforePreviewCalls);
+    expect(formatTelegramWebhookClear(preview)).toContain("webhook clear --yes");
+
+    const cleared = await clearTelegramWebhook(root, { yes: true, fetchImpl });
+    expect(cleared).toMatchObject({ applied: true, cleared: true });
+    const deleteRequest = requests.find((request) => request.url.endsWith("/deleteWebhook"));
+    expect(deleteRequest?.body).toMatchObject({ drop_pending_updates: false });
+    expect(formatTelegramWebhookClear(cleared)).not.toContain("AAsecrettelegram");
+  });
+
+  it("surfaces Telegram migrate_to_chat_id guidance without changing auth", async () => {
+    const root = await initializedWorkspace();
+    await enableTelegramConnector(root, true);
+    await setTelegramToken(root, "1234567890:AAsecrettelegramtokenvalue");
+    const status = await getTelegramWebhookStatus(root, {
+      fetchImpl: async () => jsonResponse({
+        ok: false,
+        error_code: 400,
+        description: "Bad Request: group chat was upgraded to a supergroup chat",
+        parameters: { migrate_to_chat_id: -100123 }
+      }, 400)
+    });
+
+    expect(status).toMatchObject({ ok: false, status: "failed" });
+    expect(status.hint).toContain("allow-chat telegram -100123");
+    const policy = await new PolicyManager(root).loadPolicy();
+    expect(policy.gateway.authorization.chats).toEqual([]);
   });
 
   it("processes Telegram updates with allowlist checks, state, chunks, and slash commands", async () => {
@@ -5238,7 +5324,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.54.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.55.0");
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -5428,6 +5514,54 @@ describe("status and listing", () => {
     expect(await readFile(stylePath, "utf8")).toBe("mock write");
   });
 
+  it("best-effort acknowledges Telegram callback queries before handling them", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: string[] = [];
+    const sender = {
+      sendMessage: async (_chatId: string, text: string) => {
+        sent.push(text);
+      },
+      answerCallbackQuery: async () => {
+        throw new Error("callback ack network failure");
+      }
+    };
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, {
+      chats: {},
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    }, {
+      update_id: 1,
+      callback_query: {
+        id: "callback-1",
+        data: "review:refresh",
+        from: { id: 42, username: "fox" },
+        message: {
+          chat: { id: 123, type: "private" }
+        }
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    expect(sent.join("\n")).toContain("Review Inbox");
+  });
+
   it("clears missing active Telegram sessions and guides the user to create or select a session", async () => {
     const root = await initializedWorkspace();
     const policyManager = new PolicyManager(root);
@@ -5549,7 +5683,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.54.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.55.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
@@ -6004,6 +6138,9 @@ describe("status and listing", () => {
       if (String(url).endsWith("/getMe")) {
         return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
       }
+      if (String(url).endsWith("/getWebhookInfo")) {
+        return jsonResponse({ ok: true, result: { url: "", pending_update_count: 0 } });
+      }
       if (String(url).endsWith("/getUpdates")) {
         return jsonResponse({
           ok: true,
@@ -6041,6 +6178,7 @@ describe("status and listing", () => {
 
     const getUpdatesRequest = requests.find((request) => request.url.endsWith("/getUpdates"));
     expect(getUpdatesRequest?.body.offset).toBe(10);
+    expect(getUpdatesRequest?.body.allowed_updates).toEqual(["message", "callback_query"]);
     const chatActionRequest = requests.find((request) => request.url.endsWith("/sendChatAction"));
     expect(chatActionRequest?.body).toMatchObject({
       chat_id: "123",
@@ -6051,6 +6189,81 @@ describe("status and listing", () => {
     expect(state.chats["123"]).toBeUndefined();
     expect(await pathExists(join(root, ".cosia-gateway", "telegram", "process.lock"))).toBe(false);
     expect(await pathExists(gatewayProcessLockPath(root))).toBe(false);
+  });
+
+  it("retries Telegram send calls once when Bot API returns retry_after", async () => {
+    const root = await initializedWorkspace();
+    const policyManager = new PolicyManager(root);
+    const policy = await policyManager.loadPolicy();
+    await writeRuntimeLocal(root, {
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    });
+    const previousToken = process.env.TELEGRAM_BOT_TOKEN;
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    let sendMessageAttempts = 0;
+    const fetchImpl: FetchLike = async (url) => {
+      if (String(url).endsWith("/getMe")) {
+        return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getWebhookInfo")) {
+        return jsonResponse({ ok: true, result: { url: "", pending_update_count: 0 } });
+      }
+      if (String(url).endsWith("/getUpdates")) {
+        return jsonResponse({
+          ok: true,
+          result: [{
+            update_id: 1,
+            message: {
+              chat: { id: 123 },
+              from: { id: 42, username: "fox" },
+              text: "/status"
+            }
+          }]
+        });
+      }
+      if (String(url).endsWith("/sendChatAction")) {
+        return jsonResponse({ ok: true, result: true });
+      }
+      if (String(url).endsWith("/sendMessage")) {
+        sendMessageAttempts += 1;
+        if (sendMessageAttempts === 1) {
+          return jsonResponse({
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry later",
+            parameters: { retry_after: 0 }
+          }, 429);
+        }
+        return jsonResponse({ ok: true, result: { message_id: 2 } });
+      }
+      return jsonResponse({ ok: false, description: "unknown" }, 404);
+    };
+
+    try {
+      await startTelegramGateway(root, {
+        providerId: "mock",
+        once: true,
+        fetchImpl
+      });
+    } finally {
+      if (previousToken === undefined) {
+        delete process.env.TELEGRAM_BOT_TOKEN;
+      } else {
+        process.env.TELEGRAM_BOT_TOKEN = previousToken;
+      }
+    }
+
+    expect(sendMessageAttempts).toBe(2);
+    const state = await loadTelegramGatewayState(root);
+    expect(state.nextOffset).toBe(2);
   });
 
   it("marks failing Telegram updates handled instead of retrying them forever", async () => {
@@ -6087,6 +6300,9 @@ describe("status and listing", () => {
     const fetchImpl: FetchLike = async (url, init) => {
       if (String(url).endsWith("/getMe")) {
         return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getWebhookInfo")) {
+        return jsonResponse({ ok: true, result: { url: "", pending_update_count: 0 } });
       }
       if (String(url).endsWith("/getUpdates")) {
         return jsonResponse({
@@ -6156,6 +6372,9 @@ describe("status and listing", () => {
       requests.push(String(url));
       if (String(url).endsWith("/getMe")) {
         return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getWebhookInfo")) {
+        return jsonResponse({ ok: true, result: { url: "", pending_update_count: 0 } });
       }
       if (String(url).endsWith("/getUpdates")) {
         return jsonResponse({ ok: true, result: [] });
@@ -6258,6 +6477,9 @@ describe("status and listing", () => {
       requests.push(String(url));
       if (String(url).endsWith("/getMe")) {
         return jsonResponse({ ok: true, result: { id: 1, username: "cosia_test_bot" } });
+      }
+      if (String(url).endsWith("/getWebhookInfo")) {
+        return jsonResponse({ ok: true, result: { url: "", pending_update_count: 0 } });
       }
       if (String(url).endsWith("/getUpdates")) {
         return jsonResponse({

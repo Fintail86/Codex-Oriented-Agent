@@ -110,7 +110,7 @@ export async function executeCosiaRuntimeCommand(args: unknown, ctx: ToolContext
         return blocked("execution_mode_blocked", `Runtime command is blocked for model execution: ${definition.commandId}`, definition);
       }
       if (definition.safety !== "read_only" || mode !== "execute_read_only") {
-        return blocked("unsafe_command_blocked", "Only read_only commands with execute_read_only mode can run through model-facing CLI execution in v0.54.", definition);
+        return blocked("unsafe_command_blocked", "Only read_only commands with execute_read_only mode can run through model-facing CLI execution.", definition);
       }
       if (isForbiddenModelRuntimeCommand(definition)) {
         return blocked("forbidden_model_command", `Command is not allowed through model-facing runtime command: ${definition.commandId}`, definition);

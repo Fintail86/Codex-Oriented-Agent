@@ -1,4 +1,4 @@
-# COSIA v0.54.0
+# COSIA v0.55.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.54.0 adds a model-facing COSIA CLI command surface: agents can look up the full CLI command catalog, choose a `commandId`, and let the runtime execute the fixed COSIA CLI argv plan for explicitly allowlisted read-only commands, without shell-string execution or hardcoded state inspector tools.
+v0.55.0 hardens the Telegram Gateway against Bot API operational pitfalls: webhook conflicts block long polling until explicitly cleared, `allowed_updates` is fixed to message/callback updates, Telegram retry hints are respected for send calls, and group command guidance is documented.
 
 ## Requirements
 
@@ -554,7 +554,11 @@ cosia gateway telegram set group-mode allowed-users
 cosia gateway telegram set token
 cosia gateway telegram list
 cosia gateway telegram check
+cosia gateway telegram webhook status
+cosia gateway telegram webhook clear --yes
 ```
+
+COSIA uses Telegram long polling, not webhooks. If BotFather or another service has configured a webhook for the bot, `cosia gateway telegram check` and `cosia gateway start` will fail until you explicitly clear it with `cosia gateway telegram webhook clear --yes`. The clear command calls `deleteWebhook` with `drop_pending_updates=false`, so pending Telegram updates are not intentionally discarded.
 
 Useful Telegram commands:
 
@@ -570,9 +574,11 @@ Useful Telegram commands:
 /tool grow <request>
 ```
 
+In groups, Telegram/BotFather privacy mode may only deliver slash commands addressed to the bot. Prefer `/status@YourBotName` or `/new@YourBotName <goal>` over `@YourBotName /status`. COSIA only requests Telegram update types `message` and `callback_query`; edited messages, chat member updates, reactions, media upload/download, and inline query handling are outside the current connector scope.
+
 Telegram review messages may include compact shortcut buttons such as refresh, show, conflicts, and preview actions. Buttons only create or refresh previews; actual mutation still requires `/apply`, and stale previews are rejected if the target or conflict state changed.
 
-The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply`; dangerous commands are blocked in the connector by default. Group chats are read-only by default even when the chat id is allowlisted. Use `/whoami` in Telegram to discover chat/user ids, then explicitly set user and mutation user ids before enabling group mutation. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks.
+The gateway stores local process, offset, heartbeat, lock, and chat state under `.cosia-gateway/`, which is ignored by git. Telegram mutations still use preview plus `/apply`; dangerous commands are blocked in the connector by default. Group chats are read-only by default even when the chat id is allowlisted. Use `/whoami` in Telegram to discover chat/user ids, then explicitly set user and mutation user ids before enabling group mutation. Use `cosia gateway status --json` for structured gateway state and `cosia gateway unlock --stale-only` to remove stale top-level process locks. Long replies are chunked and paced per chat to respect Telegram Bot API rate-limit guidance, so multi-part responses may arrive slightly spaced out.
 
 ## Command Trigger Packs
 
@@ -760,6 +766,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 ## Roadmap
 
 - v0.50.0: Memory and continuity positioned as the product core, with provider-neutral continuity documented in normal status/docs.
+- v0.55.0: Telegram Gateway aligns with Bot API long-polling guidance, detects webhook conflicts, adds explicit webhook status/clear commands, respects retry_after on send calls, and documents group command syntax.
 - v0.53.0: Gateway role authorization moves Telegram user permissions into connector-neutral runtime gates with one global master, chat-scoped guest/admin bindings, and tool-level external access checks.
 - v0.54.0: Model-facing CLI command catalog adds `cosia_cli_command_lookup` and commandId-to-fixed-CLI `cosia_runtime_command` for LLM navigation without natural-language command translation or shell-string execution.
 - v0.52.0: Telegram/Gateway run jobs enqueue long provider/tool loops so control commands stay responsive while work continues in the background.

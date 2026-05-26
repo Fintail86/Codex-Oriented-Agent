@@ -23,6 +23,7 @@ import {
   loadTelegramGatewayState,
   resolveTelegramToken,
   startTelegramGateway,
+  TELEGRAM_ALLOWED_UPDATES,
   type TelegramGatewayCheck
 } from "./telegram_gateway.js";
 
@@ -232,6 +233,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
         adminBindings: auth.adminBindings,
         legacyWarning: auth.legacyWarning,
         groupMode: policy.connectors.telegram.groupMode,
+        allowedUpdates: [...TELEGRAM_ALLOWED_UPDATES],
         activeChats: Object.keys(state.chats).length,
         staleActiveSessions: telegramStateInspection.staleSessions.length,
         nextOffset: state.nextOffset,
@@ -269,6 +271,7 @@ export async function formatGatewayStatus(workspaceRoot: string, options: { json
     `    Admin bindings: ${auth.adminBindings}`,
     auth.legacyWarning ? `    Warning: ${auth.legacyWarning}` : undefined,
     `    Group mode: ${policy.connectors.telegram.groupMode}`,
+    `    Allowed updates: ${TELEGRAM_ALLOWED_UPDATES.join(", ")}`,
     `    Active chats: ${Object.keys(state.chats).length}`,
     `    Stale active sessions: ${telegramStateInspection.staleSessions.length}`,
     telegramStateInspection.staleSessions.length ? "    Repair: cosia gateway telegram repair --stale-sessions" : undefined,
