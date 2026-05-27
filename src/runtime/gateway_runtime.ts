@@ -32,6 +32,7 @@ import {
   formatUnknownCallbackNotice
 } from "./gateway_message_renderer.js";
 import { parseGatewayCallbackData, type GatewayConnectorDescriptor } from "./gateway_connector_descriptor.js";
+import { detectSecrets } from "./risk_classifier.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { withSessionLock } from "./gateway_locks.js";
@@ -53,23 +54,14 @@ import type { PromptBlock } from "./prompt_builder.js";
 import type { RunProgressEvent } from "./runner.js";
 import type { SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./types.js";
 
-const gatewayToolAssistedProviderTimeoutMs = 300_000;
-const gatewayRunJobDeadlineMs = 420_000;
+export type GatewayRunTimeoutPolicy = {
+  providerTimeoutAfterToolMs: number;
+  runDeadlineMs: number;
+};
 
-/**
- * @deprecated v0.69 introduces GatewayActivity/GatewayTurnContext. Keep this
- * bridge for older handlers until the v0.70 cleanup removes source-shaped
- * call sites.
- */
-export type GatewaySourceContext = {
-  connector?: string;
-  chatId?: string;
-  chatType?: string;
-  messageThreadId?: number | string;
-  userId?: string;
-  username?: string;
-  firstName?: string;
-  displayName?: string;
+export const defaultGatewayRunTimeoutPolicy: GatewayRunTimeoutPolicy = {
+  providerTimeoutAfterToolMs: 300_000,
+  runDeadlineMs: 420_000
 };
 
 export type GatewayReplyTarget = {
@@ -78,11 +70,25 @@ export type GatewayReplyTarget = {
   messageThreadId?: number | string;
 };
 
+export type GatewayRiskFlags = {
+  secretLikeInput: boolean;
+};
+
+export type GatewayPipelineStage =
+  | "normalize_turn"
+  | "resolve_actor_role"
+  | "auth_gate"
+  | "classify_interaction"
+  | "dispatch_foreground"
+  | "enqueue_or_run_session_turn"
+  | "render_result";
+
 type GatewayActivityBase = {
   connector: string;
   sourceUpdateId?: number | string;
   actor: GatewayActor;
   replyTarget: GatewayReplyTarget;
+  riskFlags?: GatewayRiskFlags;
 };
 
 export type GatewayActivity =
@@ -108,19 +114,23 @@ export type PendingToolGrowthRequest = ToolGrowthRequest & {
   createdAt: string;
 };
 
-export type GatewayMessageOptions = {
+type GatewayMessageOptions = {
   workspaceRoot: string;
   input: string;
   state: GatewayChatState;
   policy: PolicyConfig;
   providerId: string;
   owner: string;
-  chatId?: string;
-  source?: GatewaySourceContext;
+  connector: string;
+  actor: GatewayActor;
+  replyTarget: GatewayReplyTarget;
+  riskFlags: GatewayRiskFlags;
+  pipelineStage?: GatewayPipelineStage;
   now?: () => number;
   promoteSessionRun?: (input: string, state: GatewayChatState) => Promise<GatewayMessageResult>;
   onRunProgress?: (event: RunProgressEvent) => Promise<void> | void;
   gatewayRole?: GatewayRole;
+  timeoutPolicy?: GatewayRunTimeoutPolicy;
 };
 
 export type GatewayTurnContext = {
@@ -134,6 +144,10 @@ export type GatewayTurnContext = {
   providerId: string;
   owner: string;
   replyTarget: GatewayReplyTarget;
+  normalizedText?: string;
+  riskFlags?: GatewayRiskFlags;
+  pipelineStage?: GatewayPipelineStage;
+  timeoutPolicy?: GatewayRunTimeoutPolicy;
   now?: () => number;
   onRunProgress?: (event: RunProgressEvent) => Promise<void> | void;
   /**
@@ -146,6 +160,8 @@ export type GatewayTurnContext = {
 export type GatewayMessageResult = {
   output: string;
   state: GatewayChatState;
+  stage?: GatewayPipelineStage;
+  riskFlags?: GatewayRiskFlags;
 };
 
 export type GatewayCallbackActionInput = {
@@ -155,64 +171,74 @@ export type GatewayCallbackActionInput = {
 };
 
 export async function handleGatewayActivity(context: GatewayTurnContext): Promise<GatewayMessageResult> {
-  const now = context.now ?? (() => Date.now());
-  if (context.activity.type === "whoami") {
-    return done(formatGatewayActorWhoami(context.actor), context.chatState);
+  const normalized = normalizeGatewayTurn(context);
+  const now = normalized.now ?? (() => Date.now());
+  if (normalized.activity.type === "whoami") {
+    return done(formatGatewayActorWhoami(normalized.actor), normalized.chatState, "dispatch_foreground", normalized.riskFlags);
   }
-  const source = gatewaySourceFromActivity(context.activity);
   const baseOptions: GatewayMessageOptions = {
-    workspaceRoot: context.workspaceRoot,
-    input: context.activity.type === "callback_action" ? "" : context.activity.text,
-    state: context.chatState,
-    policy: context.policy,
-    providerId: context.chatState.providerId ?? context.providerId,
-    owner: context.owner,
-    chatId: context.replyTarget.chatId,
-    source,
+    workspaceRoot: normalized.workspaceRoot,
+    input: normalized.normalizedText ?? "",
+    state: normalized.chatState,
+    policy: normalized.policy,
+    providerId: normalized.chatState.providerId ?? normalized.providerId,
+    owner: normalized.owner,
+    connector: normalized.activity.connector,
+    actor: normalized.actor,
+    replyTarget: normalized.replyTarget,
+    riskFlags: normalized.riskFlags ?? { secretLikeInput: false },
+    pipelineStage: "normalize_turn",
     now,
-    onRunProgress: context.onRunProgress,
-    promoteSessionRun: context.promoteSessionRun,
-    gatewayRole: context.role
+    onRunProgress: normalized.onRunProgress,
+    promoteSessionRun: normalized.promoteSessionRun,
+    gatewayRole: normalized.role,
+    timeoutPolicy: normalized.timeoutPolicy
   };
-  if (context.activity.type === "callback_action") {
-    const parsedCallback = parseGatewayCallbackData(context.connectorDescriptor, context.activity.callbackData ?? "");
+  if (normalized.activity.type === "callback_action") {
+    const parsedCallback = parseGatewayCallbackData(normalized.connectorDescriptor, normalized.activity.callbackData ?? "");
     if (!parsedCallback) {
-      return done(formatUnknownCallbackNotice(), context.chatState);
+      return done(formatUnknownCallbackNotice(), normalized.chatState, "classify_interaction", normalized.riskFlags);
     }
     const access = authorizeGatewayAccess(
-      context.policy,
-      context.actor,
+      normalized.policy,
+      normalized.actor,
       parsedCallback.definition.minRole,
       parsedCallback.definition.safety !== "read_only"
     );
     if (!access.allowed) {
-      return done(formatGatewayAuthBlocked(context.actor, access), context.chatState);
+      return done(formatGatewayAuthBlocked(normalized.actor, access), normalized.chatState, "auth_gate", normalized.riskFlags);
     }
-    return handleGatewayCallbackAction({
+    return dispatchGatewayCallbackAction({
       ...baseOptions,
       input: "",
       callback: parsedCallback,
-      state: context.chatState,
+      state: normalized.chatState,
       now,
+      pipelineStage: "dispatch_foreground",
       gatewayRole: access.role
     });
   }
   return handleGatewayMessage(baseOptions);
 }
 
-export function gatewaySourceFromActivity(activity: GatewayActivity): GatewaySourceContext {
+export function normalizeGatewayTurn(context: GatewayTurnContext): GatewayTurnContext {
+  const normalizedText = context.activity.type === "callback_action" ? "" : context.activity.text.trim();
+  const riskFlags = context.riskFlags
+    ?? context.activity.riskFlags
+    ?? { secretLikeInput: normalizedText ? detectSecrets(normalizedText).matched : false };
   return {
-    connector: activity.connector,
-    chatId: activity.replyTarget.chatId,
-    chatType: activity.actor.chatType,
-    messageThreadId: activity.replyTarget.messageThreadId,
-    userId: activity.actor.userId,
-    username: activity.actor.username,
-    displayName: activity.actor.displayName
+    ...context,
+    normalizedText,
+    riskFlags,
+    pipelineStage: "normalize_turn",
+    activity: {
+      ...context.activity,
+      riskFlags
+    }
   };
 }
 
-export async function handleGatewayMessage(options: GatewayMessageOptions): Promise<GatewayMessageResult> {
+async function handleGatewayMessage(options: GatewayMessageOptions): Promise<GatewayMessageResult> {
   const now = options.now ?? (() => Date.now());
   const input = options.input.trim();
   let state: GatewayChatState = {
@@ -220,38 +246,38 @@ export async function handleGatewayMessage(options: GatewayMessageOptions): Prom
     providerId: options.state.providerId ?? options.providerId
   };
   if (!input) {
-    return done("Send /help for available commands.", state);
+    return done("Send /help for available commands.", state, "classify_interaction", options.riskFlags);
   }
   const gatewayAuth = gatewayAuthBlockReason(options, input);
   if (gatewayAuth) {
-    return done(gatewayAuth.output, gatewayAuth.state);
+    return done(gatewayAuth.output, gatewayAuth.state, "auth_gate", options.riskFlags);
   }
   const gatewayRole = resolveGatewayRoleForOptions(options, input);
   const authedOptions = gatewayRole ? { ...options, gatewayRole } : options;
   const staleSession = await clearMissingActiveSession(options.workspaceRoot, state);
   state = staleSession.state;
   if (staleSession.cleared && !input.startsWith("/") && !input.startsWith("#")) {
-    return done(formatMissingActiveSession(staleSession.sessionId), state);
+    return done(formatMissingActiveSession(staleSession.sessionId), state, "classify_interaction", options.riskFlags);
   }
   if (input.startsWith("/")) {
-    return handleSlashCommand({ ...authedOptions, input, state, now });
+    return handleSlashCommand({ ...authedOptions, input, state, now, pipelineStage: "dispatch_foreground" });
   }
   if (input.startsWith("#")) {
-    return handleHashCommand({ ...authedOptions, input, state, now });
+    return handleHashCommand({ ...authedOptions, input, state, now, pipelineStage: "dispatch_foreground" });
   }
   if (/^cosia\s+tool\s+grow(?:\s|$)/i.test(input)) {
-    return done(formatTelegramCliToolGrowGuidance(input), state);
+    return done(formatTelegramCliToolGrowGuidance(input), state, "classify_interaction", options.riskFlags);
   }
   if (!state.activeSessionId) {
-    return done("No active session. Use /sessions, /use <session-id>, or /new <goal>.", state);
+    return done("No active session. Use /sessions, /use <session-id>, or /new <goal>.", state, "classify_interaction", options.riskFlags);
   }
   if (state.pendingCommand && looksLikePlainApproval(input)) {
     if (isPendingExpired(state.pendingCommand, now)) {
-      return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...state, pendingCommand: undefined }));
+      return done("[EXPIRED] Pending command expired after 5 minutes. Please run the command again to refresh the preview.", touch({ ...state, pendingCommand: undefined }), "dispatch_foreground", options.riskFlags);
     }
-    return done(formatPlainApprovalNeedsApply(state.pendingCommand), state);
+    return done(formatPlainApprovalNeedsApply(state.pendingCommand), state, "dispatch_foreground", options.riskFlags);
   }
-  return runGatewaySessionMessage({ ...authedOptions, input, state, now });
+  return runGatewaySessionMessage({ ...authedOptions, input, state, now, pipelineStage: "enqueue_or_run_session_turn" });
 }
 
 async function runGatewaySessionMessage(options: GatewayMessageOptions & {
@@ -271,12 +297,16 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
       prompt: input,
       providerId: state.providerId,
       sourceChannel: "gateway",
-      gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
+      gatewayActor: options.actor,
       gatewayRole: options.gatewayRole,
-      providerTimeoutAfterToolMs: options.source?.connector === "telegram" ? gatewayToolAssistedProviderTimeoutMs : undefined,
-      runDeadlineMs: options.source?.connector === "telegram" ? gatewayRunJobDeadlineMs : undefined,
+      providerTimeoutAfterToolMs: options.connector === "telegram"
+        ? (options.timeoutPolicy ?? defaultGatewayRunTimeoutPolicy).providerTimeoutAfterToolMs
+        : undefined,
+      runDeadlineMs: options.connector === "telegram"
+        ? (options.timeoutPolicy ?? defaultGatewayRunTimeoutPolicy).runDeadlineMs
+        : undefined,
       promptStaticBlocks: state.pendingToolGrowthRequest ? [pendingToolGrowthPromptBlock(state.pendingToolGrowthRequest)] : undefined,
-      forceOverwriteApproval: options.source?.connector === "telegram",
+      forceOverwriteApproval: options.connector === "telegram",
       stopAfterOverwriteApprovalRequired: true,
       stopAfterCodexAmendmentRequired: true,
       onOverwriteApprovalRequired: async (request) => {
@@ -326,10 +356,10 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
     throw error;
   }
   if (pendingCodexAmendment) {
-    return done(pendingCodexAmendment.preview, touch({ ...state, pendingCommand: pendingCodexAmendment }));
+    return done(pendingCodexAmendment.preview, touch({ ...state, pendingCommand: pendingCodexAmendment }), "render_result", options.riskFlags);
   }
   if (pendingOverwrite) {
-    return done(pendingOverwrite.preview, touch({ ...state, pendingCommand: pendingOverwrite }));
+    return done(pendingOverwrite.preview, touch({ ...state, pendingCommand: pendingOverwrite }), "render_result", options.riskFlags);
   }
   if (toolGrowthDecision && state.pendingToolGrowthRequest) {
     return handleToolGrowthDecisionAfterRun({
@@ -341,9 +371,9 @@ async function runGatewaySessionMessage(options: GatewayMessageOptions & {
     });
   }
   if (pendingToolGrowthRequest) {
-    return done(output, touch({ ...state, pendingToolGrowthRequest }));
+    return done(output, touch({ ...state, pendingToolGrowthRequest }), "render_result", options.riskFlags);
   }
-  return done(output, state);
+  return done(output, state, "render_result", options.riskFlags);
 }
 
 class GatewayRunPromoted extends Error {
@@ -355,11 +385,7 @@ class GatewayRunPromoted extends Error {
 export { formatGatewayHelp };
 
 function gatewayAuthBlockReason(options: GatewayMessageOptions, input: string): { output: string; state: GatewayChatState } | undefined {
-  const source = options.source;
-  if (!source?.connector) {
-    return undefined;
-  }
-  const actor = sourceToGatewayActor(source);
+  const actor = options.actor;
   const decision = authorizeGatewayInput(options.policy, actor, input);
   if (decision.allowed) {
     return undefined;
@@ -374,22 +400,8 @@ function gatewayAuthBlockReason(options: GatewayMessageOptions, input: string): 
 }
 
 function resolveGatewayRoleForOptions(options: GatewayMessageOptions, input: string): GatewayRole | undefined {
-  if (!options.source?.connector) {
-    return undefined;
-  }
-  const decision = authorizeGatewayInput(options.policy, sourceToGatewayActor(options.source), input);
+  const decision = authorizeGatewayInput(options.policy, options.actor, input);
   return decision.allowed ? decision.role : undefined;
-}
-
-function sourceToGatewayActor(source: GatewaySourceContext): GatewayActor {
-  return {
-    connector: source.connector ?? "telegram",
-    chatId: source.chatId,
-    chatType: source.chatType,
-    userId: source.userId,
-    username: source.username,
-    displayName: source.displayName ?? source.firstName
-  };
 }
 
 function isTelegramGroupType(chatType: string | undefined): boolean {
@@ -410,7 +422,7 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
     case "gateway.help":
       return done(formatGatewayHelp(), state);
     case "gateway.whoami":
-      return done(formatGatewayWhoami(options.source ?? { chatId: options.chatId, chatType: "private" }), state);
+      return done(formatGatewayWhoami(options.actor), state);
     case "gateway.status":
       return done(formatStatusReport(await getStatusReport(options.workspaceRoot, state.providerId ?? options.providerId), { compact: true }), state);
     case "gateway.sessions":
@@ -466,7 +478,7 @@ async function handleSlashCommand(options: GatewayMessageOptions & {
   }
 }
 
-export async function handleGatewayCallbackAction(options: GatewayMessageOptions & {
+async function dispatchGatewayCallbackAction(options: GatewayMessageOptions & {
   callback: GatewayCallbackActionInput;
   state: GatewayChatState;
   now: () => number;
@@ -495,7 +507,7 @@ export async function handleGatewayCallbackAction(options: GatewayMessageOptions
 
 async function handleGatewayJobsList(options: GatewayMessageOptions & { state: GatewayChatState }): Promise<GatewayMessageResult> {
   const jobs = await new RunJobLedger(options.workspaceRoot).list({
-    chatId: options.chatId,
+    chatId: options.replyTarget.chatId,
     sessionId: options.state.activeSessionId,
     includeTerminal: false
   });
@@ -876,8 +888,8 @@ export function isGatewayWhoamiInput(input: string): boolean {
   return isWhoamiInput(input);
 }
 
-export function formatGatewayWhoami(source: GatewaySourceContext): string {
-  return formatGatewayActorWhoami(sourceToGatewayActor(source));
+export function formatGatewayWhoami(actor: GatewayActor): string {
+  return formatGatewayActorWhoami(actor);
 }
 
 async function applyGatewayPending(options: GatewayMessageOptions & {
@@ -942,10 +954,10 @@ async function buildCatalogContext(options: GatewayMessageOptions & {
     reviewInbox: new ReviewInboxService(options.workspaceRoot),
     now: options.now,
     previewScope: {
-      chatId: options.chatId,
+      chatId: options.replyTarget.chatId,
       sessionId: session.id
     },
-    gatewayActor: sourceToGatewayActor(options.source ?? { chatId: options.chatId, chatType: "private" }),
+    gatewayActor: options.actor,
     gatewayRole: options.gatewayRole
   };
 }
@@ -957,8 +969,13 @@ function formatGatewaySessions(sessions: Awaited<ReturnType<SessionManager["list
     .join("\n");
 }
 
-function done(output: string, state: GatewayChatState): GatewayMessageResult {
-  return { output, state };
+function done(
+  output: string,
+  state: GatewayChatState,
+  stage: GatewayPipelineStage = "render_result",
+  riskFlags?: GatewayRiskFlags
+): GatewayMessageResult {
+  return { output, state, stage, riskFlags };
 }
 
 function touch(state: GatewayChatState): GatewayChatState {

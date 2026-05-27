@@ -70,6 +70,11 @@ import {
   detectSecrets,
   chunkTelegramMessage,
   handleGatewayActivity,
+  normalizeGatewayTurn,
+  appendGatewayDurableTurnEvent,
+  createGatewayTurnId,
+  loadPendingGatewayDurableTurns,
+  gatewayTurnQueuePath,
   gatewayProcessLockPath,
   sessionLockPath,
   withSessionLock,
@@ -170,7 +175,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.69.0");
+    expect(emptyReport.version).toBe("0.74.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -1503,6 +1508,112 @@ describe("status and listing", () => {
     expect(result.state).toEqual({ providerId: "mock" });
   });
 
+  it("normalizes Gateway turns with secret-like risk flags for durable storage decisions", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    const normalized = normalizeGatewayTurn({
+      workspaceRoot: root,
+      policy,
+      connectorDescriptor: {
+        id: "test",
+        displayName: "Test",
+        normalizeAddressedCommand: (text: string) => text.trim(),
+        formatBootstrapHints: () => [],
+        callbackNamespaces: {},
+        messageDefaults: {
+          messageChunkChars: 3500,
+          sendPacingMs: 0,
+          typingRefreshMs: 0
+        }
+      },
+      activity: {
+        type: "plain_message",
+        connector: "test",
+        text: "token=abcd1234",
+        actor: {
+          connector: "test",
+          chatId: "chat-1",
+          chatType: "private",
+          userId: "user-1"
+        },
+        replyTarget: {
+          connector: "test",
+          chatId: "chat-1"
+        }
+      },
+      actor: {
+        connector: "test",
+        chatId: "chat-1",
+        chatType: "private",
+        userId: "user-1"
+      },
+      chatState: { providerId: "mock" },
+      providerId: "mock",
+      owner: "test",
+      replyTarget: {
+        connector: "test",
+        chatId: "chat-1"
+      }
+    });
+
+    expect(normalized.pipelineStage).toBe("normalize_turn");
+    expect(normalized.riskFlags?.secretLikeInput).toBe(true);
+    expect(normalized.activity.riskFlags?.secretLikeInput).toBe(true);
+  });
+
+  it("stores only non-secret queued turns in the durable turn queue", async () => {
+    const root = await initializedWorkspace();
+    const turnId = createGatewayTurnId();
+    const activity = {
+      type: "plain_message" as const,
+      connector: "telegram",
+      text: "hello",
+      actor: {
+        connector: "telegram",
+        chatId: "123",
+        chatType: "private",
+        userId: "42"
+      },
+      replyTarget: {
+        connector: "telegram",
+        chatId: "123"
+      },
+      riskFlags: {
+        secretLikeInput: false
+      }
+    };
+
+    await appendGatewayDurableTurnEvent(root, {
+      turnId,
+      connector: "telegram",
+      sessionId: "session_test",
+      activity,
+      replyTarget: activity.replyTarget,
+      riskFlags: activity.riskFlags,
+      createdAt: "2026-05-27T00:00:00.000Z",
+      status: "queued"
+    });
+    const secretResult = await appendGatewayDurableTurnEvent(root, {
+      turnId: createGatewayTurnId(),
+      connector: "telegram",
+      sessionId: "session_secret",
+      activity: {
+        ...activity,
+        text: "api_key=sk-test-secret-secret",
+        riskFlags: { secretLikeInput: true }
+      },
+      replyTarget: activity.replyTarget,
+      riskFlags: { secretLikeInput: true },
+      createdAt: "2026-05-27T00:00:00.000Z",
+      status: "queued"
+    });
+
+    expect(secretResult).toEqual({ stored: false, reason: "secret_like" });
+    const pending = await loadPendingGatewayDurableTurns(root, { nowMs: Date.parse("2026-05-27T00:10:00.000Z") });
+    expect(pending.pending.map((turn) => turn.turnId)).toEqual([turnId]);
+    expect(await readFile(gatewayTurnQueuePath(root), "utf8")).toContain(turnId);
+  });
+
   it("keeps read-only Telegram tool calls in the foreground", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
@@ -1938,7 +2049,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.69.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.74.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, state, {
       update_id: 19,
@@ -1952,7 +2063,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.69.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.74.0");
     expect(sent.at(-1)?.options?.messageThreadId).toBe(777);
 
     const masterMentionPolicy = {
@@ -2337,7 +2448,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.69.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.74.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

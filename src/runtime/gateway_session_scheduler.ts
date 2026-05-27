@@ -1,7 +1,14 @@
+import type { GatewayActivity, GatewayReplyTarget, GatewayRiskFlags } from "./gateway_runtime.js";
+
 export type GatewaySessionTurn = {
+  turnId?: string;
   workspaceRoot: string;
   connector: string;
   sessionId: string;
+  activity?: GatewayActivity;
+  replyTarget?: GatewayReplyTarget;
+  riskFlags?: GatewayRiskFlags;
+  enqueuedAt?: string;
   run: () => Promise<void>;
 };
 
@@ -16,8 +23,8 @@ export type GatewaySessionEnqueueResult =
   | { accepted: false; reason: "queue_full"; pendingCount: number };
 
 export type GatewaySessionSchedulerSnapshot = {
-  running: Array<{ connector: string; sessionId: string; pendingTurns: number }>;
-  queued: Array<{ connector: string; sessionId: string; pendingTurns: number }>;
+  running: Array<{ connector: string; sessionId: string; pendingTurns: number; turnId?: string; enqueuedAt?: string }>;
+  queued: Array<{ connector: string; sessionId: string; pendingTurns: number; turnId?: string; enqueuedAt?: string }>;
   runningCount: number;
   queuedCount: number;
 };
@@ -49,7 +56,11 @@ export class GatewaySessionScheduler {
     if (queue.length >= this.maxPendingTurnsPerSession) {
       return { accepted: false, reason: "queue_full", pendingCount: queue.length };
     }
-    queue.push({ ...turn, key });
+    queue.push(Object.freeze({
+      ...turn,
+      enqueuedAt: turn.enqueuedAt ?? new Date().toISOString(),
+      key
+    }));
     this.queues.set(key, queue);
     queueMicrotask(() => this.drain());
     return { accepted: true, pendingAhead: queue.length - 1 };
@@ -61,7 +72,9 @@ export class GatewaySessionScheduler {
       .map((turn) => ({
         connector: turn.connector,
         sessionId: turn.sessionId,
-        pendingTurns: this.queues.get(turn.key)?.length ?? 0
+        pendingTurns: this.queues.get(turn.key)?.length ?? 0,
+        turnId: turn.turnId,
+        enqueuedAt: turn.enqueuedAt
       }));
     const queued = [...this.queues.entries()]
       .flatMap(([, queue]) => {
@@ -75,7 +88,9 @@ export class GatewaySessionScheduler {
         return [{
           connector: first.connector,
           sessionId: first.sessionId,
-          pendingTurns: queue.length
+          pendingTurns: queue.length,
+          turnId: first.turnId,
+          enqueuedAt: first.enqueuedAt
         }];
       });
     return {

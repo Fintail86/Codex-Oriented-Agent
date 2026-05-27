@@ -15,11 +15,12 @@ import { chunkTelegramMessage } from "./gateway_format.js";
 import {
   handleGatewayActivity,
   isGatewayWhoamiInput,
+  normalizeGatewayTurn,
   type GatewayActivity,
   type GatewayChatState,
   type GatewayMessageResult,
   type GatewayReplyTarget,
-  type GatewaySourceContext
+  type GatewayRiskFlags
 } from "./gateway_runtime.js";
 import { gatewayAuthSummary } from "./gateway_auth.js";
 import {
@@ -32,6 +33,14 @@ import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
 import { getGatewaySessionScheduler } from "./gateway_session_scheduler.js";
+import { appendGatewayTurnTiming, GatewayTurnTimer } from "./gateway_turn_timing.js";
+import {
+  appendGatewayDurableTurnEvent,
+  createGatewayTurnId,
+  loadPendingGatewayDurableTurns,
+  type GatewayDurableTurnSnapshot,
+  type GatewayDurableTurnWriteResult
+} from "./gateway_turn_queue.js";
 import {
   formatRunJobAccepted,
   RunJobLedger,
@@ -637,6 +646,16 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
     await new RunJobLedger(workspaceRoot).interruptActiveJobs("gateway_start_interrupted_previous_jobs");
     await appendTelegramLog(workspaceRoot, "start", { pid: process.pid });
     let state = await loadTelegramGatewayState(workspaceRoot);
+    await resumeDurableTelegramTurns({
+      workspaceRoot,
+      policy,
+      client,
+      state,
+      providerId,
+      owner: "telegram:durable-resume",
+      descriptor,
+      now: options.now
+    });
     let consecutiveFailures = 0;
     while (!shutdownRequested) {
       if (await shouldStop(options)) {
@@ -932,6 +951,10 @@ type EnqueueTelegramSessionTurnInput = {
   activity: GatewayActivity;
   replyTarget: GatewayReplyTarget;
   descriptor: GatewayConnectorDescriptor;
+  turnId?: string;
+  enqueuedAt?: string;
+  durableReplay?: boolean;
+  timer?: GatewayTurnTimer;
   now?: () => number;
 };
 
@@ -952,13 +975,28 @@ async function enqueueTelegramSessionTurn(input: EnqueueTelegramSessionTurnInput
   if (!sessionId) {
     return;
   }
+  const turnId = input.turnId ?? createGatewayTurnId();
+  const enqueuedAt = input.enqueuedAt ?? new Date().toISOString();
+  const normalizedActivity = normalizeTelegramGatewayActivity(input, sessionId);
+  const riskFlags = normalizedActivity.riskFlags ?? { secretLikeInput: true };
+  const timer = input.timer ?? new GatewayTurnTimer({ turnId, connector: normalizedActivity.connector, sessionId });
+  timer.markEnqueued();
   const scheduler = getGatewaySessionScheduler();
   const result = scheduler.enqueue({
+    turnId,
     workspaceRoot: input.workspaceRoot,
-    connector: input.activity.connector,
+    connector: normalizedActivity.connector,
     sessionId,
+    activity: normalizedActivity,
+    replyTarget: input.replyTarget,
+    riskFlags,
+    enqueuedAt,
     run: async () => runScheduledTelegramSessionTurn({
       ...input,
+      activity: normalizedActivity,
+      turnId,
+      enqueuedAt,
+      timer,
       sessionId
     })
   });
@@ -968,13 +1006,36 @@ async function enqueueTelegramSessionTurn(input: EnqueueTelegramSessionTurnInput
       formatTelegramSessionQueueBusy(),
       telegramThreadOptions(input.replyTarget.messageThreadId)
     );
+    return;
   }
+  const queuedWrite = appendGatewayDurableTurnEvent(input.workspaceRoot, {
+    turnId,
+    connector: normalizedActivity.connector,
+    sessionId,
+    activity: normalizedActivity,
+    replyTarget: input.replyTarget,
+    riskFlags,
+    createdAt: enqueuedAt,
+    status: "queued"
+  });
+  await reportDurableTurnWrite(input.workspaceRoot, await queuedWrite);
 }
 
-async function runScheduledTelegramSessionTurn(input: EnqueueTelegramSessionTurnInput & { sessionId: string }): Promise<void> {
+async function runScheduledTelegramSessionTurn(input: EnqueueTelegramSessionTurnInput & { sessionId: string; turnId: string; enqueuedAt: string; timer: GatewayTurnTimer }): Promise<void> {
   const outputSettings = telegramOutputSettings(input.policy, input.descriptor);
   const stopTyping = startTelegramTyping(input.client, input.chatId, outputSettings.typingRefreshMs, input.replyTarget.messageThreadId);
   let lastToolResultSummary: string | undefined;
+  input.timer.markRunStarted();
+  await reportDurableTurnWrite(input.workspaceRoot, await appendGatewayDurableTurnEvent(input.workspaceRoot, {
+    turnId: input.turnId,
+    connector: input.activity.connector,
+    sessionId: input.sessionId,
+    activity: input.activity,
+    replyTarget: input.replyTarget,
+    riskFlags: input.activity.riskFlags ?? { secretLikeInput: true },
+    createdAt: input.enqueuedAt,
+    status: "started"
+  }));
   try {
     const latest = await loadTelegramGatewayState(input.workspaceRoot);
     const latestChatState = latest.chats[input.chatId] ?? input.state.chats[input.chatId] ?? input.chatState;
@@ -995,6 +1056,7 @@ async function runScheduledTelegramSessionTurn(input: EnqueueTelegramSessionTurn
       replyTarget: input.replyTarget,
       now: input.now,
       onRunProgress: (event) => {
+        input.timer.observeProgress(event);
         lastToolResultSummary = event.toolResultSummary ?? lastToolResultSummary;
       },
       promoteSessionRun: async (runInput, runStateAfterPromotion) => {
@@ -1018,19 +1080,129 @@ async function runScheduledTelegramSessionTurn(input: EnqueueTelegramSessionTurn
     });
     await persistTelegramChatState(input.workspaceRoot, input.state, input.chatId, result.state);
     if (result.output.trim()) {
+      const stopSendTiming = input.timer.markSendStarted();
       for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
         await input.client.sendMessage(input.chatId, chunk, telegramReplyOptions(input.activity, result.output, input.descriptor, input.replyTarget.messageThreadId));
       }
+      stopSendTiming();
     }
+    await reportDurableTurnWrite(input.workspaceRoot, await appendGatewayDurableTurnEvent(input.workspaceRoot, {
+      turnId: input.turnId,
+      connector: input.activity.connector,
+      sessionId: input.sessionId,
+      activity: input.activity,
+      replyTarget: input.replyTarget,
+      riskFlags: input.activity.riskFlags ?? { secretLikeInput: true },
+      createdAt: input.enqueuedAt,
+      status: "completed"
+    }));
   } catch (error) {
     await sendForegroundGatewayFailure(input.client, input.chatId, input.policy, input.descriptor, error, lastToolResultSummary, input.replyTarget.messageThreadId);
+    await reportDurableTurnWrite(input.workspaceRoot, await appendGatewayDurableTurnEvent(input.workspaceRoot, {
+      turnId: input.turnId,
+      connector: input.activity.connector,
+      sessionId: input.sessionId,
+      activity: input.activity,
+      replyTarget: input.replyTarget,
+      riskFlags: input.activity.riskFlags ?? { secretLikeInput: true },
+      createdAt: input.enqueuedAt,
+      status: "failed",
+      errorSummary: (error as Error).message
+    }));
   } finally {
+    await appendGatewayTurnTiming(input.workspaceRoot, input.timer.summary());
     stopTyping();
   }
 }
 
 function formatTelegramSessionQueueBusy(): string {
   return "이 세션에 대기 중인 메시지가 너무 많아. 앞선 응답이 끝난 뒤 다시 보내줘.";
+}
+
+function normalizeTelegramGatewayActivity(input: EnqueueTelegramSessionTurnInput, sessionId: string): GatewayActivity {
+  return normalizeGatewayTurn({
+    workspaceRoot: input.workspaceRoot,
+    policy: input.policy,
+    connectorDescriptor: input.descriptor,
+    activity: input.activity,
+    actor: input.activity.actor,
+    chatState: input.chatState,
+    providerId: input.providerId,
+    owner: input.owner,
+    replyTarget: input.replyTarget,
+    now: input.now
+  }).activity;
+}
+
+async function reportDurableTurnWrite(workspaceRoot: string, result: GatewayDurableTurnWriteResult): Promise<void> {
+  if (result.stored || result.reason === "secret_like" || result.reason === "missing_risk_flags") {
+    return;
+  }
+  await appendTelegramLog(workspaceRoot, "turn_queue_write_failed", {
+    reason: result.reason,
+    error: result.errorSummary
+  });
+}
+
+async function resumeDurableTelegramTurns(input: {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  state: TelegramGatewayState;
+  providerId: string;
+  owner: string;
+  descriptor: GatewayConnectorDescriptor;
+  now?: () => number;
+}): Promise<void> {
+  const loaded = await loadPendingGatewayDurableTurns(input.workspaceRoot, { nowMs: input.now?.() });
+  for (const stale of loaded.stale) {
+    await reportDurableTurnWrite(input.workspaceRoot, await appendGatewayDurableTurnEvent(input.workspaceRoot, {
+      ...stale,
+      status: "stale"
+    }));
+  }
+  for (const turn of loaded.pending) {
+    await enqueueDurableTelegramTurn(input, turn);
+  }
+}
+
+async function enqueueDurableTelegramTurn(input: {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  state: TelegramGatewayState;
+  providerId: string;
+  owner: string;
+  descriptor: GatewayConnectorDescriptor;
+  now?: () => number;
+}, turn: GatewayDurableTurnSnapshot): Promise<void> {
+  const chatId = turn.replyTarget.chatId;
+  if (!chatId || turn.riskFlags.secretLikeInput) {
+    return;
+  }
+  const chatState = {
+    ...(input.state.chats[chatId] ?? {}),
+    providerId: input.state.chats[chatId]?.providerId ?? input.providerId,
+    activeSessionId: turn.sessionId
+  };
+  await enqueueTelegramSessionTurn({
+    workspaceRoot: input.workspaceRoot,
+    policy: input.policy,
+    client: input.client,
+    chatId,
+    input: turn.activity.type === "callback_action" ? "" : turn.activity.text,
+    state: input.state,
+    chatState,
+    providerId: chatState.providerId ?? input.providerId,
+    owner: input.owner,
+    activity: turn.activity,
+    replyTarget: turn.replyTarget,
+    descriptor: input.descriptor,
+    turnId: turn.turnId,
+    enqueuedAt: turn.createdAt,
+    durableReplay: true,
+    now: input.now
+  });
 }
 
 type PromoteTelegramRunJobInput = {
@@ -1150,16 +1322,14 @@ async function runTelegramJob(options: {
   });
   try {
     const providerId = options.job.providerId ?? options.fallbackProviderId;
-    const source: GatewaySourceContext = {
-      connector: "telegram",
+    const activity = telegramActivityFromStoredSource(options.job.request, {
       chatId,
       chatType: options.job.source.chatType ?? "private",
       messageThreadId: options.job.source.messageThreadId,
       userId: options.job.source.userId,
       username: options.job.source.username,
-      firstName: options.job.source.firstName
-    };
-    const activity = gatewayActivityFromSource("plain_message", source, options.job.request);
+      displayName: options.job.source.firstName
+    });
     const chatState = latestTelegramChatState(options.state, options.job);
     const result = await handleGatewayActivity({
       workspaceRoot: options.workspaceRoot,
@@ -1709,13 +1879,19 @@ export function telegramActivityFromMessage(
   text: string,
   sourceUpdateId?: number | string
 ): GatewayActivity {
-  const source = telegramSourceFromMessage(message);
   const type = isGatewayWhoamiInput(text)
     ? "whoami"
     : text.trim().startsWith("/")
       ? "slash_command"
       : "plain_message";
-  return gatewayActivityFromSource(type, source, text, sourceUpdateId);
+  return {
+    type,
+    connector: "telegram",
+    sourceUpdateId,
+    actor: telegramActorFromMessage(message),
+    replyTarget: telegramReplyTargetFromMessage(message),
+    text
+  };
 }
 
 export function telegramActivityFromCallback(
@@ -1723,89 +1899,69 @@ export function telegramActivityFromCallback(
   sourceUpdateId?: number | string
 ): GatewayActivity {
   return {
-    ...gatewayActivityFromSource("callback_action", telegramSourceFromCallback(callback), undefined, sourceUpdateId),
     type: "callback_action",
+    connector: "telegram",
+    sourceUpdateId,
+    actor: telegramActorFromCallback(callback),
+    replyTarget: {
+      connector: "telegram",
+      chatId: callback.message?.chat.id !== undefined ? String(callback.message.chat.id) : undefined,
+      messageThreadId: callback.message?.message_thread_id
+    },
     callbackData: callback.data
   };
 }
 
-function gatewayActivityFromSource(
-  type: "plain_message" | "slash_command" | "whoami",
-  source: GatewaySourceContext,
+function telegramActivityFromStoredSource(
   text: string,
-  sourceUpdateId?: number | string
-): GatewayActivity;
-function gatewayActivityFromSource(
-  type: "callback_action",
-  source: GatewaySourceContext,
-  text?: undefined,
-  sourceUpdateId?: number | string
-): GatewayActivity;
-function gatewayActivityFromSource(
-  type: "plain_message" | "slash_command" | "whoami" | "callback_action",
-  source: GatewaySourceContext,
-  text?: string,
-  sourceUpdateId?: number | string
-): GatewayActivity {
-  const actor = gatewayActorFromSource(source);
-  const replyTarget: GatewayReplyTarget = {
-    connector: source.connector ?? "telegram",
-    chatId: source.chatId,
-    messageThreadId: source.messageThreadId
-  };
-  if (type === "callback_action") {
-    return {
-      type,
-      connector: source.connector ?? "telegram",
-      sourceUpdateId,
-      actor,
-      replyTarget
-    };
+  source: {
+    chatId?: string;
+    chatType?: string;
+    messageThreadId?: number | string;
+    userId?: string;
+    username?: string;
+    displayName?: string;
   }
+): GatewayActivity {
   return {
-    type,
-    connector: source.connector ?? "telegram",
-    sourceUpdateId,
-    actor,
-    replyTarget,
-    text: text ?? ""
+    type: "plain_message",
+    connector: "telegram",
+    actor: {
+      connector: "telegram",
+      chatId: source.chatId,
+      chatType: source.chatType,
+      userId: source.userId,
+      username: source.username,
+      displayName: source.displayName
+    },
+    replyTarget: {
+      connector: "telegram",
+      chatId: source.chatId,
+      messageThreadId: source.messageThreadId
+    },
+    text
   };
 }
 
-function telegramSourceFromMessage(message: NonNullable<TelegramUpdate["message"]>): GatewaySourceContext {
+function telegramActorFromMessage(message: NonNullable<TelegramUpdate["message"]>) {
   return {
     connector: "telegram",
     chatId: String(message.chat.id),
     chatType: message.chat.type ?? "private",
-    messageThreadId: message.message_thread_id,
     userId: message.from?.id !== undefined ? String(message.from.id) : undefined,
     username: message.from?.username,
-    firstName: message.from?.first_name,
     displayName: message.from?.first_name
   };
 }
 
-function telegramSourceFromCallback(callback: NonNullable<TelegramUpdate["callback_query"]>): GatewaySourceContext {
+function telegramActorFromCallback(callback: NonNullable<TelegramUpdate["callback_query"]>) {
   return {
     connector: "telegram",
     chatId: callback.message?.chat.id !== undefined ? String(callback.message.chat.id) : undefined,
     chatType: callback.message?.chat.type ?? "private",
-    messageThreadId: callback.message?.message_thread_id,
     userId: callback.from?.id !== undefined ? String(callback.from.id) : undefined,
     username: callback.from?.username,
-    firstName: callback.from?.first_name,
     displayName: callback.from?.first_name
-  };
-}
-
-function gatewayActorFromSource(source: GatewaySourceContext) {
-  return {
-    connector: source.connector ?? "telegram",
-    chatId: source.chatId,
-    chatType: source.chatType,
-    userId: source.userId,
-    username: source.username,
-    displayName: source.displayName ?? source.firstName
   };
 }
 

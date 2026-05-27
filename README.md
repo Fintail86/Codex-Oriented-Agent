@@ -1,4 +1,4 @@
-# COSIA v0.69.0
+# COSIA v0.74.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.69.0 adds a connector-neutral Gateway Activity / TurnContext boundary between Telegram raw updates and Gateway core handling.
+v0.74.0 completes the Gateway follow-up refactor with source-context cleanup, fixed pipeline stages, hardened scheduling, timing diagnostics, and queued-turn resume.
 
 ## Requirements
 
@@ -747,6 +747,11 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.74.0: Gateway queued session turns can resume after restart when safely persisted without secret-like content.
+- v0.73.0: Gateway turn timing diagnostics and centralized timeout policy are added without changing user-facing status output.
+- v0.72.0: Gateway scheduled turns become immutable connector-neutral snapshots with reply target and risk flags preserved.
+- v0.71.0: Gateway Activity handling is split into fixed pipeline stages with early auth/classification short-circuiting.
+- v0.70.0: GatewaySourceContext is removed from the Gateway core path in favor of Activity / TurnContext fields.
 - v0.69.0: Gateway raw Telegram updates are normalized into connector-neutral Activity / TurnContext objects before core handling.
 - v0.68.0: Gateway session runs are scheduled per session so different gateway sessions can respond concurrently.
 - v0.67.0: Command lookup now translates Korean/English aliases into canonical English tags before selecting catalog candidates.
