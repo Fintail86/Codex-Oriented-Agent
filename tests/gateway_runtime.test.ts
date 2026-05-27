@@ -69,6 +69,7 @@ import {
   classifyMemoryCandidate,
   detectSecrets,
   chunkTelegramMessage,
+  handleGatewayActivity,
   gatewayProcessLockPath,
   sessionLockPath,
   withSessionLock,
@@ -113,6 +114,8 @@ import {
   resetTelegramGatewayState,
   saveTelegramGatewayState,
   startTelegramGateway,
+  telegramActivityFromCallback,
+  telegramActivityFromMessage,
   loadPrivateSecrets,
   savePrivateSecrets,
   formatSupportedProviders,
@@ -167,7 +170,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.68.0");
+    expect(emptyReport.version).toBe("0.69.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -1380,6 +1383,126 @@ describe("status and listing", () => {
     expect(chunks[1]).toContain("[continued 2/");
   });
 
+  it("normalizes Telegram messages and callbacks into Gateway activities", () => {
+    const slash = telegramActivityFromMessage({
+      chat: { id: -100123, type: "supergroup" },
+      from: { id: 42, username: "fox", first_name: "Fox" },
+      message_thread_id: 777,
+      text: "/status@Kumi_coais_bot"
+    }, "/status", 11);
+    expect(slash).toMatchObject({
+      type: "slash_command",
+      connector: "telegram",
+      sourceUpdateId: 11,
+      text: "/status",
+      actor: {
+        connector: "telegram",
+        chatId: "-100123",
+        chatType: "supergroup",
+        userId: "42",
+        username: "fox",
+        displayName: "Fox"
+      },
+      replyTarget: {
+        connector: "telegram",
+        chatId: "-100123",
+        messageThreadId: 777
+      }
+    });
+
+    const plain = telegramActivityFromMessage({
+      chat: { id: 123, type: "private" },
+      from: { id: 42 },
+      text: "쿠미?"
+    }, "쿠미?", 12);
+    expect(plain.type).toBe("plain_message");
+    expect(plain.replyTarget).toMatchObject({ connector: "telegram", chatId: "123" });
+
+    const whoami = telegramActivityFromMessage({
+      chat: { id: 123, type: "private" },
+      from: { id: 42 },
+      text: "/whoami"
+    }, "/whoami", 13);
+    expect(whoami.type).toBe("whoami");
+
+    const callback = telegramActivityFromCallback({
+      id: "cb1",
+      from: { id: 42, username: "fox" },
+      message: {
+        chat: { id: -100123, type: "supergroup" },
+        message_thread_id: 777
+      },
+      data: "review:show:eeb6b7ef"
+    }, 14);
+    expect(callback).toMatchObject({
+      type: "callback_action",
+      callbackData: "review:show:eeb6b7ef",
+      replyTarget: {
+        connector: "telegram",
+        chatId: "-100123",
+        messageThreadId: 777
+      }
+    });
+  });
+
+  it("handles GatewayActivity in core without a raw Telegram update", async () => {
+    const root = await initializedWorkspace();
+    const policy = await new PolicyManager(root).loadPolicy();
+    const result = await handleGatewayActivity({
+      workspaceRoot: root,
+      policy,
+      connectorDescriptor: {
+        id: "test",
+        displayName: "Test",
+        normalizeAddressedCommand: (text: string) => text.trim(),
+        formatBootstrapHints: () => [],
+        callbackNamespaces: {},
+        messageDefaults: {
+          messageChunkChars: 3500,
+          sendPacingMs: 0,
+          typingRefreshMs: 0
+        }
+      },
+      activity: {
+        type: "whoami",
+        connector: "test",
+        text: "/whoami",
+        actor: {
+          connector: "test",
+          chatId: "chat-1",
+          chatType: "private",
+          userId: "user-1",
+          username: "fox",
+          displayName: "Fox"
+        },
+        replyTarget: {
+          connector: "test",
+          chatId: "chat-1"
+        }
+      },
+      actor: {
+        connector: "test",
+        chatId: "chat-1",
+        chatType: "private",
+        userId: "user-1",
+        username: "fox",
+        displayName: "Fox"
+      },
+      chatState: { providerId: "mock" },
+      providerId: "mock",
+      owner: "test",
+      replyTarget: {
+        connector: "test",
+        chatId: "chat-1"
+      }
+    });
+
+    expect(result.output).toContain("Gateway identity");
+    expect(result.output).toContain("Connector: test");
+    expect(result.output).toContain("Chat id: chat-1");
+    expect(result.state).toEqual({ providerId: "mock" });
+  });
+
   it("keeps read-only Telegram tool calls in the foreground", async () => {
     const root = await initializedWorkspace();
     const sessions = new SessionManager(root);
@@ -1815,7 +1938,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.68.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.69.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, state, {
       update_id: 19,
@@ -1829,7 +1952,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.68.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.69.0");
     expect(sent.at(-1)?.options?.messageThreadId).toBe(777);
 
     const masterMentionPolicy = {
@@ -2214,7 +2337,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.68.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.69.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

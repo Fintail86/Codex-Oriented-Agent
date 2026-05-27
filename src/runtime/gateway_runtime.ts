@@ -1,6 +1,7 @@
 import { AgentManager } from "./agent_manager.js";
 import {
   authorizeGatewayInput,
+  authorizeGatewayAccess,
   formatGatewayAuthBlocked,
   formatGatewayWhoami as formatGatewayActorWhoami,
   isWhoamiInput,
@@ -30,6 +31,7 @@ import {
   formatHashCommandRemovedNotice,
   formatUnknownCallbackNotice
 } from "./gateway_message_renderer.js";
+import { parseGatewayCallbackData, type GatewayConnectorDescriptor } from "./gateway_connector_descriptor.js";
 import { runSession } from "./runner.js";
 import { SessionManager } from "./session_manager.js";
 import { withSessionLock } from "./gateway_locks.js";
@@ -54,6 +56,11 @@ import type { SessionMetadata, ToolGrowthDecision, ToolGrowthRequest } from "./t
 const gatewayToolAssistedProviderTimeoutMs = 300_000;
 const gatewayRunJobDeadlineMs = 420_000;
 
+/**
+ * @deprecated v0.69 introduces GatewayActivity/GatewayTurnContext. Keep this
+ * bridge for older handlers until the v0.70 cleanup removes source-shaped
+ * call sites.
+ */
 export type GatewaySourceContext = {
   connector?: string;
   chatId?: string;
@@ -64,6 +71,29 @@ export type GatewaySourceContext = {
   firstName?: string;
   displayName?: string;
 };
+
+export type GatewayReplyTarget = {
+  connector: string;
+  chatId?: string;
+  messageThreadId?: number | string;
+};
+
+type GatewayActivityBase = {
+  connector: string;
+  sourceUpdateId?: number | string;
+  actor: GatewayActor;
+  replyTarget: GatewayReplyTarget;
+};
+
+export type GatewayActivity =
+  | (GatewayActivityBase & {
+    type: "plain_message" | "slash_command" | "whoami";
+    text: string;
+  })
+  | (GatewayActivityBase & {
+    type: "callback_action";
+    callbackData?: string;
+  });
 
 export type GatewayChatState = {
   activeSessionId?: string;
@@ -93,6 +123,26 @@ export type GatewayMessageOptions = {
   gatewayRole?: GatewayRole;
 };
 
+export type GatewayTurnContext = {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  connectorDescriptor: GatewayConnectorDescriptor;
+  activity: GatewayActivity;
+  actor: GatewayActor;
+  role?: GatewayRole;
+  chatState: GatewayChatState;
+  providerId: string;
+  owner: string;
+  replyTarget: GatewayReplyTarget;
+  now?: () => number;
+  onRunProgress?: (event: RunProgressEvent) => Promise<void> | void;
+  /**
+   * Preserves the existing explicit background-worthy path when a foreground
+   * run selects shell/write/generated-tool work. It is not a generic job UX hook.
+   */
+  promoteSessionRun?: (input: string, state: GatewayChatState) => Promise<GatewayMessageResult>;
+};
+
 export type GatewayMessageResult = {
   output: string;
   state: GatewayChatState;
@@ -103,6 +153,64 @@ export type GatewayCallbackActionInput = {
   action: string;
   value?: string;
 };
+
+export async function handleGatewayActivity(context: GatewayTurnContext): Promise<GatewayMessageResult> {
+  const now = context.now ?? (() => Date.now());
+  if (context.activity.type === "whoami") {
+    return done(formatGatewayActorWhoami(context.actor), context.chatState);
+  }
+  const source = gatewaySourceFromActivity(context.activity);
+  const baseOptions: GatewayMessageOptions = {
+    workspaceRoot: context.workspaceRoot,
+    input: context.activity.type === "callback_action" ? "" : context.activity.text,
+    state: context.chatState,
+    policy: context.policy,
+    providerId: context.chatState.providerId ?? context.providerId,
+    owner: context.owner,
+    chatId: context.replyTarget.chatId,
+    source,
+    now,
+    onRunProgress: context.onRunProgress,
+    promoteSessionRun: context.promoteSessionRun,
+    gatewayRole: context.role
+  };
+  if (context.activity.type === "callback_action") {
+    const parsedCallback = parseGatewayCallbackData(context.connectorDescriptor, context.activity.callbackData ?? "");
+    if (!parsedCallback) {
+      return done(formatUnknownCallbackNotice(), context.chatState);
+    }
+    const access = authorizeGatewayAccess(
+      context.policy,
+      context.actor,
+      parsedCallback.definition.minRole,
+      parsedCallback.definition.safety !== "read_only"
+    );
+    if (!access.allowed) {
+      return done(formatGatewayAuthBlocked(context.actor, access), context.chatState);
+    }
+    return handleGatewayCallbackAction({
+      ...baseOptions,
+      input: "",
+      callback: parsedCallback,
+      state: context.chatState,
+      now,
+      gatewayRole: access.role
+    });
+  }
+  return handleGatewayMessage(baseOptions);
+}
+
+export function gatewaySourceFromActivity(activity: GatewayActivity): GatewaySourceContext {
+  return {
+    connector: activity.connector,
+    chatId: activity.replyTarget.chatId,
+    chatType: activity.actor.chatType,
+    messageThreadId: activity.replyTarget.messageThreadId,
+    userId: activity.actor.userId,
+    username: activity.actor.username,
+    displayName: activity.actor.displayName
+  };
+}
 
 export async function handleGatewayMessage(options: GatewayMessageOptions): Promise<GatewayMessageResult> {
   const now = options.now ?? (() => Date.now());

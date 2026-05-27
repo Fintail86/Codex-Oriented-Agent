@@ -30,6 +30,7 @@ import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
 import { classifyMemoryCandidate, detectSecrets } from "../src/runtime/risk_classifier.js";
 import { chunkTelegramMessage } from "../src/runtime/gateway_format.js";
+import { handleGatewayActivity } from "../src/runtime/gateway_runtime.js";
 import { gatewayProcessLockPath, sessionLockPath, withSessionLock } from "../src/runtime/gateway_locks.js";
 import { formatGatewayStatus, gatewayStopRequestPath, restartGateway, startGateway, stopGateway, unlockStaleGateway, writeGatewayStopRequest } from "../src/runtime/gateway_supervisor.js";
 import { pathExists } from "../src/runtime/fs_utils.js";
@@ -58,7 +59,9 @@ import {
   repairTelegramGatewayState,
   resetTelegramGatewayState,
   saveTelegramGatewayState,
-  startTelegramGateway
+  startTelegramGateway,
+  telegramActivityFromCallback,
+  telegramActivityFromMessage
 } from "../src/runtime/telegram_gateway.js";
 import { loadPrivateSecrets, savePrivateSecrets } from "../src/runtime/private_config.js";
 import { formatSupportedProviders, oauthHandlerForProvider, validateProviderProfileAddOptions } from "../src/runtime/provider_onboarding.js";
@@ -252,6 +255,7 @@ export {
   classifyMemoryCandidate,
   detectSecrets,
   chunkTelegramMessage,
+  handleGatewayActivity,
   gatewayProcessLockPath,
   sessionLockPath,
   withSessionLock,
@@ -296,6 +300,8 @@ export {
   resetTelegramGatewayState,
   saveTelegramGatewayState,
   startTelegramGateway,
+  telegramActivityFromCallback,
+  telegramActivityFromMessage,
   loadPrivateSecrets,
   savePrivateSecrets,
   formatSupportedProviders,
