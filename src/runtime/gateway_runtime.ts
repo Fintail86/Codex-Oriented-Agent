@@ -58,6 +58,7 @@ export type GatewaySourceContext = {
   connector?: string;
   chatId?: string;
   chatType?: string;
+  messageThreadId?: number | string;
   userId?: string;
   username?: string;
   firstName?: string;

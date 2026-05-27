@@ -1,4 +1,5 @@
 import { isToolId } from "./tool_catalog.js";
+import { translateCommandTags } from "./command_tag_translator.js";
 
 export type RuntimeCommandSafety =
   | "read_only"
@@ -200,7 +201,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Show COSIA gateway process and connector status.",
     ...readOnlyModelSurface,
-    tags: ["gateway", "게이트웨이", "status", "상태", "health"],
+    tags: ["gateway", "status", "health"],
     modelHint: "Use when the user asks whether COSIA Gateway is running or wants connector/process status.",
     argsSchema: {},
     examples: ["/status", "cosia gateway status"],
@@ -216,7 +217,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Show COSIA workspace status and recommended next actions.",
     ...readOnlyModelSurface,
-    tags: ["workspace", "status", "상태", "health", "진단"],
+    tags: ["workspace", "status", "health", "doctor", "runtime", "version"],
     modelHint: "Use for general COSIA workspace health/status questions.",
     argsSchema: {},
     examples: ["/status", "cosia status"],
@@ -232,7 +233,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Show pending memory and skill review items.",
     ...readOnlyModelSurface,
-    tags: ["review", "리뷰", "memory", "메모리", "skill", "스킬", "pending", "승격", "후보"],
+    tags: ["review", "memory", "skill", "pending", "candidate"],
     modelHint: "Use when the user asks about memory promotion/review candidates or pending review items.",
     modelToolHint: {
       toolId: "review_inbox_read",
@@ -253,7 +254,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Show pending memory review items.",
     ...readOnlyModelSurface,
-    tags: ["review", "리뷰", "memory", "메모리", "pending", "승격", "후보"],
+    tags: ["review", "memory", "pending", "candidate"],
     modelHint: "Use for memory-specific review or promotion-candidate questions.",
     modelToolHint: {
       toolId: "review_inbox_read",
@@ -268,7 +269,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Show pending skill review items.",
     ...readOnlyModelSurface,
-    tags: ["review", "리뷰", "skill", "스킬", "pending", "후보"],
+    tags: ["review", "skill", "pending", "candidate"],
     modelToolHint: {
       toolId: "review_inbox_read",
       args: { filter: "skill" },
@@ -331,7 +332,7 @@ const runtimeCommandInputs: CommandInput[] = [
     description: "Promote one pending memory candidate into long-term memory.",
     ...userCommandOnly,
     requiresApproval: true,
-    tags: ["review", "memory", "메모리", "candidate", "후보", "promote", "승격", "승인", "approve", "mutation"],
+    tags: ["review", "memory", "candidate", "promote", "approve", "mutation"],
     argsSchema: { required: ["candidateId"] },
     examples: ["cosia memory candidate promote <candidate-id>"],
     triggers: {
@@ -410,7 +411,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Search active long-term memories.",
     ...readOnlyModelSurface,
-    tags: ["memory", "메모리", "기억", "search", "검색"],
+    tags: ["memory", "search"],
     modelHint: "Use when the user asks to search durable long-term memory.",
     argsSchema: { required: ["query"], optional: ["tier", "ownerId", "limit", "showScore"] },
     argEnums: { tier: ["core", "agent", "session"] },
@@ -427,7 +428,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "List sessions.",
     ...readOnlyModelSurface,
-    tags: ["session", "세션", "list", "목록"],
+    tags: ["session", "list"],
     modelHint: "Use when the user asks for available sessions.",
     argsSchema: {},
     examples: ["/sessions", "cosia session list"],
@@ -475,7 +476,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "Check the active provider and list configured providers.",
     ...readOnlyModelSurface,
-    tags: ["provider", "프로바이더", "model", "모델", "auth", "인증", "상태"],
+    tags: ["provider", "model", "auth", "status"],
     modelHint: "Use when the user asks which provider is configured or whether provider auth is healthy.",
     argsSchema: { optional: ["profileName"] },
     examples: ["cosia provider profile check"],
@@ -538,7 +539,7 @@ const runtimeCommandInputs: CommandInput[] = [
     safety: "read_only",
     description: "List global skills and current agent skill selection state.",
     ...readOnlyModelSurface,
-    tags: ["skill", "스킬", "list", "목록"],
+    tags: ["skill", "list"],
     modelHint: "Use when the user asks which skills are available.",
     argsSchema: {},
     examples: ["/skills list", "cosia skill list"],
@@ -627,65 +628,65 @@ const runtimeCommandInputs: CommandInput[] = [
       en: ["tool growth detail", "show tool growth routine"]
     }
   },
-  command({ commandId: "init", cliDisplay: "cosia init", argvPlan: argvPlan(["init"]), safety: "system_boundary", description: "Initialize COSIA runtime files in the workspace.", tags: ["init", "초기화", "workspace", "setup"], requiresApproval: true }),
-  command({ commandId: "start", cliDisplay: "cosia start", argvPlan: argvPlan(["start"]), safety: "dangerous", description: "Start the normal interactive COSIA entrypoint.", tags: ["start", "시작", "chat", "run"] }),
-  command({ commandId: "run", cliDisplay: "cosia run <prompt>", argvPlan: argvPlan(["run", "$prompt"]), safety: "dangerous", description: "Run a prompt through COSIA from the CLI.", tags: ["run", "실행", "prompt"], argsSchema: { required: ["prompt"] } }),
-  command({ commandId: "chat", cliDisplay: "cosia chat", argvPlan: argvPlan(["chat"]), safety: "dangerous", description: "Start local interactive chat.", tags: ["chat", "대화", "interactive"] }),
-  command({ commandId: "doctor.show", cliDisplay: "cosia doctor", argvPlan: argvPlan(["doctor"]), safety: "read_only", description: "Show workspace doctor diagnostics.", ...readOnlyModelSurface, tags: ["doctor", "진단", "health", "repair"] }),
-  command({ commandId: "doctor.repair", cliDisplay: "cosia doctor repair", argvPlan: argvPlan(["doctor", "repair"]), safety: "mutation", description: "Run deterministic workspace repairs.", tags: ["doctor", "repair", "복구"], requiresApproval: true }),
-  command({ commandId: "doctor.reset", cliDisplay: "cosia doctor reset [--state|--factory] --yes", argvPlan: argvPlan(["doctor", "reset"]), safety: "system_boundary", description: "Preview or apply COSIA reset.", tags: ["doctor", "reset", "초기화"], requiresApproval: true }),
-  command({ commandId: "pending.apply", cliDisplay: "cosia apply <id> --yes", argvPlan: argvPlan(["apply", "$id"]), safety: "mutation", description: "Apply a durable pending approval by id.", tags: ["pending", "approval", "apply", "적용"], argsSchema: { required: ["id"] }, requiresApproval: true }),
-  command({ commandId: "pending.cancel", cliDisplay: "cosia cancel <id> --reason <reason>", argvPlan: argvPlan(["cancel", "$id", "--reason", "$reason"]), safety: "mutation", description: "Cancel a durable pending approval by id.", tags: ["pending", "approval", "cancel", "취소"], argsSchema: { required: ["id", "reason"] }, requiresApproval: true }),
-  command({ commandId: "config.show", cliDisplay: "cosia config show", argvPlan: argvPlan(["config", "show"]), safety: "read_only", description: "Show runtime configuration.", ...readOnlyModelSurface, tags: ["config", "설정", "runtime"] }),
-  command({ commandId: "config.check", cliDisplay: "cosia config check", argvPlan: argvPlan(["config", "check"]), safety: "read_only", description: "Check runtime configuration schema and repair hints.", ...readOnlyModelSurface, tags: ["config", "설정", "check", "검사"] }),
+  command({ commandId: "init", cliDisplay: "cosia init", argvPlan: argvPlan(["init"]), safety: "system_boundary", description: "Initialize COSIA runtime files in the workspace.", tags: ["init", "workspace", "setup", "reset"], requiresApproval: true }),
+  command({ commandId: "start", cliDisplay: "cosia start", argvPlan: argvPlan(["start"]), safety: "dangerous", description: "Start the normal interactive COSIA entrypoint.", tags: ["start", "chat", "run"] }),
+  command({ commandId: "run", cliDisplay: "cosia run <prompt>", argvPlan: argvPlan(["run", "$prompt"]), safety: "dangerous", description: "Run a prompt through COSIA from the CLI.", tags: ["run", "prompt"], argsSchema: { required: ["prompt"] } }),
+  command({ commandId: "chat", cliDisplay: "cosia chat", argvPlan: argvPlan(["chat"]), safety: "dangerous", description: "Start local interactive chat.", tags: ["chat", "interactive"] }),
+  command({ commandId: "doctor.show", cliDisplay: "cosia doctor", argvPlan: argvPlan(["doctor"]), safety: "read_only", description: "Show workspace doctor diagnostics.", ...readOnlyModelSurface, tags: ["doctor", "health", "repair"] }),
+  command({ commandId: "doctor.repair", cliDisplay: "cosia doctor repair", argvPlan: argvPlan(["doctor", "repair"]), safety: "mutation", description: "Run deterministic workspace repairs.", tags: ["doctor", "repair"], requiresApproval: true }),
+  command({ commandId: "doctor.reset", cliDisplay: "cosia doctor reset [--state|--factory] --yes", argvPlan: argvPlan(["doctor", "reset"]), safety: "system_boundary", description: "Preview or apply COSIA reset.", tags: ["doctor", "reset"], requiresApproval: true }),
+  command({ commandId: "pending.apply", cliDisplay: "cosia apply <id> --yes", argvPlan: argvPlan(["apply", "$id"]), safety: "mutation", description: "Apply a durable pending approval by id.", tags: ["pending", "approval", "apply"], argsSchema: { required: ["id"] }, requiresApproval: true }),
+  command({ commandId: "pending.cancel", cliDisplay: "cosia cancel <id> --reason <reason>", argvPlan: argvPlan(["cancel", "$id", "--reason", "$reason"]), safety: "mutation", description: "Cancel a durable pending approval by id.", tags: ["pending", "approval", "cancel"], argsSchema: { required: ["id", "reason"] }, requiresApproval: true }),
+  command({ commandId: "config.show", cliDisplay: "cosia config show", argvPlan: argvPlan(["config", "show"]), safety: "read_only", description: "Show runtime configuration.", ...readOnlyModelSurface, tags: ["config", "runtime"] }),
+  command({ commandId: "config.check", cliDisplay: "cosia config check", argvPlan: argvPlan(["config", "check"]), safety: "read_only", description: "Check runtime configuration schema and repair hints.", ...readOnlyModelSurface, tags: ["config", "check"] }),
   command({ commandId: "config.migrate", cliDisplay: "cosia config migrate", argvPlan: argvPlan(["config", "migrate"]), safety: "system_boundary", description: "Migrate runtime configuration.", tags: ["config", "migrate", "migration"], requiresApproval: true }),
-  command({ commandId: "policy.show", cliDisplay: "cosia policy show", argvPlan: argvPlan(["policy", "show"]), safety: "read_only", description: "Show policy configuration.", ...readOnlyModelSurface, tags: ["policy", "정책", "codex"] }),
+  command({ commandId: "policy.show", cliDisplay: "cosia policy show", argvPlan: argvPlan(["policy", "show"]), safety: "read_only", description: "Show policy configuration.", ...readOnlyModelSurface, tags: ["policy", "codex"] }),
   command({ commandId: "policy.sync", cliDisplay: "cosia policy sync", argvPlan: argvPlan(["policy", "sync"]), safety: "system_boundary", description: "Sync generated policy Markdown mirror.", tags: ["policy", "sync", "mirror"], requiresApproval: true }),
-  command({ commandId: "policy.audit", cliDisplay: "cosia policy audit", argvPlan: argvPlan(["policy", "audit"]), safety: "read_only", description: "Show policy audit information.", ...readOnlyModelSurface, tags: ["policy", "audit", "감사"] }),
-  command({ commandId: "codex.show", cliDisplay: "cosia codex show [--path <path>]", argvPlan: argvPlan(["codex", "show", "--path", "$path?"]), safety: "read_only", description: "Show protected Codex law content.", ...readOnlyModelSurface, tags: ["codex", "법전", "law"], argsSchema: { optional: ["path"] } }),
-  command({ commandId: "codex.check", cliDisplay: "cosia codex check", argvPlan: argvPlan(["codex", "check"]), safety: "read_only", description: "Check protected Codex law files and pending amendments.", ...readOnlyModelSurface, tags: ["codex", "법전", "check", "검사"] }),
-  command({ commandId: "codex.amendment.list", cliDisplay: "cosia codex amendment list", argvPlan: argvPlan(["codex", "amendment", "list"]), safety: "read_only", description: "List Codex law amendments.", ...readOnlyModelSurface, tags: ["codex", "amendment", "개정", "pending"] }),
-  command({ commandId: "codex.amendment.show", cliDisplay: "cosia codex amendment show <id>", argvPlan: argvPlan(["codex", "amendment", "show", "$id"]), safety: "read_only", description: "Show one Codex law amendment.", ...readOnlyModelSurface, tags: ["codex", "amendment", "개정"], argsSchema: { required: ["id"] } }),
-  command({ commandId: "codex.amendment.propose", cliDisplay: "cosia codex amendment propose --path <path> --content <text> --reason <reason>", argvPlan: argvPlan(["codex", "amendment", "propose", "--path", "$path", "--content", "$content", "--reason", "$reason"]), safety: "system_boundary", description: "Propose a protected Codex law amendment.", tags: ["codex", "amendment", "개정", "propose"], argsSchema: { required: ["path", "content", "reason"] }, requiresApproval: true }),
-  command({ commandId: "codex.amendment.apply", cliDisplay: "cosia codex amendment apply <id> --yes", argvPlan: argvPlan(["codex", "amendment", "apply", "$id"]), safety: "system_boundary", description: "Apply a Codex law amendment.", tags: ["codex", "amendment", "apply", "적용"], argsSchema: { required: ["id"] }, requiresApproval: true }),
+  command({ commandId: "policy.audit", cliDisplay: "cosia policy audit", argvPlan: argvPlan(["policy", "audit"]), safety: "read_only", description: "Show policy audit information.", ...readOnlyModelSurface, tags: ["policy", "audit"] }),
+  command({ commandId: "codex.show", cliDisplay: "cosia codex show [--path <path>]", argvPlan: argvPlan(["codex", "show", "--path", "$path?"]), safety: "read_only", description: "Show protected Codex law content.", ...readOnlyModelSurface, tags: ["codex", "law"], argsSchema: { optional: ["path"] } }),
+  command({ commandId: "codex.check", cliDisplay: "cosia codex check", argvPlan: argvPlan(["codex", "check"]), safety: "read_only", description: "Check protected Codex law files and pending amendments.", ...readOnlyModelSurface, tags: ["codex", "check"] }),
+  command({ commandId: "codex.amendment.list", cliDisplay: "cosia codex amendment list", argvPlan: argvPlan(["codex", "amendment", "list"]), safety: "read_only", description: "List Codex law amendments.", ...readOnlyModelSurface, tags: ["codex", "amendment", "pending", "list"] }),
+  command({ commandId: "codex.amendment.show", cliDisplay: "cosia codex amendment show <id>", argvPlan: argvPlan(["codex", "amendment", "show", "$id"]), safety: "read_only", description: "Show one Codex law amendment.", ...readOnlyModelSurface, tags: ["codex", "amendment", "show"], argsSchema: { required: ["id"] } }),
+  command({ commandId: "codex.amendment.propose", cliDisplay: "cosia codex amendment propose --path <path> --content <text> --reason <reason>", argvPlan: argvPlan(["codex", "amendment", "propose", "--path", "$path", "--content", "$content", "--reason", "$reason"]), safety: "system_boundary", description: "Propose a protected Codex law amendment.", tags: ["codex", "amendment", "propose"], argsSchema: { required: ["path", "content", "reason"] }, requiresApproval: true }),
+  command({ commandId: "codex.amendment.apply", cliDisplay: "cosia codex amendment apply <id> --yes", argvPlan: argvPlan(["codex", "amendment", "apply", "$id"]), safety: "system_boundary", description: "Apply a Codex law amendment.", tags: ["codex", "amendment", "apply"], argsSchema: { required: ["id"] }, requiresApproval: true }),
   command({ commandId: "codex.amendment.reject", cliDisplay: "cosia codex amendment reject <id> --reason <reason>", argvPlan: argvPlan(["codex", "amendment", "reject", "$id", "--reason", "$reason"]), safety: "system_boundary", description: "Reject a Codex law amendment.", tags: ["codex", "amendment", "reject"], argsSchema: { required: ["id", "reason"] }, requiresApproval: true }),
   command({ commandId: "codex.amendment.cancel", cliDisplay: "cosia codex amendment cancel <id> --reason <reason>", argvPlan: argvPlan(["codex", "amendment", "cancel", "$id", "--reason", "$reason"]), safety: "system_boundary", description: "Cancel a Codex law amendment.", tags: ["codex", "amendment", "cancel"], argsSchema: { required: ["id", "reason"] }, requiresApproval: true }),
-  command({ commandId: "provider.list_supported", cliDisplay: "cosia provider list-supported", argvPlan: argvPlan(["provider", "list-supported"]), safety: "read_only", description: "List supported provider setup paths.", ...readOnlyModelSurface, tags: ["provider", "프로바이더", "지원", "setup"] }),
-  command({ commandId: "provider.setup", cliDisplay: "cosia provider setup", argvPlan: argvPlan(["provider", "setup"]), safety: "system_boundary", description: "Guided provider profile setup.", tags: ["provider", "setup", "profile", "프로바이더"], requiresApproval: true }),
-  command({ commandId: "provider.list", cliDisplay: "cosia provider list", argvPlan: argvPlan(["provider", "list"]), safety: "read_only", description: "List configured model provider records.", ...readOnlyModelSurface, tags: ["provider", "프로바이더", "list", "목록"] }),
-  command({ commandId: "provider.profile.add", cliDisplay: "cosia provider profile add <name> --provider <provider>", argvPlan: argvPlan(["provider", "profile", "add", "$name", "--provider", "$provider"]), safety: "system_boundary", description: "Add a provider profile.", tags: ["provider", "profile", "add", "프로바이더"], argsSchema: { required: ["name", "provider"] }, requiresApproval: true }),
+  command({ commandId: "provider.list_supported", cliDisplay: "cosia provider list-supported", argvPlan: argvPlan(["provider", "list-supported"]), safety: "read_only", description: "List supported provider setup paths.", ...readOnlyModelSurface, tags: ["provider", "support", "setup", "list"] }),
+  command({ commandId: "provider.setup", cliDisplay: "cosia provider setup", argvPlan: argvPlan(["provider", "setup"]), safety: "system_boundary", description: "Guided provider profile setup.", tags: ["provider", "setup", "profile"], requiresApproval: true }),
+  command({ commandId: "provider.list", cliDisplay: "cosia provider list", argvPlan: argvPlan(["provider", "list"]), safety: "read_only", description: "List configured model provider records.", ...readOnlyModelSurface, tags: ["provider", "list"] }),
+  command({ commandId: "provider.profile.add", cliDisplay: "cosia provider profile add <name> --provider <provider>", argvPlan: argvPlan(["provider", "profile", "add", "$name", "--provider", "$provider"]), safety: "system_boundary", description: "Add a provider profile.", tags: ["provider", "profile", "add"], argsSchema: { required: ["name", "provider"] }, requiresApproval: true }),
   command({ commandId: "provider.profile.use", cliDisplay: "cosia provider profile use <name>", argvPlan: argvPlan(["provider", "profile", "use", "$name"]), safety: "system_boundary", description: "Select the active provider profile.", tags: ["provider", "profile", "use", "active"], argsSchema: { required: ["name"] }, requiresApproval: true }),
-  command({ commandId: "provider.profile.list", cliDisplay: "cosia provider profile list", argvPlan: argvPlan(["provider", "profile", "list"]), safety: "read_only", description: "List provider profiles.", ...readOnlyModelSurface, tags: ["provider", "profile", "list", "프로바이더"] }),
+  command({ commandId: "provider.profile.list", cliDisplay: "cosia provider profile list", argvPlan: argvPlan(["provider", "profile", "list"]), safety: "read_only", description: "List provider profiles.", ...readOnlyModelSurface, tags: ["provider", "profile", "list"] }),
   command({ commandId: "provider.profile.show", cliDisplay: "cosia provider profile show <name>", argvPlan: argvPlan(["provider", "profile", "show", "$name"]), safety: "read_only", description: "Show a provider profile without secrets.", ...readOnlyModelSurface, tags: ["provider", "profile", "show"], argsSchema: { required: ["name"] } }),
-  command({ commandId: "provider.profile.check", cliDisplay: "cosia provider profile check [name]", argvPlan: argvPlan(["provider", "profile", "check", "$name?"]), safety: "read_only", description: "Check active or named provider profile auth status.", ...readOnlyModelSurface, tags: ["provider", "프로바이더", "profile", "check", "상태", "auth"], argsSchema: { optional: ["name"] } }),
+  command({ commandId: "provider.profile.check", cliDisplay: "cosia provider profile check [name]", argvPlan: argvPlan(["provider", "profile", "check", "$name?"]), safety: "read_only", description: "Check active or named provider profile auth status.", ...readOnlyModelSurface, tags: ["provider", "profile", "check", "status", "auth"], argsSchema: { optional: ["name"] } }),
   command({ commandId: "provider.profile.remove", cliDisplay: "cosia provider profile remove <name>", argvPlan: argvPlan(["provider", "profile", "remove", "$name"]), safety: "system_boundary", description: "Remove a provider profile.", tags: ["provider", "profile", "remove"], argsSchema: { required: ["name"] }, requiresApproval: true }),
   command({ commandId: "provider.oauth.login", cliDisplay: "cosia provider oauth login <profile-name>", argvPlan: argvPlan(["provider", "oauth", "login", "$profileName"]), safety: "system_boundary", description: "Run provider OAuth login flow.", tags: ["provider", "oauth", "login"], argsSchema: { required: ["profileName"] }, requiresApproval: true }),
   command({ commandId: "gateway.start", cliDisplay: "cosia gateway start", argvPlan: argvPlan(["gateway", "start"]), safety: "dangerous", description: "Start gateway process.", tags: ["gateway", "start"] }),
   command({ commandId: "gateway.stop", cliDisplay: "cosia gateway stop", argvPlan: argvPlan(["gateway", "stop"]), safety: "mutation", description: "Stop gateway process.", tags: ["gateway", "stop"], requiresApproval: true }),
   command({ commandId: "gateway.restart", cliDisplay: "cosia gateway restart", argvPlan: argvPlan(["gateway", "restart"]), safety: "mutation", description: "Restart gateway process.", tags: ["gateway", "restart"], requiresApproval: true }),
   command({ commandId: "gateway.unlock", cliDisplay: "cosia gateway unlock --stale-only", argvPlan: argvPlan(["gateway", "unlock"]), safety: "mutation", description: "Remove stale gateway process lock.", tags: ["gateway", "unlock", "stale"], requiresApproval: true }),
-  command({ commandId: "gateway.auth.allow_chat", cliDisplay: "cosia gateway auth allow-chat <connector> <chat-id>", argvPlan: argvPlan(["gateway", "auth", "allow-chat", "$connector", "$chatId"]), safety: "system_boundary", description: "Allow an external connector chat.", tags: ["gateway", "auth", "권한", "chat", "채팅"], argsSchema: { required: ["connector", "chatId"] }, requiresApproval: true }),
+  command({ commandId: "gateway.auth.allow_chat", cliDisplay: "cosia gateway auth allow-chat <connector> <chat-id>", argvPlan: argvPlan(["gateway", "auth", "allow-chat", "$connector", "$chatId"]), safety: "system_boundary", description: "Allow an external connector chat.", tags: ["gateway", "auth", "chat"], argsSchema: { required: ["connector", "chatId"] }, requiresApproval: true }),
   command({ commandId: "gateway.auth.remove_chat", cliDisplay: "cosia gateway auth remove-chat <connector> <chat-id>", argvPlan: argvPlan(["gateway", "auth", "remove-chat", "$connector", "$chatId"]), safety: "system_boundary", description: "Remove an allowed external connector chat.", tags: ["gateway", "auth", "remove", "chat"], argsSchema: { required: ["connector", "chatId"] }, requiresApproval: true }),
-  command({ commandId: "gateway.auth.set_master", cliDisplay: "cosia gateway auth set-master <connector> <user-id>", argvPlan: argvPlan(["gateway", "auth", "set-master", "$connector", "$userId"]), safety: "system_boundary", description: "Set the single global Gateway master user.", tags: ["gateway", "auth", "master", "마스터", "권한"], argsSchema: { required: ["connector", "userId"] }, requiresApproval: true }),
+  command({ commandId: "gateway.auth.set_master", cliDisplay: "cosia gateway auth set-master <connector> <user-id>", argvPlan: argvPlan(["gateway", "auth", "set-master", "$connector", "$userId"]), safety: "system_boundary", description: "Set the single global Gateway master user.", tags: ["gateway", "auth", "master"], argsSchema: { required: ["connector", "userId"] }, requiresApproval: true }),
   command({ commandId: "gateway.auth.clear_master", cliDisplay: "cosia gateway auth clear-master", argvPlan: argvPlan(["gateway", "auth", "clear-master"]), safety: "system_boundary", description: "Clear the Gateway master user.", tags: ["gateway", "auth", "master"], requiresApproval: true }),
-  command({ commandId: "gateway.auth.set_role", cliDisplay: "cosia gateway auth set-role <connector> <user-id> <guest|admin> --chat-id <chat-id>", argvPlan: argvPlan(["gateway", "auth", "set-role", "$connector", "$userId", "$role", "--chat-id", "$chatId"]), safety: "system_boundary", description: "Set a chat-scoped Gateway guest/admin role.", tags: ["gateway", "auth", "role", "권한"], argsSchema: { required: ["connector", "userId", "role", "chatId"] }, argEnums: { role: ["guest", "admin"] }, requiresApproval: true }),
+  command({ commandId: "gateway.auth.set_role", cliDisplay: "cosia gateway auth set-role <connector> <user-id> <guest|admin> --chat-id <chat-id>", argvPlan: argvPlan(["gateway", "auth", "set-role", "$connector", "$userId", "$role", "--chat-id", "$chatId"]), safety: "system_boundary", description: "Set a chat-scoped Gateway guest/admin role.", tags: ["gateway", "auth", "role"], argsSchema: { required: ["connector", "userId", "role", "chatId"] }, argEnums: { role: ["guest", "admin"] }, requiresApproval: true }),
   command({ commandId: "gateway.auth.unset_role", cliDisplay: "cosia gateway auth unset-role <connector> <user-id> --chat-id <chat-id>", argvPlan: argvPlan(["gateway", "auth", "unset-role", "$connector", "$userId", "--chat-id", "$chatId"]), safety: "system_boundary", description: "Unset a chat-scoped Gateway role.", tags: ["gateway", "auth", "role"], argsSchema: { required: ["connector", "userId", "chatId"] }, requiresApproval: true }),
-  command({ commandId: "gateway.auth.list", cliDisplay: "cosia gateway auth list", argvPlan: argvPlan(["gateway", "auth", "list"]), safety: "read_only", description: "List Gateway authorization summary.", ...readOnlyModelSurface, tags: ["gateway", "auth", "권한", "list", "목록"] }),
-  command({ commandId: "gateway.auth.check", cliDisplay: "cosia gateway auth check <connector> --chat-id <id> --user-id <id>", argvPlan: argvPlan(["gateway", "auth", "check", "$connector", "--chat-id", "$chatId", "--user-id", "$userId"]), safety: "read_only", description: "Check Gateway authorization for one actor.", ...readOnlyModelSurface, tags: ["gateway", "auth", "권한", "check"], argsSchema: { required: ["connector", "chatId", "userId"] } }),
-  command({ commandId: "gateway.telegram.enable", cliDisplay: "cosia gateway telegram enable", argvPlan: argvPlan(["gateway", "telegram", "enable"]), safety: "system_boundary", description: "Enable Telegram connector.", tags: ["gateway", "telegram", "텔레그램", "enable"], requiresApproval: true }),
-  command({ commandId: "gateway.telegram.disable", cliDisplay: "cosia gateway telegram disable", argvPlan: argvPlan(["gateway", "telegram", "disable"]), safety: "system_boundary", description: "Disable Telegram connector.", tags: ["gateway", "telegram", "텔레그램", "disable"], requiresApproval: true }),
-  command({ commandId: "gateway.telegram.set", cliDisplay: "cosia gateway telegram set <field> <value>", argvPlan: argvPlan(["gateway", "telegram", "set", "$field", "$value?"]), safety: "system_boundary", description: "Set Telegram connector field.", tags: ["gateway", "telegram", "텔레그램", "set"], argsSchema: { required: ["field"], optional: ["value"] }, requiresApproval: true }),
-  command({ commandId: "gateway.telegram.unset", cliDisplay: "cosia gateway telegram unset <field> <value>", argvPlan: argvPlan(["gateway", "telegram", "unset", "$field", "$value?"]), safety: "system_boundary", description: "Unset Telegram connector field.", tags: ["gateway", "telegram", "텔레그램", "unset"], argsSchema: { required: ["field"], optional: ["value"] }, requiresApproval: true }),
-  command({ commandId: "gateway.telegram.list", cliDisplay: "cosia gateway telegram list", argvPlan: argvPlan(["gateway", "telegram", "list"]), safety: "read_only", description: "List Telegram connector settings without secrets.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "텔레그램", "list"] }),
-  command({ commandId: "gateway.telegram.check", cliDisplay: "cosia gateway telegram check", argvPlan: argvPlan(["gateway", "telegram", "check"]), safety: "read_only", description: "Check Telegram connector configuration.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "텔레그램", "check"] }),
-  command({ commandId: "gateway.telegram.webhook.status", cliDisplay: "cosia gateway telegram webhook status", argvPlan: argvPlan(["gateway", "telegram", "webhook", "status"]), safety: "read_only", description: "Show Telegram Bot API webhook status for the connector.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "텔레그램", "webhook", "웹훅", "status"] }),
-  command({ commandId: "gateway.telegram.webhook.clear", cliDisplay: "cosia gateway telegram webhook clear --yes", argvPlan: argvPlan(["gateway", "telegram", "webhook", "clear"]), safety: "system_boundary", description: "Disable the Telegram Bot API webhook so COSIA long polling can run.", tags: ["gateway", "telegram", "텔레그램", "webhook", "웹훅", "clear"], requiresApproval: true }),
+  command({ commandId: "gateway.auth.list", cliDisplay: "cosia gateway auth list", argvPlan: argvPlan(["gateway", "auth", "list"]), safety: "read_only", description: "List Gateway authorization summary.", ...readOnlyModelSurface, tags: ["gateway", "auth", "list"] }),
+  command({ commandId: "gateway.auth.check", cliDisplay: "cosia gateway auth check <connector> --chat-id <id> --user-id <id>", argvPlan: argvPlan(["gateway", "auth", "check", "$connector", "--chat-id", "$chatId", "--user-id", "$userId"]), safety: "read_only", description: "Check Gateway authorization for one actor.", ...readOnlyModelSurface, tags: ["gateway", "auth", "check"], argsSchema: { required: ["connector", "chatId", "userId"] } }),
+  command({ commandId: "gateway.telegram.enable", cliDisplay: "cosia gateway telegram enable", argvPlan: argvPlan(["gateway", "telegram", "enable"]), safety: "system_boundary", description: "Enable Telegram connector.", tags: ["gateway", "telegram", "enable"], requiresApproval: true }),
+  command({ commandId: "gateway.telegram.disable", cliDisplay: "cosia gateway telegram disable", argvPlan: argvPlan(["gateway", "telegram", "disable"]), safety: "system_boundary", description: "Disable Telegram connector.", tags: ["gateway", "telegram", "disable"], requiresApproval: true }),
+  command({ commandId: "gateway.telegram.set", cliDisplay: "cosia gateway telegram set <field> <value>", argvPlan: argvPlan(["gateway", "telegram", "set", "$field", "$value?"]), safety: "system_boundary", description: "Set Telegram connector field.", tags: ["gateway", "telegram", "set"], argsSchema: { required: ["field"], optional: ["value"] }, requiresApproval: true }),
+  command({ commandId: "gateway.telegram.unset", cliDisplay: "cosia gateway telegram unset <field> <value>", argvPlan: argvPlan(["gateway", "telegram", "unset", "$field", "$value?"]), safety: "system_boundary", description: "Unset Telegram connector field.", tags: ["gateway", "telegram", "unset"], argsSchema: { required: ["field"], optional: ["value"] }, requiresApproval: true }),
+  command({ commandId: "gateway.telegram.list", cliDisplay: "cosia gateway telegram list", argvPlan: argvPlan(["gateway", "telegram", "list"]), safety: "read_only", description: "List Telegram connector settings without secrets.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "list"] }),
+  command({ commandId: "gateway.telegram.check", cliDisplay: "cosia gateway telegram check", argvPlan: argvPlan(["gateway", "telegram", "check"]), safety: "read_only", description: "Check Telegram connector configuration.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "check"] }),
+  command({ commandId: "gateway.telegram.webhook.status", cliDisplay: "cosia gateway telegram webhook status", argvPlan: argvPlan(["gateway", "telegram", "webhook", "status"]), safety: "read_only", description: "Show Telegram Bot API webhook status for the connector.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "webhook", "status"] }),
+  command({ commandId: "gateway.telegram.webhook.clear", cliDisplay: "cosia gateway telegram webhook clear --yes", argvPlan: argvPlan(["gateway", "telegram", "webhook", "clear"]), safety: "system_boundary", description: "Disable the Telegram Bot API webhook so COSIA long polling can run.", tags: ["gateway", "telegram", "webhook", "clear"], requiresApproval: true }),
   command({ commandId: "gateway.telegram.state", cliDisplay: "cosia gateway telegram state", argvPlan: argvPlan(["gateway", "telegram", "state"]), safety: "read_only", description: "Show Telegram connector state.", ...readOnlyModelSurface, tags: ["gateway", "telegram", "state"] }),
   command({ commandId: "gateway.telegram.repair", cliDisplay: "cosia gateway telegram repair --stale-sessions", argvPlan: argvPlan(["gateway", "telegram", "repair"]), safety: "mutation", description: "Repair Telegram connector state.", tags: ["gateway", "telegram", "repair"], requiresApproval: true }),
   command({ commandId: "gateway.telegram.reset_state", cliDisplay: "cosia gateway telegram reset-state --yes", argvPlan: argvPlan(["gateway", "telegram", "reset-state"]), safety: "mutation", description: "Reset Telegram connector state.", tags: ["gateway", "telegram", "reset"], requiresApproval: true }),
-  command({ commandId: "capability.review", cliDisplay: "cosia capability review", argvPlan: argvPlan(["capability", "review"]), safety: "read_only", description: "Review capability proposals.", ...readOnlyModelSurface, tags: ["capability", "능력", "proposal", "review"] }),
-  command({ commandId: "capability.scan", cliDisplay: "cosia capability scan --request <text>", argvPlan: argvPlan(["capability", "scan", "--request", "$request?"]), safety: "read_only", description: "Scan workspace capability facts.", ...readOnlyModelSurface, tags: ["capability", "scan", "능력"], argsSchema: { optional: ["request"] } }),
-  command({ commandId: "capability.facts", cliDisplay: "cosia capability facts", argvPlan: argvPlan(["capability", "facts"]), safety: "read_only", description: "Show capability facts.", ...readOnlyModelSurface, tags: ["capability", "facts", "능력"] }),
+  command({ commandId: "capability.review", cliDisplay: "cosia capability review", argvPlan: argvPlan(["capability", "review"]), safety: "read_only", description: "Review capability proposals.", ...readOnlyModelSurface, tags: ["capability", "proposal", "review"] }),
+  command({ commandId: "capability.scan", cliDisplay: "cosia capability scan --request <text>", argvPlan: argvPlan(["capability", "scan", "--request", "$request?"]), safety: "read_only", description: "Scan workspace capability facts.", ...readOnlyModelSurface, tags: ["capability", "scan"], argsSchema: { optional: ["request"] } }),
+  command({ commandId: "capability.facts", cliDisplay: "cosia capability facts", argvPlan: argvPlan(["capability", "facts"]), safety: "read_only", description: "Show capability facts.", ...readOnlyModelSurface, tags: ["capability", "facts"] }),
   command({ commandId: "capability.plan", cliDisplay: "cosia capability plan --request <text>", argvPlan: argvPlan(["capability", "plan", "--request", "$request"]), safety: "preview_mutation", description: "Create a capability proposal from a request.", tags: ["capability", "plan", "proposal"], argsSchema: { required: ["request"] }, requiresApproval: true }),
   command({ commandId: "capability.show", cliDisplay: "cosia capability show <id>", argvPlan: argvPlan(["capability", "show", "$id"]), safety: "read_only", description: "Show a capability proposal.", ...readOnlyModelSurface, tags: ["capability", "show"], argsSchema: { required: ["id"] } }),
   command({ commandId: "capability.discard", cliDisplay: "cosia capability discard <id> --reason <reason>", argvPlan: argvPlan(["capability", "discard", "$id", "--reason", "$reason"]), safety: "mutation", description: "Discard a capability proposal.", tags: ["capability", "discard"], argsSchema: { required: ["id", "reason"] }, requiresApproval: true }),
@@ -693,22 +694,22 @@ const runtimeCommandInputs: CommandInput[] = [
   command({ commandId: "shell.apply", cliDisplay: "cosia shell apply <approval-id> --confirm <phrase>", argvPlan: argvPlan(["shell", "apply", "$approvalId"]), safety: "dangerous", description: "Apply a shell approval.", tags: ["shell", "apply"], argsSchema: { required: ["approvalId"] }, requiresApproval: true }),
   command({ commandId: "shell.run", cliDisplay: "cosia shell run --command <command> --yes", argvPlan: argvPlan(["shell", "run", "--command", "$command"]), safety: "dangerous", description: "Preview or run a shell command.", tags: ["shell", "run"], argsSchema: { required: ["command"] }, requiresApproval: true }),
   command({ commandId: "shell.cancel", cliDisplay: "cosia shell cancel <approval-id>", argvPlan: argvPlan(["shell", "cancel", "$approvalId"]), safety: "mutation", description: "Cancel shell approval.", tags: ["shell", "cancel"], argsSchema: { required: ["approvalId"] }, requiresApproval: true }),
-  command({ commandId: "tool.list", cliDisplay: "cosia tool list", argvPlan: argvPlan(["tool", "list"]), safety: "read_only", description: "List tool catalog and active tools.", ...readOnlyModelSurface, tags: ["tool", "도구", "list"] }),
-  command({ commandId: "tool.draft", cliDisplay: "cosia tool draft --from-capability <id>", argvPlan: argvPlan(["tool", "draft", "--from-capability", "$capabilityId"]), safety: "preview_mutation", description: "Create a tool draft from a capability proposal.", tags: ["tool", "draft", "도구"], argsSchema: { required: ["capabilityId"] }, requiresApproval: true }),
-  command({ commandId: "tool.grow.start", cliDisplay: "cosia tool grow --request <text>", argvPlan: argvPlan(["tool", "grow", "--request", "$request"]), safety: "preview_mutation", description: "Start a guided tool growth routine.", tags: ["tool-growth", "tool", "도구", "grow"], argsSchema: { required: ["request"] }, requiresApproval: true }),
-  command({ commandId: "tool.grow.review", cliDisplay: "cosia tool grow review", argvPlan: argvPlan(["tool", "grow", "review"]), safety: "read_only", description: "Review tool growth routines.", ...readOnlyModelSurface, tags: ["tool-growth", "tool", "도구", "review"] }),
-  command({ commandId: "tool.grow.show", cliDisplay: "cosia tool grow show <routine-id>", argvPlan: argvPlan(["tool", "grow", "show", "$routineId"]), safety: "read_only", description: "Show one tool growth routine.", ...readOnlyModelSurface, tags: ["tool-growth", "tool", "도구", "show"], argsSchema: { required: ["routineId"] } }),
-  command({ commandId: "tool.grow.test", cliDisplay: "cosia tool grow test <routine-id> --yes", argvPlan: argvPlan(["tool", "grow", "test", "$routineId"]), safety: "mutation", description: "Run a tool growth candidate test.", tags: ["tool-growth", "test", "도구"], argsSchema: { required: ["routineId"] }, requiresApproval: true }),
-  command({ commandId: "tool.grow.activate", cliDisplay: "cosia tool grow activate <routine-id> --agent <agent-id> --yes", argvPlan: argvPlan(["tool", "grow", "activate", "$routineId", "--agent", "$agentId"]), safety: "mutation", description: "Activate a grown tool through existing activation gates.", tags: ["tool-growth", "activate", "도구"], argsSchema: { required: ["routineId", "agentId"] }, requiresApproval: true }),
-  command({ commandId: "tool.candidate.review", cliDisplay: "cosia tool candidate review", argvPlan: argvPlan(["tool", "candidate", "review"]), safety: "read_only", description: "Review tool candidates.", ...readOnlyModelSurface, tags: ["tool", "candidate", "도구", "review"] }),
+  command({ commandId: "tool.list", cliDisplay: "cosia tool list", argvPlan: argvPlan(["tool", "list"]), safety: "read_only", description: "List tool catalog and active tools.", ...readOnlyModelSurface, tags: ["tool", "list"] }),
+  command({ commandId: "tool.draft", cliDisplay: "cosia tool draft --from-capability <id>", argvPlan: argvPlan(["tool", "draft", "--from-capability", "$capabilityId"]), safety: "preview_mutation", description: "Create a tool draft from a capability proposal.", tags: ["tool", "draft"], argsSchema: { required: ["capabilityId"] }, requiresApproval: true }),
+  command({ commandId: "tool.grow.start", cliDisplay: "cosia tool grow --request <text>", argvPlan: argvPlan(["tool", "grow", "--request", "$request"]), safety: "preview_mutation", description: "Start a guided tool growth routine.", tags: ["tool-growth", "tool", "grow"], argsSchema: { required: ["request"] }, requiresApproval: true }),
+  command({ commandId: "tool.grow.review", cliDisplay: "cosia tool grow review", argvPlan: argvPlan(["tool", "grow", "review"]), safety: "read_only", description: "Review tool growth routines.", ...readOnlyModelSurface, tags: ["tool-growth", "tool", "review"] }),
+  command({ commandId: "tool.grow.show", cliDisplay: "cosia tool grow show <routine-id>", argvPlan: argvPlan(["tool", "grow", "show", "$routineId"]), safety: "read_only", description: "Show one tool growth routine.", ...readOnlyModelSurface, tags: ["tool-growth", "tool", "show"], argsSchema: { required: ["routineId"] } }),
+  command({ commandId: "tool.grow.test", cliDisplay: "cosia tool grow test <routine-id> --yes", argvPlan: argvPlan(["tool", "grow", "test", "$routineId"]), safety: "mutation", description: "Run a tool growth candidate test.", tags: ["tool-growth", "test"], argsSchema: { required: ["routineId"] }, requiresApproval: true }),
+  command({ commandId: "tool.grow.activate", cliDisplay: "cosia tool grow activate <routine-id> --agent <agent-id> --yes", argvPlan: argvPlan(["tool", "grow", "activate", "$routineId", "--agent", "$agentId"]), safety: "mutation", description: "Activate a grown tool through existing activation gates.", tags: ["tool-growth", "activate"], argsSchema: { required: ["routineId", "agentId"] }, requiresApproval: true }),
+  command({ commandId: "tool.candidate.review", cliDisplay: "cosia tool candidate review", argvPlan: argvPlan(["tool", "candidate", "review"]), safety: "read_only", description: "Review tool candidates.", ...readOnlyModelSurface, tags: ["tool", "candidate", "review"] }),
   command({ commandId: "tool.candidate.show", cliDisplay: "cosia tool candidate show <candidate-id>", argvPlan: argvPlan(["tool", "candidate", "show", "$candidateId"]), safety: "read_only", description: "Show a tool candidate.", ...readOnlyModelSurface, tags: ["tool", "candidate", "show"], argsSchema: { required: ["candidateId"] } }),
   command({ commandId: "tool.candidate.approve", cliDisplay: "cosia tool candidate approve <candidate-id>", argvPlan: argvPlan(["tool", "candidate", "approve", "$candidateId"]), safety: "mutation", description: "Approve a tool candidate design.", tags: ["tool", "candidate", "approve"], argsSchema: { required: ["candidateId"] }, requiresApproval: true }),
   command({ commandId: "tool.candidate.test", cliDisplay: "cosia tool candidate test <candidate-id>", argvPlan: argvPlan(["tool", "candidate", "test", "$candidateId"]), safety: "mutation", description: "Test a tool candidate.", tags: ["tool", "candidate", "test"], argsSchema: { required: ["candidateId"] }, requiresApproval: true }),
-  command({ commandId: "tool.active.list", cliDisplay: "cosia tool active list", argvPlan: argvPlan(["tool", "active", "list"]), safety: "read_only", description: "List active tools.", ...readOnlyModelSurface, tags: ["tool", "active", "도구"] }),
+  command({ commandId: "tool.active.list", cliDisplay: "cosia tool active list", argvPlan: argvPlan(["tool", "active", "list"]), safety: "read_only", description: "List active tools.", ...readOnlyModelSurface, tags: ["tool", "active", "list"] }),
   command({ commandId: "tool.active.show", cliDisplay: "cosia tool active show <tool-id>", argvPlan: argvPlan(["tool", "active", "show", "$toolId"]), safety: "read_only", description: "Show an active tool.", ...readOnlyModelSurface, tags: ["tool", "active", "show"], argsSchema: { required: ["toolId"] } }),
   command({ commandId: "tool.activate", cliDisplay: "cosia tool activate <candidate-id> --agent <agent-id> --yes", argvPlan: argvPlan(["tool", "activate", "$candidateId", "--agent", "$agentId"]), safety: "mutation", description: "Activate a tool candidate.", tags: ["tool", "activate"], argsSchema: { required: ["candidateId", "agentId"] }, requiresApproval: true }),
   command({ commandId: "tool.deactivate", cliDisplay: "cosia tool deactivate <tool-id> --reason <reason>", argvPlan: argvPlan(["tool", "deactivate", "$toolId", "--reason", "$reason"]), safety: "mutation", description: "Deactivate an active tool.", tags: ["tool", "deactivate"], argsSchema: { required: ["toolId", "reason"] }, requiresApproval: true }),
-  command({ commandId: "tool.blueprint.list", cliDisplay: "cosia tool blueprint list", argvPlan: argvPlan(["tool", "blueprint", "list"]), safety: "read_only", description: "List learned local tool blueprints.", ...readOnlyModelSurface, tags: ["tool", "blueprint", "도구"] }),
+  command({ commandId: "tool.blueprint.list", cliDisplay: "cosia tool blueprint list", argvPlan: argvPlan(["tool", "blueprint", "list"]), safety: "read_only", description: "List learned local tool blueprints.", ...readOnlyModelSurface, tags: ["tool", "blueprint", "list"] }),
   command({ commandId: "tool.blueprint.show", cliDisplay: "cosia tool blueprint show <blueprint-id>", argvPlan: argvPlan(["tool", "blueprint", "show", "$blueprintId"]), safety: "read_only", description: "Show a learned local blueprint.", ...readOnlyModelSurface, tags: ["tool", "blueprint"], argsSchema: { required: ["blueprintId"] } }),
   command({ commandId: "tool.blueprint.create_from_active", cliDisplay: "cosia tool blueprint create-from-active <tool-id> --yes", argvPlan: argvPlan(["tool", "blueprint", "create-from-active", "$toolId"]), safety: "mutation", description: "Create learned blueprint from active tool.", tags: ["tool", "blueprint", "create"], argsSchema: { required: ["toolId"] }, requiresApproval: true })
 ];
@@ -802,19 +803,7 @@ export function retrieveRuntimeCommandCandidates(input: string, limit = 8, works
 }
 
 export function detectRuntimeCommandTags(input: string): string[] {
-  const normalized = normalizeCommandText(input);
-  if (!normalized) {
-    return [];
-  }
-  const detected = new Set<string>();
-  for (const definition of runtimeCommandDefinitions) {
-    for (const tag of definition.tags ?? []) {
-      if (inputContainsTag(normalized, tag)) {
-        detected.add(tag);
-      }
-    }
-  }
-  return [...detected].sort((a, b) => a.localeCompare(b));
+  return translateCommandTags(input).tags;
 }
 
 export function retrieveRuntimeCommandTagMatches(input: string, limit = 8): RuntimeCommandCandidateMatch[] {
@@ -822,19 +811,27 @@ export function retrieveRuntimeCommandTagMatches(input: string, limit = 8): Runt
   if (!normalized) {
     return [];
   }
-  const detectedTags = detectRuntimeCommandTags(input);
-  if (!detectedTags.length) {
+  const translation = translateCommandTags(input);
+  if (!translation.tags.length) {
     return [];
   }
-  const detected = new Set(detectedTags.map(normalizeCommandText));
+  const detected = new Map<string, number>();
+  for (const match of translation.matches) {
+    const tag = normalizeCommandText(match.tag);
+    detected.set(tag, Math.max(detected.get(tag) ?? 0, match.weight));
+  }
   return runtimeCommandDefinitions
     .map((definition) => {
       const matchedTags = (definition.tags ?? [])
-        .filter((tag) => detected.has(normalizeCommandText(tag)));
+        .map((tag) => ({ tag, weight: detected.get(normalizeCommandText(tag)) ?? 0 }))
+        .filter((item) => item.weight > 0);
+      const score = matchedTags.reduce((sum, item) => sum + item.weight, 0);
+      const weakOnly = matchedTags.length > 0 && matchedTags.every((item) => item.weight <= 0.35);
       return {
         definition,
         matchedTags,
-        score: matchedTags.length
+        score,
+        weakOnly
       };
     })
     .filter((item) => item.score > 0)
@@ -843,8 +840,8 @@ export function retrieveRuntimeCommandTagMatches(input: string, limit = 8): Runt
     .map((item) => ({
       definition: item.definition,
       score: item.score,
-      confidence: item.score >= 2 ? "high" : "medium",
-      matchReason: `tag match: ${item.matchedTags.join(", ")}`
+      confidence: item.weakOnly ? "low" : item.score >= 2 ? "high" : item.score >= 1 ? "medium" : "low",
+      matchReason: `tag match: ${item.matchedTags.map((match) => `${match.tag}:${match.weight}`).join(", ")}`
     }));
 }
 
@@ -868,17 +865,6 @@ export function retrieveRuntimeCommandCandidateMatches(input: string, limit = 8,
     matchReason: item.matchReason,
     confidence: item.score >= 10 ? "high" : item.score >= 4 ? "medium" : "low"
   }));
-}
-
-function inputContainsTag(normalizedInput: string, tag: string): boolean {
-  const normalizedTag = normalizeCommandText(tag);
-  if (!normalizedTag) {
-    return false;
-  }
-  if (isAsciiWord(normalizedTag)) {
-    return new RegExp(`\\b${escapeRegExp(normalizedTag)}\\b`, "i").test(normalizedInput);
-  }
-  return normalizedInput.includes(normalizedTag);
 }
 
 function safetySort(safety: RuntimeCommandSafety): number {
@@ -969,12 +955,4 @@ function scoreDefinition(normalized: string, definition: RuntimeCommandDefinitio
     }
   }
   return { score, matchReason: reasons[0] ?? "token match" };
-}
-
-function isAsciiWord(value: string): boolean {
-  return /^[a-z0-9_-]+$/i.test(value);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

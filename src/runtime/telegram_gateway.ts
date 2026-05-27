@@ -25,6 +25,7 @@ import { formatUnknownCallbackNotice } from "./gateway_message_renderer.js";
 import { PolicyManager, type PolicyConfig } from "./policy_manager.js";
 import { getTelegramBotTokenSecret } from "./private_config.js";
 import { resolveProviderSelection } from "./model/provider_registry.js";
+import { getGatewaySessionScheduler } from "./gateway_session_scheduler.js";
 import {
   formatRunJobAccepted,
   RunJobLedger,
@@ -133,6 +134,8 @@ export type TelegramStartOptions = {
 export type TelegramUpdate = {
   update_id: number;
   message?: {
+    message_id?: number | string;
+    message_thread_id?: number | string;
     text?: string;
     chat: {
       id: number | string;
@@ -146,6 +149,8 @@ export type TelegramUpdate = {
     data?: string;
     from?: TelegramUser;
     message?: {
+      message_id?: number | string;
+      message_thread_id?: number | string;
       chat: {
         id: number | string;
         type?: string;
@@ -174,6 +179,10 @@ type TelegramResponseParameters = {
   migrate_to_chat_id?: number | string;
 };
 
+function chatSendPacingKey(chatId: string, messageThreadId?: number | string): string {
+  return messageThreadId === undefined ? chatId : `${chatId}:${messageThreadId}`;
+}
+
 class TelegramApiError extends Error {
   constructor(
     message: string,
@@ -195,9 +204,14 @@ class TelegramApiError extends Error {
 }
 
 export type TelegramMessageSender = {
-  sendMessage(chatId: string, text: string, options?: { replyMarkup?: unknown }): Promise<void>;
-  sendChatAction?(chatId: string, action?: "typing"): Promise<void>;
+  sendMessage(chatId: string, text: string, options?: TelegramSendOptions): Promise<void>;
+  sendChatAction?(chatId: string, action?: "typing", options?: TelegramSendOptions): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text?: string): Promise<void>;
+};
+
+export type TelegramSendOptions = {
+  replyMarkup?: unknown;
+  messageThreadId?: number | string;
 };
 
 const activeTelegramSessionWorkers = new Set<string>();
@@ -236,18 +250,20 @@ class TelegramApiClient {
     });
   }
 
-  async sendMessage(chatId: string, text: string, options: { replyMarkup?: unknown } = {}): Promise<void> {
-    await this.paceChatSend(chatId);
+  async sendMessage(chatId: string, text: string, options: TelegramSendOptions = {}): Promise<void> {
+    await this.paceChatSend(chatSendPacingKey(chatId, options.messageThreadId));
     await this.call("sendMessage", {
       chat_id: chatId,
       text,
+      ...(options.messageThreadId !== undefined ? { message_thread_id: options.messageThreadId } : {}),
       ...(options.replyMarkup ? { reply_markup: options.replyMarkup } : {})
     }, { retryAfterOnce: true });
   }
 
-  async sendChatAction(chatId: string, action: "typing" = "typing"): Promise<void> {
+  async sendChatAction(chatId: string, action: "typing" = "typing", options: TelegramSendOptions = {}): Promise<void> {
     await this.call("sendChatAction", {
       chat_id: chatId,
+      ...(options.messageThreadId !== undefined ? { message_thread_id: options.messageThreadId } : {}),
       action
     }, { retryAfterOnce: true });
   }
@@ -261,14 +277,14 @@ class TelegramApiClient {
 
   private readonly lastSendAtByChat = new Map<string, number>();
 
-  private async paceChatSend(chatId: string): Promise<void> {
+  private async paceChatSend(pacingKey: string): Promise<void> {
     const now = Date.now();
-    const previous = this.lastSendAtByChat.get(chatId) ?? 0;
+    const previous = this.lastSendAtByChat.get(pacingKey) ?? 0;
     const waitMs = previous + this.descriptor.messageDefaults.sendPacingMs - now;
     if (waitMs > 0) {
       await delay(waitMs);
     }
-    this.lastSendAtByChat.set(chatId, Date.now());
+    this.lastSendAtByChat.set(pacingKey, Date.now());
   }
 
   private async call<T>(method: string, body: Record<string, unknown>, options: { retryAfterOnce?: boolean } = {}): Promise<T> {
@@ -695,6 +711,18 @@ export async function startTelegramGateway(workspaceRoot: string, options: Teleg
     }
   } finally {
     await new RunJobLedger(workspaceRoot).interruptActiveJobs("gateway_stopped");
+    const schedulerSnapshot = getGatewaySessionScheduler().snapshot({ workspaceRoot });
+    if (schedulerSnapshot.runningCount || schedulerSnapshot.queuedCount) {
+      await appendTelegramLog(workspaceRoot, "scheduler_stop", {
+        runningCount: schedulerSnapshot.runningCount,
+        queuedCount: schedulerSnapshot.queuedCount,
+        sessions: [
+          ...schedulerSnapshot.running.map((item) => ({ ...item, status: "running" })),
+          ...schedulerSnapshot.queued.map((item) => ({ ...item, status: "queued" }))
+        ]
+      });
+      getGatewaySessionScheduler().clearQueued({ workspaceRoot });
+    }
     await cleanup();
     await appendTelegramLog(workspaceRoot, "stop", {});
   }
@@ -713,6 +741,7 @@ export async function processTelegramUpdate(
   const callback = update.callback_query;
   if (callback) {
     const chatId = String(callback.message?.chat.id ?? "");
+    const messageThreadId = callback.message?.message_thread_id;
     const source = telegramSourceFromCallback(callback);
     if (client.answerCallbackQuery) {
       await client.answerCallbackQuery(callback.id).catch(() => {
@@ -723,13 +752,13 @@ export async function processTelegramUpdate(
     return withTelegramTyping(client, chatId, async () => {
       const parsedCallback = parseGatewayCallbackData(descriptor, callback.data ?? "");
       if (!parsedCallback) {
-        await client.sendMessage(chatId, formatUnknownCallbackNotice());
+        await client.sendMessage(chatId, formatUnknownCallbackNotice(), telegramThreadOptions(messageThreadId));
         return state;
       }
       const actor = gatewayActorFromSource(source);
       const access = authorizeGatewayAccess(policy, actor, parsedCallback.definition.minRole, parsedCallback.definition.safety !== "read_only");
       if (!access.allowed) {
-        await client.sendMessage(chatId, formatGatewayAuthBlocked(actor, access));
+        await client.sendMessage(chatId, formatGatewayAuthBlocked(actor, access), telegramThreadOptions(messageThreadId));
         return state;
       }
       let chatState = state.chats[chatId] ?? {
@@ -768,13 +797,13 @@ export async function processTelegramUpdate(
           })
         });
       } catch (error) {
-        await sendForegroundGatewayFailure(client, chatId, policy, descriptor, error, lastToolResultSummary);
+        await sendForegroundGatewayFailure(client, chatId, policy, descriptor, error, lastToolResultSummary, messageThreadId);
         return state;
       }
       chatState = result.state;
       if (result.output.trim()) {
         for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
-          await client.sendMessage(chatId, chunk, telegramReplyOptions(parsedCallback, result.output, descriptor));
+          await client.sendMessage(chatId, chunk, telegramReplyOptions(parsedCallback, result.output, descriptor, messageThreadId));
         }
       }
       const chats = nextTelegramChats(state.chats, chatId, chatState);
@@ -783,7 +812,7 @@ export async function processTelegramUpdate(
         chats,
         updatedAt: new Date().toISOString()
       };
-    }, outputSettings.typingRefreshMs);
+    }, outputSettings.typingRefreshMs, messageThreadId);
   }
 
   const message = update.message;
@@ -792,20 +821,42 @@ export async function processTelegramUpdate(
   }
   const messageText = descriptor.normalizeAddressedCommand(message.text);
   const chatId = String(message.chat.id);
+  const messageThreadId = message.message_thread_id;
   const source = telegramSourceFromMessage(message);
   if (isGatewayWhoamiInput(messageText)) {
-    await client.sendMessage(chatId, formatGatewayWhoami(source));
+    await client.sendMessage(chatId, formatGatewayWhoami(source), telegramThreadOptions(messageThreadId));
     return state;
   }
-  return withTelegramTyping(client, chatId, async () => {
-    let chatState = state.chats[chatId] ?? {
-      providerId: options.providerId
-    };
-    for (const input of splitTelegramInputs(messageText)) {
+  let chatState = state.chats[chatId] ?? {
+    providerId: options.providerId
+  };
+  let nextState = state;
+  for (const input of splitTelegramInputs(messageText)) {
+    if (
+      shouldScheduleTelegramSessionTurn(input, chatState)
+      && chatState.activeSessionId
+      && await telegramSessionExists(workspaceRoot, chatState.activeSessionId)
+    ) {
+      await enqueueTelegramSessionTurn({
+        workspaceRoot,
+        policy,
+        client,
+        chatId,
+        input,
+        state,
+        chatState,
+        providerId: chatState.providerId ?? options.providerId,
+        owner: options.owner,
+        source,
+        now: options.now,
+        descriptor
+      });
+      continue;
+    }
+    const result = await withTelegramTyping(client, chatId, async () => {
       let lastToolResultSummary: string | undefined;
-      let result: GatewayMessageResult;
       try {
-        result = await handleGatewayMessage({
+        return await handleGatewayMessage({
           workspaceRoot,
           input,
           state: chatState,
@@ -834,23 +885,134 @@ export async function processTelegramUpdate(
           })
         });
       } catch (error) {
-        await sendForegroundGatewayFailure(client, chatId, policy, descriptor, error, lastToolResultSummary);
-        continue;
+        await sendForegroundGatewayFailure(client, chatId, policy, descriptor, error, lastToolResultSummary, messageThreadId);
+        return { output: "", state: chatState };
       }
-      chatState = result.state;
-      if (result.output.trim()) {
-        for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
-          await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output, descriptor));
-        }
+    }, outputSettings.typingRefreshMs, messageThreadId);
+    chatState = result.state;
+    if (result.output.trim()) {
+      for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
+        await client.sendMessage(chatId, chunk, telegramReplyOptions(input, result.output, descriptor, messageThreadId));
       }
     }
-    const chats = nextTelegramChats(state.chats, chatId, chatState);
-    return {
-      ...state,
-      chats,
+    nextState = {
+      ...nextState,
+      chats: nextTelegramChats(nextState.chats, chatId, chatState),
       updatedAt: new Date().toISOString()
     };
-  }, outputSettings.typingRefreshMs);
+  }
+  return nextState;
+}
+
+type EnqueueTelegramSessionTurnInput = {
+  workspaceRoot: string;
+  policy: PolicyConfig;
+  client: TelegramMessageSender;
+  chatId: string;
+  input: string;
+  state: TelegramGatewayState;
+  chatState: GatewayChatState;
+  providerId: string;
+  owner: string;
+  source: GatewaySourceContext;
+  descriptor: GatewayConnectorDescriptor;
+  now?: () => number;
+};
+
+function shouldScheduleTelegramSessionTurn(input: string, chatState: GatewayChatState): boolean {
+  const trimmed = input.trim();
+  return Boolean(
+    trimmed
+    && chatState.activeSessionId
+    && !chatState.pendingCommand
+    && !trimmed.startsWith("/")
+    && !trimmed.startsWith("#")
+    && !/^cosia\s+tool\s+grow(?:\s|$)/i.test(trimmed)
+  );
+}
+
+async function enqueueTelegramSessionTurn(input: EnqueueTelegramSessionTurnInput): Promise<void> {
+  const sessionId = input.chatState.activeSessionId;
+  if (!sessionId) {
+    return;
+  }
+  const scheduler = getGatewaySessionScheduler();
+  const result = scheduler.enqueue({
+    workspaceRoot: input.workspaceRoot,
+    connector: input.source.connector ?? "telegram",
+    sessionId,
+    run: async () => runScheduledTelegramSessionTurn({
+      ...input,
+      sessionId
+    })
+  });
+  if (!result.accepted) {
+    await input.client.sendMessage(
+      input.chatId,
+      formatTelegramSessionQueueBusy(),
+      telegramThreadOptions(input.source.messageThreadId)
+    );
+  }
+}
+
+async function runScheduledTelegramSessionTurn(input: EnqueueTelegramSessionTurnInput & { sessionId: string }): Promise<void> {
+  const outputSettings = telegramOutputSettings(input.policy, input.descriptor);
+  const stopTyping = startTelegramTyping(input.client, input.chatId, outputSettings.typingRefreshMs, input.source.messageThreadId);
+  let lastToolResultSummary: string | undefined;
+  try {
+    const latest = await loadTelegramGatewayState(input.workspaceRoot);
+    const latestChatState = latest.chats[input.chatId] ?? input.state.chats[input.chatId] ?? input.chatState;
+    const runState: GatewayChatState = {
+      ...latestChatState,
+      providerId: latestChatState.providerId ?? input.providerId,
+      activeSessionId: input.sessionId
+    };
+    const result = await handleGatewayMessage({
+      workspaceRoot: input.workspaceRoot,
+      input: input.input,
+      state: runState,
+      policy: input.policy,
+      providerId: runState.providerId ?? input.providerId,
+      owner: input.owner,
+      chatId: input.chatId,
+      source: input.source,
+      now: input.now,
+      onRunProgress: (event) => {
+        lastToolResultSummary = event.toolResultSummary ?? lastToolResultSummary;
+      },
+      promoteSessionRun: async (runInput, runStateAfterPromotion) => {
+        const latestForJob = await loadTelegramGatewayState(input.workspaceRoot);
+        return promoteTelegramRunJob({
+          workspaceRoot: input.workspaceRoot,
+          policy: input.policy,
+          client: input.client,
+          chatId: input.chatId,
+          input: runInput,
+          state: latestForJob,
+          chatState: runStateAfterPromotion,
+          providerId: runStateAfterPromotion.providerId ?? input.providerId,
+          owner: input.owner,
+          source: input.source,
+          now: input.now,
+          descriptor: input.descriptor
+        });
+      }
+    });
+    await persistTelegramChatState(input.workspaceRoot, input.state, input.chatId, result.state);
+    if (result.output.trim()) {
+      for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
+        await input.client.sendMessage(input.chatId, chunk, telegramReplyOptions(input.input, result.output, input.descriptor, input.source.messageThreadId));
+      }
+    }
+  } catch (error) {
+    await sendForegroundGatewayFailure(input.client, input.chatId, input.policy, input.descriptor, error, lastToolResultSummary, input.source.messageThreadId);
+  } finally {
+    stopTyping();
+  }
+}
+
+function formatTelegramSessionQueueBusy(): string {
+  return "이 세션에 대기 중인 메시지가 너무 많아. 앞선 응답이 끝난 뒤 다시 보내줘.";
 }
 
 type PromoteTelegramRunJobInput = {
@@ -883,6 +1045,7 @@ async function promoteTelegramRunJob(input: PromoteTelegramRunJobInput): Promise
       channel: "telegram",
       chatId: input.chatId,
       chatType: input.source.chatType,
+      messageThreadId: input.source.messageThreadId,
       userId: input.source.userId,
       username: input.source.username,
       firstName: input.source.firstName
@@ -961,7 +1124,7 @@ async function runTelegramJob(options: {
   const ledger = new RunJobLedger(options.workspaceRoot);
   const chatId = options.job.source.chatId;
   const outputSettings = telegramOutputSettings(options.policy, options.descriptor);
-  const stopTyping = chatId ? startTelegramTyping(options.client, chatId, outputSettings.typingRefreshMs) : () => {};
+  const stopTyping = chatId ? startTelegramTyping(options.client, chatId, outputSettings.typingRefreshMs, options.job.source.messageThreadId) : () => {};
   await ledger.update(options.job.id, {
     status: "running",
     currentStep: "starting"
@@ -972,6 +1135,7 @@ async function runTelegramJob(options: {
       connector: "telegram",
       chatId,
       chatType: options.job.source.chatType ?? "private",
+      messageThreadId: options.job.source.messageThreadId,
       userId: options.job.source.userId,
       username: options.job.source.username,
       firstName: options.job.source.firstName
@@ -1011,7 +1175,7 @@ async function runTelegramJob(options: {
     });
     if (chatId) {
       for (const chunk of chunkTelegramMessage(result.output, outputSettings.messageChunkChars)) {
-        await options.client.sendMessage(chatId, chunk, telegramReplyOptions(options.job.request, result.output, options.descriptor));
+        await options.client.sendMessage(chatId, chunk, telegramReplyOptions(options.job.request, result.output, options.descriptor, options.job.source.messageThreadId));
       }
     }
   } catch (error) {
@@ -1037,7 +1201,7 @@ async function runTelegramJob(options: {
     if (chatId) {
       const output = fallback ?? formatTelegramUpdateFailure(message);
       for (const chunk of chunkTelegramMessage(output, outputSettings.messageChunkChars)) {
-        await options.client.sendMessage(chatId, chunk);
+        await options.client.sendMessage(chatId, chunk, telegramThreadOptions(options.job.source.messageThreadId));
       }
     }
   } finally {
@@ -1143,14 +1307,15 @@ async function sendForegroundGatewayFailure(
   policy: PolicyConfig,
   descriptor: GatewayConnectorDescriptor,
   error: unknown,
-  lastToolResultSummary: string | undefined
+  lastToolResultSummary: string | undefined,
+  messageThreadId?: number | string
 ): Promise<void> {
   const message = (error as Error).message;
   const output = isTimeoutFailure(message) && lastToolResultSummary
     ? formatTimeoutFallback(lastToolResultSummary)
     : formatTelegramUpdateFailure(message);
   for (const chunk of chunkTelegramMessage(output, telegramOutputSettings(policy, descriptor).messageChunkChars)) {
-    await client.sendMessage(chatId, chunk);
+    await client.sendMessage(chatId, chunk, telegramThreadOptions(messageThreadId));
   }
 }
 
@@ -1502,11 +1667,20 @@ function telegramUpdateChatId(update: TelegramUpdate): string | undefined {
       : undefined;
 }
 
+function telegramUpdateMessageThreadId(update: TelegramUpdate): number | string | undefined {
+  return update.message?.message_thread_id ?? update.callback_query?.message?.message_thread_id;
+}
+
+function telegramThreadOptions(messageThreadId?: number | string): TelegramSendOptions {
+  return messageThreadId === undefined ? {} : { messageThreadId };
+}
+
 function telegramSourceFromMessage(message: NonNullable<TelegramUpdate["message"]>): GatewaySourceContext {
   return {
     connector: "telegram",
     chatId: String(message.chat.id),
     chatType: message.chat.type ?? "private",
+    messageThreadId: message.message_thread_id,
     userId: message.from?.id !== undefined ? String(message.from.id) : undefined,
     username: message.from?.username,
     firstName: message.from?.first_name,
@@ -1519,6 +1693,7 @@ function telegramSourceFromCallback(callback: NonNullable<TelegramUpdate["callba
     connector: "telegram",
     chatId: callback.message?.chat.id !== undefined ? String(callback.message.chat.id) : undefined,
     chatType: callback.message?.chat.type ?? "private",
+    messageThreadId: callback.message?.message_thread_id,
     userId: callback.from?.id !== undefined ? String(callback.from.id) : undefined,
     username: callback.from?.username,
     firstName: callback.from?.first_name,
@@ -1541,9 +1716,10 @@ async function withTelegramTyping<T>(
   client: TelegramMessageSender,
   chatId: string,
   task: () => Promise<T>,
-  typingRefreshMs = telegramGatewayConnectorDescriptor.messageDefaults.typingRefreshMs
+  typingRefreshMs = telegramGatewayConnectorDescriptor.messageDefaults.typingRefreshMs,
+  messageThreadId?: number | string
 ): Promise<T> {
-  const stopTyping = startTelegramTyping(client, chatId, typingRefreshMs);
+  const stopTyping = startTelegramTyping(client, chatId, typingRefreshMs, messageThreadId);
   try {
     return await task();
   } finally {
@@ -1551,14 +1727,20 @@ async function withTelegramTyping<T>(
   }
 }
 
-function startTelegramTyping(client: TelegramMessageSender, chatId: string, typingRefreshMs: number): () => void {
+function startTelegramTyping(
+  client: TelegramMessageSender,
+  chatId: string,
+  typingRefreshMs: number,
+  messageThreadId?: number | string
+): () => void {
   if (!client.sendChatAction) {
     return () => {};
   }
+  const options = telegramThreadOptions(messageThreadId);
   let stopped = false;
   const sendTyping = () => {
     if (stopped) return;
-    void client.sendChatAction?.(chatId, "typing").catch(() => {
+    void client.sendChatAction?.(chatId, "typing", options).catch(() => {
       // Typing indicators are best-effort and should never block the actual response.
     });
   };
@@ -1580,9 +1762,10 @@ async function notifyTelegramUpdateFailure(
   if (!chatId) {
     return;
   }
+  const messageThreadId = telegramUpdateMessageThreadId(update);
   try {
     for (const chunk of chunkTelegramMessage(formatTelegramUpdateFailure(message), descriptor.messageDefaults.messageChunkChars)) {
-      await client.sendMessage(chatId, chunk);
+      await client.sendMessage(chatId, chunk, telegramThreadOptions(messageThreadId));
     }
   } catch {
     // Failure notifications must not keep an update alive forever.
@@ -1607,15 +1790,20 @@ function previewTelegramFailure(message: string): string {
   return normalized.length <= 700 ? normalized : `${normalized.slice(0, 700)}... [truncated]`;
 }
 
-function telegramReplyOptions(input: string | { namespace: string }, output: string, descriptor: GatewayConnectorDescriptor = telegramGatewayConnectorDescriptor): { replyMarkup?: unknown } {
+function telegramReplyOptions(
+  input: string | { namespace: string },
+  output: string,
+  descriptor: GatewayConnectorDescriptor = telegramGatewayConnectorDescriptor,
+  messageThreadId?: number | string
+): TelegramSendOptions {
   const isReview = typeof input === "string" ? input.startsWith("/review") : input.namespace === "review";
   if (!isReview) {
-    return {};
+    return telegramThreadOptions(messageThreadId);
   }
   const firstItem = output.match(/^\s*(?:1\.|\s*1\s+)\s+(memory|skill)\s+([a-zA-Z0-9]{8})/m);
   const reviewNamespace = descriptor.callbackNamespaces.review;
   if (!reviewNamespace) {
-    return {};
+    return telegramThreadOptions(messageThreadId);
   }
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [
     [
@@ -1634,7 +1822,7 @@ function telegramReplyOptions(input: string | { namespace: string }, output: str
       { text: "Promote preview", callback_data: buildGatewayCallbackData("review", "promote", id) }
     ]);
   }
-  return { replyMarkup: { inline_keyboard: buttons } };
+  return { ...telegramThreadOptions(messageThreadId), replyMarkup: { inline_keyboard: buttons } };
 }
 
 async function appendTelegramLog(workspaceRoot: string, event: string, data: Record<string, unknown>): Promise<void> {

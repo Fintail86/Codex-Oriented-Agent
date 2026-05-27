@@ -173,6 +173,26 @@ describe("model parsing and run loop", () => {
     expect(() => parseModelOutput('{"type":"final"}')).toThrow();
   });
 
+  it("defaults optional memory candidate metadata without rejecting final answers", () => {
+    const output = parseModelOutput(JSON.stringify({
+      type: "final",
+      content: "좋아, 앞으로 쿠미라고 부르면 돼.",
+      memoryCandidates: [{
+        tier: "agent",
+        ownerId: "cosia-agent",
+        content: "사용자는 이 에이전트를 앞으로 '쿠미'라고 부르기로 했다."
+      }]
+    }));
+    expect(output.step).toMatchObject({
+      type: "final",
+      memoryCandidates: [{
+        kind: "note",
+        importance: 3,
+        confidence: 0.7
+      }]
+    });
+  });
+
   it("formats structured retry instructions with parse error and output preview", () => {
     const instruction = modelInstructionForRetry(new Error("Unexpected token"), "not-json");
     expect(instruction).toContain("You returned invalid JSON. Fix the error below and return ONLY valid AgentStep JSON.");

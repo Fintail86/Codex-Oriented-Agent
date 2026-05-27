@@ -60,6 +60,7 @@ import {
   secretsPrivatePath,
   argvPlanSlotNames,
   buildCliArgv,
+  translateCommandTags,
   runtimeCommandDefinitions,
   setCosiaCliExecutorForTests,
   CodexAmendmentLedger,
@@ -166,7 +167,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.66.0");
+    expect(emptyReport.version).toBe("0.68.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -330,6 +331,25 @@ describe("status and listing", () => {
     expect((await memory.getCandidate(candidate.id)).record?.status).toBe("pending");
   });
 
+  it("translates multilingual command words into canonical runtime command tags", () => {
+    expect(translateCommandTags("메모리 승격 대상 있어?").tags).toEqual(expect.arrayContaining(["memory", "candidate"]));
+    expect(translateCommandTags("메모리가 상태가 어때?").tags).toEqual(expect.arrayContaining(["memory", "status"]));
+    expect(translateCommandTags("권한으로 확인").tags).toEqual(expect.arrayContaining(["auth", "check"]));
+    expect(translateCommandTags("게이트웨이 권한 확인").tags).toEqual(expect.arrayContaining(["gateway", "auth", "check"]));
+    expect(translateCommandTags("런타임 버전 뭐야?").tags).toEqual(expect.arrayContaining(["runtime", "version"]));
+    expect(translateCommandTags("provider status").tags).toEqual(expect.arrayContaining(["provider", "status"]));
+    expect(translateCommandTags("memory 상태").tags).toEqual(expect.arrayContaining(["memory", "status"]));
+
+    const weakStatus = translateCommandTags("살아?");
+    expect(weakStatus.tags).toEqual(["status"]);
+    expect(weakStatus.matches.every((match) => match.weight <= 0.35)).toBe(true);
+
+    const gatewayStatus = translateCommandTags("게이트웨이 살아?");
+    expect(gatewayStatus.tags).toEqual(expect.arrayContaining(["gateway", "status"]));
+    expect(gatewayStatus.matches.some((match) => match.tag === "gateway" && match.weight === 1)).toBe(true);
+    expect(gatewayStatus.matches.some((match) => match.tag === "status" && match.weight <= 0.35)).toBe(true);
+  });
+
   it("exposes a model-facing COSIA command lookup tool without executing commands", async () => {
     const root = await initializedWorkspace();
 
@@ -351,11 +371,16 @@ describe("status and listing", () => {
         cliDisplay: string;
         modelCallable: boolean;
         modelExecutionMode: string;
+        tags: string[];
+        matchReason: string;
         modelToolHint?: { toolId: string; args?: Record<string, unknown> };
       }>;
+      tagMatches: Array<{ alias: string; tag: string; locale: string; weight: number }>;
     };
     expect(parsed.status).toBe("ok");
-    expect(parsed.detectedTags).toContain("메모리");
+    expect(parsed.detectedTags).toEqual(expect.arrayContaining(["memory", "candidate"]));
+    expect(parsed.detectedTags.some((tag) => /[가-힣]/.test(tag))).toBe(false);
+    expect(parsed.tagMatches.some((match) => match.alias === "메모리" && match.tag === "memory")).toBe(true);
     const review = parsed.candidates.find((candidate) => candidate.commandId === "review.memory");
     expect(review).toMatchObject({
       cliDisplay: "cosia review --memory",
@@ -378,7 +403,7 @@ describe("status and listing", () => {
       detectedTags: string[];
       candidates: Array<{ commandId: string; cliDisplay: string; safety: string }>;
     };
-    expect(approvalParsed.detectedTags).toContain("승인");
+    expect(approvalParsed.detectedTags).toContain("approve");
     expect(approvalParsed.candidates[0]).toMatchObject({
       commandId: "memory.candidate.promote",
       cliDisplay: "cosia memory candidate promote <candidate-id>",
@@ -407,6 +432,21 @@ describe("status and listing", () => {
       commandId: "memory.candidate.promote",
       privateMasterCliOverrideAvailable: true
     });
+
+    const version = await new ToolRegistry().execute("cosia_cli_command_lookup", {
+      input: "런타임 버전 뭐야?",
+      limit: 5
+    }, {
+      workspaceRoot: root,
+      allowedTools: ["cosia_cli_command_lookup"],
+      sourceChannel: "cli"
+    });
+    const versionParsed = JSON.parse(version.content) as {
+      detectedTags: string[];
+      candidates: Array<{ commandId: string }>;
+    };
+    expect(versionParsed.detectedTags).toEqual(expect.arrayContaining(["runtime", "version"]));
+    expect(versionParsed.candidates[0]).toMatchObject({ commandId: "status.show" });
   });
 
   it("catalogs representative CLI commands with typed argv plans", () => {
@@ -440,6 +480,7 @@ describe("status and listing", () => {
         expect(declaredArgs.has(slotName)).toBe(true);
       }
       expect((definition.tags ?? []).length).toBeGreaterThan(0);
+      expect((definition.tags ?? []).some((tag) => /[가-힣]/.test(tag))).toBe(false);
     }
 
     const catalogPaths = new Set(runtimeCommandDefinitions.map((definition) => definition.commandPath.join(" ")));
@@ -1383,7 +1424,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain(`Mock response for ${session.id}.`);
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${session.id}.`)));
     expect(sent.some((message) => message.text.includes("작업을 시작했어."))).toBe(false);
     expect(await new RunJobLedger(root).list({ includeTerminal: true })).toEqual([]);
   });
@@ -1406,10 +1447,10 @@ describe("status and listing", () => {
         }
       }
     };
-    const sent: Array<{ chatId: string; text: string }> = [];
+    const sent: Array<{ chatId: string; text: string; options?: { replyMarkup?: unknown; messageThreadId?: number | string } }> = [];
     const sender = {
-      sendMessage: async (chatId: string, text: string) => {
-        sent.push({ chatId, text });
+      sendMessage: async (chatId: string, text: string, options?: { replyMarkup?: unknown; messageThreadId?: number | string }) => {
+        sent.push({ chatId, text, options });
       }
     };
     let state = await processTelegramUpdate(root, gatewayPolicy, sender, {
@@ -1432,8 +1473,9 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
-    const jobId = sent.at(-1)?.text.match(/Job: (job_[a-f0-9]+)/)?.[1];
+    await waitForCondition(() => sent.some((message) => message.text.includes("작업을 시작했어.")));
+    const jobMessage = sent.find((message) => message.text.includes("작업을 시작했어."));
+    const jobId = jobMessage?.text.match(/Job: (job_[a-f0-9]+)/)?.[1];
     expect(jobId).toBeTruthy();
 
     state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
@@ -1471,10 +1513,10 @@ describe("status and listing", () => {
         }
       }
     };
-    const sent: Array<{ chatId: string; text: string }> = [];
+    const sent: Array<{ chatId: string; text: string; options?: { replyMarkup?: unknown; messageThreadId?: number | string } }> = [];
     const sender = {
-      sendMessage: async (chatId: string, text: string) => {
-        sent.push({ chatId, text });
+      sendMessage: async (chatId: string, text: string, options?: { replyMarkup?: unknown; messageThreadId?: number | string }) => {
+        sent.push({ chatId, text, options });
       }
     };
 
@@ -1499,9 +1541,219 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain(`Mock response for ${session.id}.`);
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${session.id}.`)));
     expect(sent.some((message) => message.text.includes("작업을 시작했어."))).toBe(false);
     expect(await new RunJobLedger(root).list({ includeTerminal: true })).toEqual([]);
+  });
+
+  it("runs different Telegram sessions concurrently without blocking the update intake loop", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const slowSession = await sessions.createSession("cosia-agent", "Slow session");
+    const fastSession = await sessions.createSession("cosia-agent", "Fast session");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123", "456"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string; options?: { messageThreadId?: number | string } }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string, options?: { messageThreadId?: number | string }) => {
+        sent.push({ chatId, text, options });
+      }
+    };
+    const state = {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: slowSession.id
+        },
+        "456": {
+          providerId: "mock",
+          activeSessionId: fastSession.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    };
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_SLOW_FINAL] slow"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent).toEqual([]);
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 456 },
+        from: { id: 42, username: "fox" },
+        text: "fast"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${fastSession.id}.`)));
+    expect(sent[0]?.chatId).toBe("456");
+    expect(sent[0]?.text).toContain(`Mock response for ${fastSession.id}.`);
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${slowSession.id}.`)));
+    expect(sent.some((message) => message.text.includes("작업을 시작했어."))).toBe(false);
+  });
+
+  it("keeps Telegram messages for the same session in FIFO order", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("cosia-agent", "FIFO session");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    const state = {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: session.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    };
+
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_SLOW_FINAL][MOCK_FINAL:first]"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_FINAL:second]"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    await waitForCondition(() => sent.length >= 2);
+    expect(sent[0]?.text).toContain("first");
+    expect(sent[1]?.text).toContain("second");
+  });
+
+  it("captures the target session when a Telegram turn is enqueued", async () => {
+    const root = await initializedWorkspace();
+    const sessions = new SessionManager(root);
+    const firstSession = await sessions.createSession("cosia-agent", "Captured session");
+    const secondSession = await sessions.createSession("cosia-agent", "Future session");
+    const policy = await new PolicyManager(root).loadPolicy();
+    const gatewayPolicy = {
+      ...policy,
+      connectors: {
+        telegram: {
+          ...policy.connectors.telegram,
+          enabled: true,
+          allowedChatIds: ["123"],
+          allowedUserIds: ["42"],
+          mutationUserIds: ["42"],
+          defaultProvider: "mock"
+        }
+      }
+    };
+    const sent: Array<{ chatId: string; text: string }> = [];
+    const sender = {
+      sendMessage: async (chatId: string, text: string) => {
+        sent.push({ chatId, text });
+      }
+    };
+    let state: Awaited<ReturnType<typeof loadTelegramGatewayState>> = {
+      chats: {
+        "123": {
+          providerId: "mock",
+          activeSessionId: firstSession.id
+        }
+      },
+      failureCount: 0,
+      updatedAt: new Date().toISOString()
+    };
+
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 1,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "[MOCK_SLOW_FINAL] first turn"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 2,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: `/use ${secondSession.id}`
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(state.chats["123"]?.activeSessionId).toBe(secondSession.id);
+    state = await processTelegramUpdate(root, gatewayPolicy, sender, state, {
+      update_id: 3,
+      message: {
+        chat: { id: 123 },
+        from: { id: 42, username: "fox" },
+        text: "second turn"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${secondSession.id}.`)));
+    await waitForCondition(() => sent.some((message) => message.text.includes(`Mock response for ${firstSession.id}.`)));
+    expect(sent.find((message) => message.text.includes(`Mock response for ${firstSession.id}.`))).toBeTruthy();
+    expect(sent.find((message) => message.text.includes(`Mock response for ${secondSession.id}.`))).toBeTruthy();
   });
 
   it("keeps Telegram groups read-only by default and requires user-level mutation authorization", async () => {
@@ -1525,10 +1777,10 @@ describe("status and listing", () => {
         }
       }
     };
-    const sent: Array<{ chatId: string; text: string }> = [];
+    const sent: Array<{ chatId: string; text: string; options?: { replyMarkup?: unknown; messageThreadId?: number | string } }> = [];
     const sender = {
-      sendMessage: async (chatId: string, text: string) => {
-        sent.push({ chatId, text });
+      sendMessage: async (chatId: string, text: string, options?: { replyMarkup?: unknown; messageThreadId?: number | string }) => {
+        sent.push({ chatId, text, options });
       }
     };
 
@@ -1563,7 +1815,22 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.66.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.68.0");
+
+    state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, state, {
+      update_id: 19,
+      message: {
+        chat: { id: -100, type: "supergroup" },
+        message_thread_id: 777,
+        from: { id: 42, username: "fox" },
+        text: "/status"
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("COSIA 0.68.0");
+    expect(sent.at(-1)?.options?.messageThreadId).toBe(777);
 
     const masterMentionPolicy = {
       ...readOnlyGroupPolicy,
@@ -1593,6 +1860,32 @@ describe("status and listing", () => {
         chat: { id: -100, type: "group" },
         from: { id: 42, username: "fox" },
         text: `/new@${TELEGRAM_FIXTURE_BOT_USERNAME} Suffixed group session`
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Created and selected session");
+
+    state = await processTelegramUpdate(root, masterMentionPolicy, sender, state, {
+      update_id: 22,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: `@${TELEGRAM_FIXTURE_BOT_USERNAME}/new Mention-prefix group session`
+      }
+    }, {
+      providerId: "mock",
+      owner: "test"
+    });
+    expect(sent.at(-1)?.text).toContain("Created and selected session");
+
+    state = await processTelegramUpdate(root, masterMentionPolicy, sender, state, {
+      update_id: 23,
+      message: {
+        chat: { id: -100, type: "group" },
+        from: { id: 42, username: "fox" },
+        text: `@${TELEGRAM_FIXTURE_BOT_USERNAME} new Bare mentioned group session`
       }
     }, {
       providerId: "mock",
@@ -1689,7 +1982,6 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
     await waitForCondition(() => sent.some((message) => message.text.includes("[PREVIEW] File overwrite requires approval.")));
     state = await loadTelegramGatewayState(root);
     expect(await readFile(stylePath, "utf8")).toBe(originalStyle);
@@ -1922,7 +2214,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.66.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.68.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 
@@ -2047,7 +2339,8 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("Should I start the tool creation routine?");
+    await waitForCondition(() => sent.some((message) => message.text.includes("Should I start the tool creation routine?")));
+    state = await loadTelegramGatewayState(root);
     expect(state.chats["123"]?.pendingToolGrowthRequest?.capabilityName).toBe("memory_promotion_queue_read");
     expect(state.chats["123"]?.currentToolGrowthRoutineId).toBeUndefined();
 
@@ -2063,12 +2356,15 @@ describe("status and listing", () => {
       owner: "test"
     });
 
+    await waitForCondition(async () => Boolean((await loadTelegramGatewayState(root)).chats["123"]?.currentToolGrowthRoutineId));
+    state = await loadTelegramGatewayState(root);
     const routineId = state.chats["123"]?.currentToolGrowthRoutineId;
     expect(routineId).toMatch(/^grow_/);
     expect(state.chats["123"]?.pendingToolGrowthRequest).toBeUndefined();
-    expect(sent.at(-1)?.text).toContain("좋아. 방금 제안한 도구 생성 루틴을 시작할게.");
-    expect(sent.at(-1)?.text).toContain(`Tool growth routine created: ${routineId}`);
-    expect(sent.at(-1)?.text).toContain("read-only memory promotion queue inspector");
+    const routineMessage = sent.find((message) => message.text.includes(`Tool growth routine created: ${routineId}`))?.text;
+    expect(routineMessage).toContain("좋아. 방금 제안한 도구 생성 루틴을 시작할게.");
+    expect(routineMessage).toContain(`Tool growth routine created: ${routineId}`);
+    expect(routineMessage).toContain("read-only memory promotion queue inspector");
   });
 
   it("turns Telegram write_file overwrite denials into explicit pending apply previews", async () => {
@@ -2121,7 +2417,6 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
     await waitForCondition(() => sent.some((message) => message.text.includes("[PREVIEW] File overwrite requires approval.")));
     state = await loadTelegramGatewayState(root);
     expect(sent.at(-1)?.text).toContain("[PREVIEW] File overwrite requires approval.");
@@ -2210,7 +2505,6 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("작업을 시작했어.");
     await waitForCondition(() => sent.some((message) => message.text.includes("[PREVIEW] Codex amendment requires approval.")));
     state = await loadTelegramGatewayState(root);
     expect(sent.at(-1)?.text).toContain("[PREVIEW] Codex amendment requires approval.");
@@ -2386,6 +2680,7 @@ describe("status and listing", () => {
           result: [{
             update_id: 11,
             message: {
+              message_thread_id: 777,
               chat: { id: 123 },
               from: { id: 42, username: "fox" },
               text: "/status"
@@ -2421,7 +2716,13 @@ describe("status and listing", () => {
     const chatActionRequest = requests.find((request) => request.url.endsWith("/sendChatAction"));
     expect(chatActionRequest?.body).toMatchObject({
       chat_id: "123",
+      message_thread_id: 777,
       action: "typing"
+    });
+    const sendMessageRequest = requests.find((request) => request.url.endsWith("/sendMessage"));
+    expect(sendMessageRequest?.body).toMatchObject({
+      chat_id: "123",
+      message_thread_id: 777
     });
     const state = await loadTelegramGatewayState(root);
     expect(state.nextOffset).toBe(12);

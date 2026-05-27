@@ -7,8 +7,8 @@ import { z } from "zod";
 import { buildCliArgv } from "./cli_argv_planner.js";
 import { gatewayRoleAtLeast } from "./gateway_auth.js";
 import { detectSecrets } from "./risk_classifier.js";
+import { translateCommandTags } from "./command_tag_translator.js";
 import {
-  detectRuntimeCommandTags,
   retrieveRuntimeCommandTagMatches,
   runtimeCommandDefinitionById,
   runtimeCommandDefinitions,
@@ -64,7 +64,8 @@ export async function executeCosiaCliCommandLookup(args: unknown, ctx: ToolConte
   try {
     const parsed = lookupArgsSchema.parse(args);
     const limit = parsed.limit ?? 12;
-    const detectedTags = parsed.input ? detectRuntimeCommandTags(parsed.input) : [];
+    const tagTranslation = parsed.input ? translateCommandTags(parsed.input) : undefined;
+    const detectedTags = tagTranslation?.tags ?? [];
     const candidates = lookupDefinitions(parsed, limit, ctx);
     return {
       ok: true,
@@ -73,6 +74,7 @@ export async function executeCosiaCliCommandLookup(args: unknown, ctx: ToolConte
         input: parsed.input,
         commandId: parsed.commandId,
         detectedTags,
+        tagMatches: tagTranslation?.matches ?? [],
         candidates
       })
     };

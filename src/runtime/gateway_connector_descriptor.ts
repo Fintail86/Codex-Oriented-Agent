@@ -1,5 +1,6 @@
 import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 import type { GatewayCommandSafety } from "./gateway_command_registry.js";
+import { normalizeGatewayBareCommand } from "./gateway_command_registry.js";
 
 export type GatewayCallbackActionDefinition = {
   minRole: GatewayRole;
@@ -45,6 +46,10 @@ export const telegramGatewayConnectorDescriptor: GatewayConnectorDescriptor = {
     const addressedSlash = trimmed.match(/^@[A-Za-z0-9_]{5,32}\s+([/#].*)$/);
     if (addressedSlash) {
       return addressedSlash[1].trim();
+    }
+    const addressedBare = trimmed.match(/^@[A-Za-z0-9_]{5,32}(?:\/|\s+)(.+)$/);
+    if (addressedBare) {
+      return normalizeGatewayBareCommand(addressedBare[1]) ?? trimmed;
     }
     return trimmed.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]{5,32}\b/, "$1");
   },

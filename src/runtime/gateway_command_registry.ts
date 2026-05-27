@@ -85,6 +85,15 @@ export function findGatewayCommandDefinition(input: string): GatewayCommandDefin
   return gatewayCommandDefinitions.find((definition) => gatewayCommandMatches(definition, normalized));
 }
 
+export function normalizeGatewayBareCommand(input: string): string | undefined {
+  const normalized = input.trim();
+  if (!normalized || normalized.startsWith("/") || normalized.startsWith("#")) {
+    return undefined;
+  }
+  const candidate = `/${normalized}`;
+  return findGatewayCommandDefinition(candidate) ? candidate : undefined;
+}
+
 export function gatewayMinimumRoleForInput(input: string): GatewayRole {
   const normalized = input.trim();
   if (!normalized.startsWith("/")) {

@@ -23,6 +23,7 @@ import { applyPendingApproval, cancelPendingApproval, formatPendingApprovals, ge
 import { normalizePolicy, PolicyManager, policyConfigSchema } from "../src/runtime/policy_manager.js";
 import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfigShow, runtimeLocalPath, runtimePrivatePath, secretsPrivatePath } from "../src/runtime/runtime_config.js";
 import { argvPlanSlotNames, buildCliArgv } from "../src/runtime/cli_argv_planner.js";
+import { translateCommandTags } from "../src/runtime/command_tag_translator.js";
 import { runtimeCommandDefinitions } from "../src/runtime/runtime_command_catalog.js";
 import { setCosiaCliExecutorForTests } from "../src/runtime/runtime_command_model_tools.js";
 import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
@@ -242,6 +243,7 @@ export {
   secretsPrivatePath,
   argvPlanSlotNames,
   buildCliArgv,
+  translateCommandTags,
   runtimeCommandDefinitions,
   setCosiaCliExecutorForTests,
   CodexAmendmentLedger,

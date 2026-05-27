@@ -1,4 +1,4 @@
-# COSIA v0.66.0
+# COSIA v0.68.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.66.0 removes stale runtime compatibility paths for legacy sessions, capability scans, Telegram connector locks, and runtime.local config reads.
+v0.68.0 adds a gateway multi-session scheduler so one active session run no longer blocks other gateway sessions.
 
 ## Requirements
 
@@ -747,6 +747,8 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.68.0: Gateway session runs are scheduled per session so different gateway sessions can respond concurrently.
+- v0.67.0: Command lookup now translates Korean/English aliases into canonical English tags before selecting catalog candidates.
 - v0.66.0: Legacy compatibility reads are removed for old session `agentId`, v0.29 capability facts, Telegram connector process locks, and runtime.local config.
 - v0.65.0: Deprecated aliases are removed: `agent-runtime`, `--model-provider`, provider-id debug aliases, and legacy command trigger pack CLI surfaces.
 - v0.64.0: Runtime domain split begins with memory text/search helpers extracted from `memory_manager`.

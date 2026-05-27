@@ -106,10 +106,10 @@ const nullableOptional = <T extends z.ZodType>(schema: T) => z.preprocess((value
 export const memoryCandidateSchema = z.object({
   tier: nullableOptional(memoryTierSchema),
   ownerId: nullableOptional(z.string()),
-  kind: z.string().min(1),
+  kind: z.string().min(1).default("note"),
   content: z.string().min(1),
-  importance: z.number().int().min(1).max(5),
-  confidence: z.number().min(0).max(1)
+  importance: z.number().int().min(1).max(5).default(3),
+  confidence: z.number().min(0).max(1).default(0.7)
 });
 
 export type MemoryCandidate = z.infer<typeof memoryCandidateSchema>;

@@ -26,6 +26,7 @@ export type RunJobSource = {
   channel: "telegram" | "repl" | "cli";
   chatId?: string;
   chatType?: string;
+  messageThreadId?: number | string;
   userId?: string;
   username?: string;
   firstName?: string;

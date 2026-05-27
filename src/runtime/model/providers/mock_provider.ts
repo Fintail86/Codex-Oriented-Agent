@@ -16,6 +16,16 @@ export class MockProvider implements ModelProvider {
     if (input.prompt.includes("[MOCK_SLOW_FINAL]")) {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
+    const mockFinalMatches = [...input.prompt.matchAll(/\[MOCK_FINAL:([^\]]+)\]/g)];
+    const mockFinal = mockFinalMatches.at(-1);
+    if (mockFinal) {
+      return parseModelOutput(JSON.stringify({
+        type: "final",
+        content: mockFinal[1],
+        memoryCandidates: [],
+        skillCandidates: []
+      }));
+    }
     if (input.prompt.includes("# BEGIN PENDING TOOL GROWTH REQUEST")) {
       return parseModelOutput(JSON.stringify({
         type: "final",
