@@ -6,6 +6,7 @@ import { loadRuntimeConfig, type RuntimeConfig } from "./runtime_config.js";
 import { SkillManager, type SkillSelectionManifest } from "./skill_manager.js";
 import { listEffectiveActiveModelToolIds } from "./tool_acquisition.js";
 import { isBundledToolId, toolCatalog } from "./tool_catalog.js";
+import type { ToolLoopBudgetSnapshot } from "./tool_budget.js";
 import type { AgentManifest, SessionMetadata, ToolName } from "./types.js";
 import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 
@@ -20,8 +21,8 @@ type PromptInput = {
   requiresFileRead?: boolean;
   hasReadFile?: boolean;
   policy?: PolicyConfig;
-  remainingToolCalls?: number;
   forceFinal?: boolean;
+  toolBudget?: ToolLoopBudgetSnapshot;
   staticBlocks?: PromptBlock[];
   runId?: string;
   modelStep?: number;
@@ -248,11 +249,7 @@ The current request asks to inspect actual files. search_files is only for findi
     : "";
   const loopControlText = `# TOOL LOOP CONTROL
 
-Remaining executable tool calls: ${input.remainingToolCalls ?? 5}.${
-    input.forceFinal
-      ? "\n\nTool call budget is exhausted. You must return a final answer now using the available tool results. Do not return a tool_call."
-      : ""
-  }`;
+${toolBudgetText(input.toolBudget, input.forceFinal)}`;
 
   const blocks: PromptBlock[] = [
     {
@@ -405,7 +402,7 @@ If cosia_cli_command_lookup returns a modelCallable command with modelExecutionM
 
 If GATEWAY COMMAND CONTEXT says "Private master direct chat: true", the user is the registered master in a 1:1 gateway chat where chat id and user id match. Treat this as the remote equivalent of the local CLI owner surface. In that specific context, cosia_runtime_command may execute any cataloged fixed commandId when the user explicitly asks for that action, including review/apply/config/gateway commands. The runtime still rejects CLI strings, slash strings, hash strings, arbitrary argv, unknown args, and secret-like dynamic args. Do not invent shell commands or sensitive arguments; when a command needs exact arguments, ask for them.
 
-Do not claim that the tool call budget is exhausted unless the TOOL LOOP CONTROL block explicitly says the budget is exhausted or a current TOOL RESULTS block contains a runtime rejection saying the budget is exhausted. A new user message normally starts with a fresh tool budget. If the user supplies missing structured args for a modelCallable read-only command, call the command instead of saying you cannot retry because of a previous turn's budget.
+Do not tell the user that an internal tool budget prevented an action. Tool budgets are runtime loop controls, not user-facing blockers. If an observation tool is rejected because observation budget is exhausted, do not retry observation tools. Use already gathered information to call an action tool when action budget remains, return final, or ask only for genuinely missing required input. A new user message normally starts with fresh lane budgets.
 
 If lookup returns only non-callable or safety-blocked command surfaces, tell the user the exact slash or CLI command shown by cliDisplay. Do not claim you ran it. If lookup and active tools cannot answer the request, name the missing read-only capability, explain what it would inspect and what it must not mutate, then ask for permission to start the guided tool-growth routine. Include a toolGrowthRequest object in the final AgentStep so the runtime can remember the proposed tool-growth request for the user's next approval message.
 
@@ -445,7 +442,38 @@ function activeToolStateText(allowedTools: string[]): string {
 Available tools for this run: ${allowedTools.join(", ") || "none"}
 Tool details:
 ${details.join("\n") || "- none"}
-Maximum tool loop depth: 5`;
+Tool loop usage is controlled by the lane budgets in TOOL LOOP CONTROL.`;
+}
+
+function toolBudgetText(budget: ToolLoopBudgetSnapshot | undefined, forceFinal?: boolean): string {
+  if (!budget) {
+    return [
+      "Tool budget lanes are active.",
+      "Observation, action, repair observation, verification, and total hard cap are tracked separately.",
+      forceFinal ? "Total tool hard cap is exhausted. Return a final answer now using the available tool results. Do not return a tool_call." : ""
+    ].filter(Boolean).join("\n");
+  }
+  const lines = [
+    "Tool budget lanes:",
+    `- observation: ${budget.observationRemaining}`,
+    `- action: ${budget.actionRemaining}`,
+    `- repair_observation: ${budget.repairObservationOpen ? budget.repairObservationRemaining : 0} (${budget.repairObservationOpen ? "open" : "closed"})`,
+    `- verification: ${budget.verificationOpen ? budget.verificationRemaining : 0} (${budget.verificationOpen ? "open" : "closed"})`,
+    `- total_hard_cap: ${budget.totalHardCapRemaining}`,
+    "",
+    "Rules:",
+    "- Observation tools include read_file, search_files, lookup/read-only command tools.",
+    "- Action tools include write_file, mutation/preview runtime commands, and shell approval previews.",
+    "- Observation budget exhaustion is not a reason to ask the user. If action budget remains, use already gathered information to take the requested action or return final.",
+    "- If observation is exhausted and repair/verification is closed, further observation tool calls will be rejected. Valid choices are action or final answer.",
+    "- Never tell the user that an internal tool budget is the reason a requested action was not attempted."
+  ];
+  if (budget.totalHardCapExhausted || forceFinal) {
+    lines.push("", "Total tool hard cap is exhausted. Return a final answer now using the available tool results. Do not return a tool_call.");
+  } else if (budget.observationExhausted) {
+    lines.push("", "Observation budget is exhausted. Do not call more observation tools unless repair_observation or verification is open. Choose an action tool if the requested action is ready, otherwise return final or ask only for genuinely missing required input.");
+  }
+  return lines.join("\n");
 }
 
 function gatewayCommandContextText(input: PromptInput): string {

@@ -61,6 +61,9 @@ import {
   argvPlanSlotNames,
   buildCliArgv,
   runtimeCommandDefinitions,
+  classifyToolBudgetCall,
+  consumeToolBudget,
+  createToolLoopBudget,
   setCosiaCliExecutorForTests,
   CodexAmendmentLedger,
   buildPrompt,
@@ -739,6 +742,109 @@ describe("model parsing and run loop", () => {
 
     expect(content).toBe("final after tools");
     expect(calls).toBe(6);
+  });
+
+  it("preserves action budget after observation budget is exhausted", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Budget lanes preserve action");
+    const events: string[] = [];
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async () => {
+        calls += 1;
+        if (calls <= 6) {
+          return parseModelOutput('{"type":"tool_call","tool":"read_file","args":{"path":"codex/RULES.md"}}');
+        }
+        if (calls === 7) {
+          return parseModelOutput('{"type":"tool_call","tool":"write_file","args":{"path":"notes.txt","content":"action survived observation exhaustion"}}');
+        }
+        return parseModelOutput('{"type":"final","content":"final after action","memoryCandidates":[]}');
+      }
+    };
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "Read too much, then write.",
+      provider,
+      onEvent: (message) => events.push(message)
+    });
+
+    expect(content).toBe("final after action");
+    expect(calls).toBe(8);
+    expect(events).toContain("tool_call rejected because observation_budget_exhausted");
+    expect(await readFile(join(root, "notes.txt"), "utf8")).toBe("action survived observation exhaustion");
+  });
+
+  it("classifies cosia_runtime_command budget lanes from command metadata", async () => {
+    const root = await initializedWorkspace();
+    expect(classifyToolBudgetCall(root, "cosia_runtime_command", {
+      commandId: "review.list",
+      args: {}
+    })).toMatchObject({
+      lane: "observation",
+      runtimeCommandId: "review.list",
+      runtimeCommandSafety: "read_only"
+    });
+    expect(classifyToolBudgetCall(root, "cosia_runtime_command", {
+      commandId: "review.discard",
+      args: { id: "abc12345" }
+    })).toMatchObject({
+      lane: "action",
+      runtimeCommandId: "review.discard",
+      runtimeCommandSafety: "mutation"
+    });
+  });
+
+  it("uses total hard cap as the top-level tool budget brake", async () => {
+    const budget = createToolLoopBudget();
+    budget.totalHardCapRemaining = 0;
+    const decision = consumeToolBudget(budget, {
+      lane: "observation",
+      reason: "test observation",
+      toolName: "read_file"
+    });
+    expect(decision).toMatchObject({
+      allowed: false,
+      reason: "total_hard_cap_exhausted"
+    });
+    expect(budget.observationRemaining).toBeGreaterThan(0);
+  });
+
+  it("does not expose observation budget exhaustion as the final answer", async () => {
+    const root = await initializedWorkspace();
+    const agents = new AgentManager(root);
+    await agents.createAgent("architect-agent", "architect");
+    const sessions = new SessionManager(root);
+    const session = await sessions.createSession("architect-agent", "Budget rejection is internal");
+    let calls = 0;
+    const provider: ModelProvider = {
+      id: "test",
+      checkAuth: async () => ({ ok: true, message: "ok" }),
+      complete: async (input) => {
+        calls += 1;
+        if (calls <= 6) {
+          return parseModelOutput('{"type":"tool_call","tool":"search_files","args":{"query":"COSIA"}}');
+        }
+        expect(input.prompt).toContain("observation budget is exhausted");
+        return parseModelOutput('{"type":"final","content":"I will stop searching and answer from available results.","memoryCandidates":[]}');
+      }
+    };
+
+    const content = await runSession(root, {
+      sessionId: session.id,
+      prompt: "Search until observation budget is exhausted.",
+      provider
+    });
+
+    expect(content).not.toContain("tool budget");
+    expect(content).not.toContain("budget is exhausted");
+    expect(content).toContain("available results");
+    expect(calls).toBe(7);
   });
 
   it("requires read_file before final when the prompt asks to inspect actual files", async () => {

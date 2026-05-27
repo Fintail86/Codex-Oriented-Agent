@@ -1,4 +1,4 @@
-# COSIA v0.74.0
+# COSIA v0.75.0
 
 **Codex-Oriented Self-Improving Agent Runtime**.
 
@@ -6,7 +6,7 @@ COSIA is a lightweight, provider-neutral agentic runtime guided by a user-amenda
 
 `Codex-Oriented` means COSIA is oriented around the workspace-owned `codex/` law and operating constitution. It does not mean COSIA is locked to the OpenAI Codex product or any single model provider. The model is a replaceable brain; COSIA owns the local runtime, memory, policy gates, connector state, approval evidence, and capability history.
 
-v0.74.0 completes the Gateway follow-up refactor with source-context cleanup, fixed pipeline stages, hardened scheduling, timing diagnostics, and queued-turn resume.
+v0.75.0 replaces the flat model tool-call budget with metadata-driven budget lanes so observation loops cannot consume the action budget needed for writes, previews, or other delegated changes.
 
 ## Requirements
 
@@ -747,6 +747,7 @@ Approved Shell Bridge is temporary. The long-term direction is documented in `Do
 
 ## Roadmap
 
+- v0.75.0: Model tool-call budgeting is split into observation/action/repair/verification lanes with a hard cap, preserving action budget after read/search exploration.
 - v0.74.0: Gateway queued session turns can resume after restart when safely persisted without secret-like content.
 - v0.73.0: Gateway turn timing diagnostics and centralized timeout policy are added without changing user-facing status output.
 - v0.72.0: Gateway scheduled turns become immutable connector-neutral snapshots with reply target and risk flags preserved.

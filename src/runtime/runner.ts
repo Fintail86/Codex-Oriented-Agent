@@ -13,6 +13,14 @@ import { appendPromptManifest, buildPromptBundle, type PromptBlock } from "./pro
 import { SelfImprovementGovernor } from "./self_improvement.js";
 import { SessionManager } from "./session_manager.js";
 import { SkillManager } from "./skill_manager.js";
+import {
+  classifyToolBudgetCall,
+  consumeToolBudget,
+  createToolLoopBudget,
+  defaultToolLoopBudget,
+  recordToolBudgetResult,
+  snapshotToolLoopBudget
+} from "./tool_budget.js";
 import { ToolRegistry } from "./tool_registry.js";
 import type { GatewayActor, GatewayRole } from "./gateway_auth_types.js";
 import type { AgentStep, CodexAmendmentApprovalRequest, ModelProvider, OverwriteApprovalRequest, ToolGrowthDecision, ToolGrowthRequest, ToolName } from "./types.js";
@@ -128,14 +136,13 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   let lastStep: AgentStep | undefined;
   let overwriteApprovalRequired = false;
   let codexAmendmentRequired = false;
-  const maxToolCalls = 5;
-  const maxModelAttempts = maxToolCalls + 2;
-  let toolCallCount = 0;
+  const toolBudget = createToolLoopBudget();
+  const maxModelAttempts = defaultToolLoopBudget.totalHardCap + 3;
 
   for (let depth = 0; depth < maxModelAttempts; depth += 1) {
     assertRunDeadline();
-    const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
-    const forceFinal = remainingToolCalls === 0;
+    const budgetSnapshot = snapshotToolLoopBudget(toolBudget);
+    const forceFinal = budgetSnapshot.totalHardCapExhausted;
     options.onEvent?.(`model step ${depth + 1}/${maxModelAttempts}`);
     const promptResult = await buildPromptBundle({
       workspaceRoot,
@@ -148,8 +155,8 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       requiresFileRead: requiresFileRead(options.prompt, policy),
       hasReadFile: toolNames.includes("read_file"),
       policy,
-      remainingToolCalls,
       forceFinal,
+      toolBudget: budgetSnapshot,
       staticBlocks: options.promptStaticBlocks,
       runId,
       modelStep: depth + 1,
@@ -234,10 +241,20 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       break;
     }
     if (forceFinal) {
-      options.onEvent?.("tool_call rejected because tool call budget is exhausted");
+      options.onEvent?.("tool_call rejected because total tool hard cap is exhausted");
       toolResults.push(
-        "Runtime rejection: tool call budget is exhausted. Return a final answer now using the available tool results. Do not call another tool."
+        "Runtime rejection: total tool hard cap is exhausted. Return a final answer now using the available tool results. Do not call another tool."
       );
+      continue;
+    }
+    const budgetClassification = classifyToolBudgetCall(workspaceRoot, output.step.tool, output.step.args);
+    const budgetDecision = consumeToolBudget(toolBudget, budgetClassification);
+    if (!budgetDecision.allowed) {
+      options.onEvent?.(`tool_call rejected because ${budgetDecision.reason}`);
+      toolResults.push(`${budgetDecision.message}
+Tool: ${output.step.tool}
+Budget lane: ${budgetClassification.lane}
+Budget reason: ${budgetClassification.reason}`);
       continue;
     }
     await options.onProgress?.({
@@ -266,7 +283,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
       },
       policyAudit: recordPolicyEvent
     });
-    toolCallCount += 1;
+    recordToolBudgetResult(toolBudget, budgetClassification, result);
     options.onEvent?.(`tool ${output.step.tool} ${result.ok ? "ok" : "failed"}`);
     toolNames.push(output.step.tool);
     const toolResultText = `Tool: ${output.step.tool}\nArgs: ${JSON.stringify(output.step.args)}\nOK: ${result.ok}\n${result.content}`;
@@ -288,7 +305,7 @@ export async function runSession(workspaceRoot: string, options: RunOptions): Pr
   }
 
   if (!finalContent) {
-    throw new Error(`Run did not produce a final answer after ${maxToolCalls} tool calls. Last step: ${JSON.stringify(lastStep)}`);
+    throw new Error(`Run did not produce a final answer after ${defaultToolLoopBudget.totalHardCap} budgeted tool attempts. Last step: ${JSON.stringify(lastStep)}`);
   }
 
   const writeFinalContext = async () => {

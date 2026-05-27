@@ -175,7 +175,7 @@ describe("status and listing", () => {
   it("reports status for empty and initialized workspaces", async () => {
     const empty = await workspace();
     const emptyReport = await getStatusReport(empty, "mock");
-    expect(emptyReport.version).toBe("0.74.0");
+    expect(emptyReport.version).toBe("0.75.0");
     expect(emptyReport.agentsCount).toBe(0);
     expect(emptyReport.sessionsCount).toBe(0);
     expect(emptyReport.providerOk).toBe(true);
@@ -2049,7 +2049,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.74.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.75.0");
 
     state = await processTelegramUpdate(root, readOnlyGroupPolicy, sender, state, {
       update_id: 19,
@@ -2063,7 +2063,7 @@ describe("status and listing", () => {
       providerId: "mock",
       owner: "test"
     });
-    expect(sent.at(-1)?.text).toContain("COSIA 0.74.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.75.0");
     expect(sent.at(-1)?.options?.messageThreadId).toBe(777);
 
     const masterMentionPolicy = {
@@ -2448,7 +2448,7 @@ describe("status and listing", () => {
       owner: "test"
     });
 
-    expect(sent.at(-1)?.text).toContain("COSIA 0.74.0");
+    expect(sent.at(-1)?.text).toContain("COSIA 0.75.0");
     expect(sent.at(-1)?.text).toContain("continuity:sessions");
   });
 

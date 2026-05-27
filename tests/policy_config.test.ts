@@ -807,7 +807,7 @@ describe("policy core", () => {
       "",
       "# BEGIN ACTIVE TOOL STATE",
       "Available tools for this run: read_file, write_file, search_files",
-      "Maximum tool loop depth: 5",
+      "Tool loop usage is controlled by the lane budgets in TOOL LOOP CONTROL.",
       "# END ACTIVE TOOL STATE",
       "",
       "# BEGIN REQUIRE-TOOLS MODE",
@@ -819,7 +819,10 @@ describe("policy core", () => {
       "# END FILE-READ REQUIREMENT",
       "",
       "# BEGIN TOOL LOOP CONTROL",
-      "Remaining executable tool calls: 5.",
+      "Tool budget lanes:",
+      "- observation: 5",
+      "- action: 2",
+      "- total_hard_cap: 12",
       "# END TOOL LOOP CONTROL",
       "",
       "# BEGIN CURRENT USER REQUEST",
@@ -838,14 +841,16 @@ describe("policy core", () => {
     expect(body.instructions).not.toContain("Available tools for this run");
     expect(body.instructions).not.toContain("This run is in require-tools mode");
     expect(body.instructions).not.toContain("The current request asks to inspect actual files.");
-    expect(body.instructions).not.toContain("Remaining executable tool calls");
+    expect(body.instructions).not.toContain("Tool budget lanes");
     expect(body.input).toHaveLength(2);
     expect(body.input[0].content[0].text).toContain("Prefer concise answers in this session.");
     expect(body.input[0].content[0].text).toContain("Prior context.");
     expect(body.input[0].content[0].text).toContain("Available tools for this run: read_file, write_file, search_files");
     expect(body.input[0].content[0].text).toContain("This run is in require-tools mode.");
     expect(body.input[0].content[0].text).toContain("The current request asks to inspect actual files.");
-    expect(body.input[0].content[0].text).toContain("Remaining executable tool calls: 5.");
+    expect(body.input[0].content[0].text).toContain("Tool budget lanes:");
+    expect(body.input[0].content[0].text).toContain("- observation: 5");
+    expect(body.input[0].content[0].text).toContain("- action: 2");
     expect(body.input[1].content[0].text).toBe("방금 맥락을 보고 Say ok.");
     const providerPromptDebug = await readFile(join(root, "sessions", "session-test", "debug", "LAST_PROVIDER_PROMPT.md"), "utf8");
     expect(providerPromptDebug).toContain("# LAST PROVIDER PROMPT");

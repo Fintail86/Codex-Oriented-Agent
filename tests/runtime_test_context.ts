@@ -25,6 +25,7 @@ import { buildRuntimeConfigMigration, deepMerge, formatConfigCheck, formatConfig
 import { argvPlanSlotNames, buildCliArgv } from "../src/runtime/cli_argv_planner.js";
 import { translateCommandTags } from "../src/runtime/command_tag_translator.js";
 import { runtimeCommandDefinitions } from "../src/runtime/runtime_command_catalog.js";
+import { classifyToolBudgetCall, consumeToolBudget, createToolLoopBudget } from "../src/runtime/tool_budget.js";
 import { setCosiaCliExecutorForTests } from "../src/runtime/runtime_command_model_tools.js";
 import { CodexAmendmentLedger } from "../src/runtime/codex_amendment.js";
 import { buildPrompt, buildPromptBundle } from "../src/runtime/prompt_builder.js";
@@ -249,6 +250,9 @@ export {
   buildCliArgv,
   translateCommandTags,
   runtimeCommandDefinitions,
+  classifyToolBudgetCall,
+  consumeToolBudget,
+  createToolLoopBudget,
   setCosiaCliExecutorForTests,
   CodexAmendmentLedger,
   buildPrompt,
