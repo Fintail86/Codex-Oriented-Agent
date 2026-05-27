@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { FetchLike } from "./model/providers/openai_compatible_provider.js";
@@ -230,6 +230,7 @@ export type TelegramSendOptions = {
 };
 
 const activeTelegramSessionWorkers = new Set<string>();
+const telegramStateWrites = new Map<string, Promise<void>>();
 
 class TelegramApiClient {
   private readonly fetchImpl: FetchLike;
@@ -1556,7 +1557,7 @@ export async function loadTelegramGatewayState(workspaceRoot: string): Promise<T
       updatedAt: new Date().toISOString()
     };
   }
-  const parsed = JSON.parse(await readFile(path, "utf8")) as TelegramGatewayState;
+  const parsed = await readTelegramGatewayStateJson(path);
   return {
     chats: parsed.chats ?? {},
     nextOffset: parsed.nextOffset,
@@ -1567,8 +1568,36 @@ export async function loadTelegramGatewayState(workspaceRoot: string): Promise<T
 }
 
 export async function saveTelegramGatewayState(workspaceRoot: string, state: TelegramGatewayState): Promise<void> {
-  await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
-  await writeFile(telegramStatePath(workspaceRoot), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const path = telegramStatePath(workspaceRoot);
+  const previous = telegramStateWrites.get(path) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(telegramGatewayDir(workspaceRoot), { recursive: true });
+      const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+      await rename(tempPath, path);
+    });
+  telegramStateWrites.set(path, next);
+  await next;
+}
+
+async function readTelegramGatewayStateJson(path: string): Promise<TelegramGatewayState> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const text = await readFile(path, "utf8");
+      if (!text.trim()) {
+        throw new SyntaxError("empty Telegram gateway state file");
+      }
+      return JSON.parse(text) as TelegramGatewayState;
+    } catch (error) {
+      lastError = error;
+      await delay(25);
+    }
+  }
+  const reason = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(`Telegram gateway state is not valid JSON. Run \`cosia gateway telegram reset-state --yes\` if this persists. Cause: ${reason}`);
 }
 
 export async function inspectTelegramGatewayState(workspaceRoot: string): Promise<TelegramStateInspection> {

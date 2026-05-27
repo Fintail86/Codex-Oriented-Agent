@@ -2826,6 +2826,15 @@ describe("status and listing", () => {
     expect(jobs).toEqual([]);
   });
 
+  it("reports recovery guidance instead of raw JSON parse errors for malformed Telegram gateway state", async () => {
+    const root = await initializedWorkspace();
+    await mkdir(join(root, ".cosia-gateway", "telegram"), { recursive: true });
+    await writeFile(join(root, ".cosia-gateway", "telegram", "state.json"), "", "utf8");
+
+    await expect(loadTelegramGatewayState(root)).rejects.toThrow("Telegram gateway state is not valid JSON");
+    await expect(loadTelegramGatewayState(root)).rejects.toThrow("cosia gateway telegram reset-state --yes");
+  });
+
   it("repairs and resets stale Telegram gateway state without connector settings", async () => {
     const root = await initializedWorkspace();
     await saveTelegramGatewayState(root, {
